@@ -143,6 +143,24 @@ class QueryProcessor:
             return self.extract_entities(text)
 
     # -------------------------
+    # Phrase Extraction (NEW)
+    # -------------------------
+
+    def extract_phrases(self, text: str) -> List[List[str]]:
+        """
+        Extract quoted phrases from text, return tokenized lists.
+        Example: 'query "Kevin Johnson" lives in "New York"' -> [["Kevin", "Johnson"], ["New", "York"]]
+        """
+        import re
+        quoted = re.findall(r'"([^"]*)"', text)
+        phrases = []
+        for phrase in quoted:
+            tokens = self.tokenize(phrase)
+            if tokens:
+                phrases.append(tokens)
+        return phrases
+
+    # -------------------------
     # Process Query
     # -------------------------
 
@@ -155,7 +173,7 @@ class QueryProcessor:
             use_llm: If True and LLM available, use LLM for entity extraction
 
         Returns:
-            QueryRecord with normalized text, tokens, keywords, entities
+            QueryRecord with normalized text, tokens, keywords, entities, and phrases
         """
         normalized = self.normalize(text)
         tokens = self.tokenize(normalized)
@@ -167,44 +185,40 @@ class QueryProcessor:
         else:
             entities = self.extract_entities(text)
 
-            
         attribute = None
-
         for canonical, cfg in ATTRIBUTE_MAP.items():
-
             for alias in cfg["aliases"]:
-
                 if alias in normalized:
-
                     attribute = canonical
                     break
-
             if attribute:
                 break
 
         subject = entities[0] if entities else None
 
+        # Extract quoted phrases
+        phrases = self.extract_phrases(text)
+
         metadata = {
-
             "use_llm": use_llm,
-
             "entity_count": len(entities),
-
             "subject": subject,
-
-            "attribute": attribute
-
+            "attribute": attribute,
+            "phrases": phrases,           # <-- added
         }
+
         debug(f"\n[QUERY PROCESSOR DEBUG]")
         debug(f"  Raw text: {text}")
         debug(f"  use_llm: {use_llm}")
         debug(f"  Entities extracted: {entities}")
+        debug(f"  Phrases extracted: {phrases}")
         debug(f"  Normalized: {normalized}")
         debug(f"  Tokens: {tokens[:10]}...")
         debug(f"  Keywords: {keywords[:10]}...")
         debug(f"  Subject: {subject}")
         debug(f"  Attribute: {attribute}")
         debug("-" * 40)
+
         return QueryRecord(
             text=text,
             normalized_text=normalized,
@@ -221,4 +235,3 @@ class QueryProcessor:
 
     def __repr__(self) -> str:
         return f"QueryProcessor(llm={'available' if self.llm else 'None'})"
-
