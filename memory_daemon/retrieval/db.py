@@ -34,84 +34,52 @@ class MemoryDB:
     # -------------------------
 
     def _init(self):
-
         with self.conn:
-
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS memories (
-
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                     text TEXT NOT NULL,
-
                     normalized_text TEXT,
-
                     tokens TEXT,
-
                     token_count INTEGER DEFAULT 0,
-
                     memory_type TEXT,
-
                     metadata TEXT,
-
                     entities TEXT,
-
                     relationships TEXT,
-
                     importance REAL DEFAULT 0.5,
-
                     created_at TEXT,
-
                     last_accessed TEXT,
-
-                    tombstone INTEGER DEFAULT 0
-
+                    tombstone INTEGER DEFAULT 0,
+                    subject TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.subject')) VIRTUAL,
+                    attribute TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.attribute')) VIRTUAL
                 )
             """)
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS entities (
-
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                     name TEXT UNIQUE,
-
                     entity_type TEXT,
-
                     aliases TEXT
-
                 )
             """)
-
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS graph (
-
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                     memory_id INTEGER NOT NULL,
-
                     source TEXT NOT NULL,
-
                     relation TEXT NOT NULL,
-
                     target TEXT NOT NULL,
-
                     weight REAL DEFAULT 1.0,
-
                     created_at TEXT,
-
-                    FOREIGN KEY(memory_id)
-                        REFERENCES memories(id)
+                    FOREIGN KEY(memory_id) REFERENCES memories(id)
                 )
             """)
-            
-            #entity links i want to say is v4
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS entity_links (
                     entity_id INTEGER,
                     memory_id INTEGER
                 )
             """)
-
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS goals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,7 +89,11 @@ class MemoryDB:
                 )
             """)
 
-        self.conn.commit()
+            # Create indexes on virtual columns (IF NOT EXISTS)
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_subject ON memories(subject)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attribute ON memories(attribute)")
+
+            self.conn.commit()
 
     # -------------------------
     # INSERT
@@ -440,18 +412,36 @@ class MemoryDB:
         if not subject or not attribute:
             return []
 
-        # Use the virtual columns (subject, attribute) which are indexed
-        cur = self.conn.execute(
-            """
-            SELECT *
-            FROM memories
-            WHERE subject = ?
-              AND attribute = ?
-              AND tombstone = 0
-            """,
-            (subject, attribute)
-        )
-        rows = cur.fetchall()
+        try:
+            # Try using the virtual columns (subject, attribute) which are indexed
+            cur = self.conn.execute(
+                """
+                SELECT *
+                FROM memories
+                WHERE subject = ?
+                  AND attribute = ?
+                  AND tombstone = 0
+                """,
+                (subject, attribute)
+            )
+            rows = cur.fetchall()
+        except sqlite3.OperationalError as e:
+            # If columns don't exist, fall back to json_extract
+            if "no such column" in str(e):
+                cur = self.conn.execute(
+                    """
+                    SELECT *
+                    FROM memories
+                    WHERE json_extract(metadata,'$.subject') = ?
+                      AND json_extract(metadata,'$.attribute') = ?
+                      AND tombstone = 0
+                    """,
+                    (subject, attribute)
+                )
+                rows = cur.fetchall()
+            else:
+                raise
+
         debug("ATTRIBUTE HITS:", len(rows))
         return rows
 

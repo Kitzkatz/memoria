@@ -79,21 +79,22 @@ class MemorySystem:
                 self.inverted_index = InvertedIndex(self.db)
                 self.inverted_index.build()
 
-            # Create workers – now self.graph_search exists
+            # Create workers
             faiss_worker = FAISSWorker(self.blackboard, self.vector_store)
             bm25_worker = BM25Worker(self.blackboard, self.bm25_ranker, self.inverted_index) if self.bm25_ranker else None
             graph_worker = GraphWorker(self.blackboard, self.graph_search, self.entity_store)
             ranking_worker = RankingWorker(self.blackboard, None, self.bm25_ranker)
 
-            self.scheduler.register_worker("faiss", faiss_worker)
+            # Register workers (pass the process method, not the object)
+            self.scheduler.register_worker("faiss", faiss_worker.process)
             if bm25_worker:
-                self.scheduler.register_worker("bm25", bm25_worker)
-            self.scheduler.register_worker("graph", graph_worker)
-            self.scheduler.register_worker("ranking", ranking_worker)
+                self.scheduler.register_worker("bm25", bm25_worker.process)
+            self.scheduler.register_worker("graph", graph_worker.process)
+            self.scheduler.register_worker("ranking", ranking_worker.process)
 
             if getattr(settings, "USE_INVERTED_INDEX", False) and self.inverted_index:
                 phrase_worker = PhraseWorker(self.blackboard, self.inverted_index)
-                self.scheduler.register_worker("phrase", phrase_worker)
+                self.scheduler.register_worker("phrase", phrase_worker.process)
 
             self.scheduler.start()
         else:
@@ -241,95 +242,69 @@ class MemorySystem:
         if self.use_blackboard and self.scheduler:
             # ---------- Blackboard Path ----------
             t0_faiss = time.perf_counter()
+
+            # Submit tasks – scheduler now uses ThreadPoolExecutor
             self.scheduler.submit("faiss", {"vector": vec, "top_k": settings.TOP_K})
             if self.bm25_ranker:
                 self.scheduler.submit("bm25", {"tokens": query.tokens})
             self.scheduler.submit("graph", {"entities": query.entities})
 
-            # Submit phrase search if phrases exist
             phrases = query.metadata.get("phrases", [])
             if phrases and self.inverted_index:
                 self.scheduler.submit("phrase", {"phrases": phrases})
 
-            # Allow workers to process (simple polling)
-            time.sleep(0.1)
+            # Wait for all tasks to complete (max 2 seconds)
+            if not self.scheduler.wait_for_tasks(timeout=2.0):
+                debug("Blackboard: some tasks timed out")
 
             # Collect all candidates from blackboard
-            
             entries = self.blackboard.get_entries(type="candidates")
-            candidates = []
-            existing_ids = set()
-
+            mem_ids = set()
+            source_map = {}  # mem_id -> (source, dist, graph_hit)
             for entry in entries:
                 source = entry.content.get("source")
                 cand_list = entry.content.get("candidates", [])
                 if source == "faiss":
                     for mem_id, dist in cand_list:
-                        if mem_id not in existing_ids:
-                            row = self.db.fetch(mem_id)
-                            if row:
-                                memory = self.retrieval._build_memory_record(row)
-                                embedding = self.embedding_cache.get(mem_id) or self.vector_store.get(mem_id)
-                                candidates.append(
-                                    CandidateRecord(
-                                        memory=memory,
-                                        distance=float(dist),
-                                        embedding=embedding,
-                                        graph_hit=False
-                                    )
-                                )
-                                existing_ids.add(mem_id)
+                        mem_ids.add(mem_id)
+                        source_map[mem_id] = ("faiss", float(dist), False)
                 elif source == "bm25":
                     for doc_id, score in cand_list:
-                        if doc_id not in existing_ids:
-                            row = self.db.fetch(doc_id)
-                            if row:
-                                memory = self.retrieval._build_memory_record(row)
-                                pseudo_dist = 1.0 / (score + 1e-6)
-                                embedding = self.embedding_cache.get(doc_id) or self.vector_store.get(doc_id)
-                                candidates.append(
-                                    CandidateRecord(
-                                        memory=memory,
-                                        distance=pseudo_dist,
-                                        embedding=embedding,
-                                        graph_hit=False
-                                    )
-                                )
-                                existing_ids.add(doc_id)
+                        mem_ids.add(doc_id)
+                        pseudo_dist = 1.0 / (score + 1e-6)
+                        source_map[doc_id] = ("bm25", pseudo_dist, False)
                 elif source == "graph":
                     for mem_id in cand_list:
-                        if mem_id not in existing_ids:
-                            row = self.db.fetch(mem_id)
-                            if row:
-                                memory = self.retrieval._build_memory_record(row)
-                                embedding = self.embedding_cache.get(mem_id) or self.vector_store.get(mem_id)
-                                candidates.append(
-                                    CandidateRecord(
-                                        memory=memory,
-                                        distance=0.0,
-                                        embedding=embedding,
-                                        graph_hit=True
-                                    )
-                                )
-                                existing_ids.add(mem_id)
+                        mem_ids.add(mem_id)
+                        source_map[mem_id] = ("graph", 0.0, True)
                 elif source == "phrase":
                     for doc_id, score in cand_list:
-                        if doc_id not in existing_ids:
-                            row = self.db.fetch(doc_id)
-                            if row:
-                                memory = self.retrieval._build_memory_record(row)
-                                embedding = self.embedding_cache.get(doc_id) or self.vector_store.get(doc_id)
-                                candidates.append(
-                                    CandidateRecord(
-                                        memory=memory,
-                                        distance=0.0,
-                                        embedding=embedding,
-                                        graph_hit=False
-                                    )
-                                )
-                                existing_ids.add(doc_id)
+                        mem_ids.add(doc_id)
+                        source_map[doc_id] = ("phrase", 0.0, False)
 
-            # --- Memory Type Filtering (NEW) ---
+            # Batch fetch all rows in one query
+            rows = self.db.fetch_many(list(mem_ids))
+
+            # Build CandidateRecords
+            candidates = []
+            existing_ids = set()
+            for mem_id, row in rows.items():
+                if row is None:
+                    continue
+                source, dist, graph_hit = source_map.get(mem_id, (None, 0.0, False))
+                memory = self.retrieval._build_memory_record(row)
+                embedding = self.embedding_cache.get(mem_id) or self.vector_store.get(mem_id)
+                candidates.append(
+                    CandidateRecord(
+                        memory=memory,
+                        distance=float(dist),
+                        embedding=embedding,
+                        graph_hit=graph_hit
+                    )
+                )
+                existing_ids.add(mem_id)
+
+            # --- Memory Type Filtering ---
             memory_type_hint = query.metadata.get("memory_type_hint")
             if memory_type_hint and memory_type_hint != "general":
                 filtered = [c for c in candidates if c.memory.memory_type == memory_type_hint]
@@ -340,7 +315,7 @@ class MemorySystem:
                     debug(f"[MemorySystem] No candidates of type '{memory_type_hint}', keeping all")
 
             faiss_ms = (time.perf_counter() - t0_faiss) * 1000
-            database_ms = faiss_ms  # approximate, since we don't separate DB fetch time
+            database_ms = faiss_ms
             t0_rank = time.perf_counter()
             results, ranking_diag = self.pipeline.run(query, candidates)
             ranking_ms = (time.perf_counter() - t0_rank) * 1000
@@ -392,7 +367,9 @@ class MemorySystem:
             }
 
         else:
-            # ---------- V3 Fallback Path ----------
+            # ---------- V3 Fallback Path (unchanged) ----------
+            # ... (keep the existing fallback code exactly as before) ...
+            # ---------- V3 Fallback Path (unchanged) ----------
             t0_faiss = time.perf_counter()
             ids, distances = self.vector_store.search(vec)
             faiss_ms = (time.perf_counter() - t0_faiss) * 1000
@@ -452,7 +429,6 @@ class MemorySystem:
                     "total_query_ms": round(total_query_ms, 3)
                 }
             }
-
     # -------------------------------------
     # EMBEDDING REGISTRATION (unchanged)
     # -------------------------------------

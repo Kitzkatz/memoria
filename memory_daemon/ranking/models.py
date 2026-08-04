@@ -33,6 +33,9 @@ class CandidateRecord(BaseModel):
     mmr_score: float = 0.0
     final_score: float = 0.0
 
+    # BM25 score (added)
+    bm25_score: float = 0.0
+
     # Diagnostics
     from pydantic import Field
 

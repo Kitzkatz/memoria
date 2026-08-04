@@ -6,10 +6,10 @@ from datetime import datetime
 
 @dataclass
 class BlackboardEntry:
+    type: str                     # required
+    content: Dict[str, Any]       # required
+    source: str                   # required
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    type: str  # "query", "candidates", "ranked", "result", "error"
-    content: Dict[str, Any]
-    source: str  # "user", "faiss", "bm25", "graph", "ranker"
     priority: int = 0
     timestamp: datetime = field(default_factory=datetime.utcnow)
     tags: List[str] = field(default_factory=list)
@@ -17,11 +17,11 @@ class BlackboardEntry:
 
 @dataclass
 class Task:
+    type: str                     # required (no default)
+    payload: Dict[str, Any]       # required (no default)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    type: str  # "retrieve", "rank", "consolidate", "prune"
-    payload: Dict[str, Any]
     priority: int = 0
-    status: str = "pending"  # pending, running, completed, failed
+    status: str = "pending"       # pending, running, completed, failed
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
@@ -52,6 +52,13 @@ class Blackboard:
     def get_by_type(self, entry_type: str) -> List[BlackboardEntry]:
         with self._lock:
             return [e for e in self._entries.values() if e.type == entry_type]
+
+    def get_entries(self, type: Optional[str] = None) -> List[BlackboardEntry]:
+        """Alias for get_by_type, with optional filter."""
+        if type:
+            return self.get_by_type(type)
+        with self._lock:
+            return list(self._entries.values())
 
     def subscribe(self, event_type: str, callback: Callable):
         """Subscribe to entries of a specific type."""

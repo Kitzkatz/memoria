@@ -76,555 +76,202 @@ class BenchmarkAnalyzer:
 
         records = self.records()
 
-
         total = len(records)
 
-
         retrieved = 0
-
         top1 = 0
-
         top3 = 0
-        recall_counts = {
-            1: 0,
-            3: 0,
-            5: 0,
-            10: 0
-
-            }
+        recall_counts = {1: 0, 3: 0, 5: 0, 10: 0}
         SHOW_MMR_DETAILS = False
 
-
         rank_distribution = Counter()
-
         candidate_counts = []
-
         runtime = []
-
-
-        component_totals = defaultdict(
-            list
-        )
-
-
+        component_totals = defaultdict(list)
         top3_scores = []
-
         not_top3_scores = []
-
         final_scores = []
 
-
-
         for record in records:
-
-
-            rank = record.get(
-                "expected_rank"
-            )
-
-
+            rank = record.get("expected_rank")
             if rank:
-
                 retrieved += 1
-
                 rank_distribution[rank] += 1
-
-
                 if rank == 1:
-
                     top1 += 1
-
-
                 if rank <= 3:
-
                     top3 += 1
-
                 for k in recall_counts:
-                    if rank<= k:
+                    if rank <= k:
                         recall_counts[k] += 1
 
-            diagnostics = record.get(
-                "diagnostics",
-                {}
-            )
-
-
-            runtime_ms = record.get(
-                "runtime_ms"
-            )
-
+            diagnostics = record.get("diagnostics", {})
+            runtime_ms = record.get("runtime_ms")
             if runtime_ms:
                 runtime.append(runtime_ms)
 
-
-            #
-            # Current diagnostics format
-            #
-
-            for key in (
-                "embedding_ms",
-                "faiss_ms",
-                "database_ms",
-                "ranking_ms",
-                "formatting_ms",
-                "total_query_ms"
-            ):
-
-                value = diagnostics.get(
-                    key
-                )
-
+            for key in ("embedding_ms", "faiss_ms", "database_ms", "ranking_ms", "formatting_ms", "total_query_ms"):
+                value = diagnostics.get(key)
                 if value is not None:
+                    component_totals[key].append(value)
 
-                    component_totals[key].append(
-                        value
-                    )
-
-
-            #
-            # Backwards compatibility
-            # for old benchmark files
-            #
-
-            timings = diagnostics.get(
-                "timings",
-                {}
-            )
-
+            timings = diagnostics.get("timings", {})
             for key, value in timings.items():
+                component_totals[key].append(value)
 
-                component_totals[key].append(
-                    value
-                )
-
-
-
-            candidates = record.get(
-                "candidates",
-                []
-            )
-
-            candidate_counts.append(
-                record.get(
-                    "candidate_count",
-                    len(candidates)
-
-                    )
-
-                )
-
+            candidates = record.get("candidates", [])
+            candidate_counts.append(record.get("candidate_count", len(candidates)))
 
             if candidates:
-
                 best = candidates[0]
-
                 final_score = best.get("final_score", 0)
                 final_scores.append(final_score)
-
                 score = best.get("score", 0)
-
                 if rank and rank <= 3:
-
-                    top3_scores.append(
-                        score
-                    )
-
+                    top3_scores.append(score)
                 else:
-
-                    not_top3_scores.append(
-                        score
-                    )
-
-
+                    not_top3_scores.append(score)
 
         print()
-
         print("=" * 60)
-
         print("[BENCHMARK ANALYSIS]")
-
         print("=" * 60)
 
-
         print()
-
-        print(
-            "Questions:",
-            total
-        )
+        print("Questions:", total)
         failed = total - retrieved
-
-        print("Failed: ",
-              failed
-              )
-
+        print("Failed: ", failed)
 
         print()
+        print("Retrieved:", retrieved, f"({retrieved/max(total,1)*100:.2f}%)")
 
-        print(
-
-            "Retrieved:",
-
-            retrieved,
-
-            f"({retrieved/max(total,1)*100:.2f}%)"
-
-        )
-        print(
-            "Top3 avg final score:",
-            round(
-                sum(top3_scores) / len(top3_scores),
-                4
-            )
-        )
+        if top3_scores:
+            print("Top3 avg final score:", round(sum(top3_scores) / len(top3_scores), 4))
+        else:
+            print("Top3 avg final score: N/A")
 
         print()
         print("[FINAL SCORE]")
-
-        print(
-            "Average:",
-            round(
-                sum(final_scores) /
-                max(len(final_scores),1),
-                4
-            )
-        )
-
-        print(
-            "Max:",
-            round(max(final_scores),4)
-        )
-
-        print(
-            "Min:",
-            round(min(final_scores),4)
-        )
+        if final_scores:
+            print("Average:", round(sum(final_scores) / len(final_scores), 4))
+            print("Max:", round(max(final_scores), 4))
+            print("Min:", round(min(final_scores), 4))
+        else:
+            print("Average: N/A")
+            print("Max: N/A")
+            print("Min: N/A")
 
         print()
-
-
-        print(
-
-            "Top 1:",
-
-            top1,
-
-            f"({top1/max(total,1)*100:.2f}%)"
-
-        )
-
-
-        print(
-
-            "Top 3:",
-
-            top3,
-
-            f"({top3/max(total,1)*100:.2f}%)"
-
-        )
-
+        print("Top 1:", top1, f"({top1/max(total,1)*100:.2f}%)")
+        print("Top 3:", top3, f"({top3/max(total,1)*100:.2f}%)")
 
         print()
-
         print("[RANK DISTRIBUTION]")
-
-
-        for rank, count in sorted(
-            rank_distribution.items()
-        ):
-
-            print(
-                f"Rank {rank}: {count}"
-            )
-
+        for rank, count in sorted(rank_distribution.items()):
+            print(f"Rank {rank}: {count}")
 
         print()
-
         print("[RANK BUCKETS]")
-
-        buckets = {
-            "1": 0,
-            "2-3": 0,
-            "4-5": 0,
-            "6-10": 0,
-            "11+": 0
-        }
-
-
+        buckets = {"1": 0, "2-3": 0, "4-5": 0, "6-10": 0, "11+": 0}
         for rank, count in rank_distribution.items():
-
             if rank == 1:
                 buckets["1"] += count
-
             elif rank <= 3:
                 buckets["2-3"] += count
-
             elif rank <= 5:
                 buckets["4-5"] += count
-
             elif rank <= 10:
                 buckets["6-10"] += count
-
             else:
                 buckets["11+"] += count
-
-
         for name, count in buckets.items():
-
-            print(
-                name,
-                count,
-                f"({count/max(retrieved,1)*100:.2f}%)"
-            )
-
+            print(name, count, f"({count/max(retrieved,1)*100:.2f}%)")
 
         print()
-
         print("[SCORE ANALYSIS]")
-
         print()
-
-        print(
-            "Average Candidates Returned: ",
-            round(
-                sum(candidate_counts)
-                /
-                max(len(candidate_counts), 1),
-                2
-
-                )
-
-              )
+        print("Average Candidates Returned: ", round(sum(candidate_counts) / max(len(candidate_counts), 1), 2))
         print()
-
 
         if top3_scores:
-
-            print(
-
-                "Successful avg score:",
-
-                round(
-                    sum(top3_scores)
-                    /
-                    len(top3_scores),
-                    4
-                )
-
-            )
-
+            print("Successful avg score:", round(sum(top3_scores) / len(top3_scores), 4))
+        else:
+            print("Successful avg score: N/A")
 
         if not_top3_scores:
-
-            print(
-
-                "Failure avg score:",
-
-                round(
-                    sum(not_top3_scores)
-                    /
-                    len(not_top3_scores),
-                    4
-                )
-
-            )
-
-
+            print("Failure avg score:", round(sum(not_top3_scores) / len(not_top3_scores), 4))
+        else:
+            print("Failure avg score: N/A")
 
         print()
-
         print("[TIMING]")
-
-
         for key, values in component_totals.items():
-
             if values:
-
-                print(
-
-                    key,
-
-                    round(
-                        sum(values)
-                        /
-                        len(values),
-                        3
-                    ),
-
-                    "ms"
-
-                )
+                print(key, round(sum(values) / len(values), 3), "ms")
 
         print()
-        
-        
         print("[MMR ANALYSIS]")
         print()
-
         mmr_changed_count = 0
         mmr_total = 0
         mmr_moves = []
 
-
         for record in records:
-
-            diagnostics = record.get(
-                "diagnostics",
-                {}
-            )
-
-            before_mmr = diagnostics.get(
-                "before_mmr",
-                []
-            )
-
-            after_mmr = diagnostics.get(
-                "after_mmr",
-                []
-            )
-
-            changed = diagnostics.get(
-                "mmr_changed",
-                False
-            )
-
-            moves = diagnostics.get(
-                "mmr_moves",
-                0
-            )
-
+            diagnostics = record.get("diagnostics", {})
+            before_mmr = diagnostics.get("before_mmr", [])
+            after_mmr = diagnostics.get("after_mmr", [])
+            changed = diagnostics.get("mmr_changed", False)
+            moves = diagnostics.get("mmr_moves", 0)
 
             if before_mmr and after_mmr:
-
                 mmr_total += 1
-
-
                 if changed:
                     mmr_changed_count += 1
-
-
-                mmr_moves.append(
-                    moves
-                )
-
+                mmr_moves.append(moves)
 
                 if SHOW_MMR_DETAILS:
-
                     print()
-                    print(
-                        "Query:",
-                        record.get("query")
-                    )
-
-                    print(
-                        "[MMR BEFORE]"
-                    )
-
+                    print("Query:", record.get("query"))
+                    print("[MMR BEFORE]")
                     for mem_id in before_mmr[:MMR_DISPLAY_LIMIT]:
                         print(mem_id)
-
-
                     print()
-
-                    print(
-                        "[MMR AFTER]"
-                    )
-
+                    print("[MMR AFTER]")
                     for mem_id in after_mmr[:MMR_DISPLAY_LIMIT]:
                         print(mem_id)
-
-
-                    print(
-                        "Changed:",
-                        changed
-                    )
-
-                    print(
-                        "Moves:",
-                        moves
-                    )
-
-                    print(
-                        "-" * 40
-                    )
-
-
+                    print("Changed:", changed)
+                    print("Moves:", moves)
+                    print("-" * 40)
 
         print()
-
-        print(
-            "MMR tracked:",
-            mmr_total
-        )
-
-        print(
-            "MMR reordered:",
-            mmr_changed_count,
-            f"({mmr_changed_count/max(mmr_total,1)*100:.2f}%)"
-        )
-
-
+        print("MMR tracked:", mmr_total)
+        print("MMR reordered:", mmr_changed_count, f"({mmr_changed_count/max(mmr_total,1)*100:.2f}%)")
         if mmr_moves:
+            print("Average MMR moves:", round(sum(mmr_moves) / len(mmr_moves), 2))
 
-            print(
-                "Average MMR moves:",
-                round(
-                    sum(mmr_moves)
-                    /
-                    len(mmr_moves),
-                    2
-                )
-            )
         print()
         print("[RANK BUCKETS]")
-
-        buckets = {
-            "1": 0,
-            "2-3": 0,
-            "4-5": 0,
-            "6-10": 0,
-            "11+": 0
-        }
-
-
+        buckets = {"1": 0, "2-3": 0, "4-5": 0, "6-10": 0, "11+": 0}
         for rank, count in rank_distribution.items():
-
             if rank == 1:
                 buckets["1"] += count
-
             elif rank <= 3:
                 buckets["2-3"] += count
-
             elif rank <= 5:
                 buckets["4-5"] += count
-
             elif rank <= 10:
                 buckets["6-10"] += count
-
             else:
                 buckets["11+"] += count
-
-
         for name, count in buckets.items():
+            print(name, count, f"({count/max(total,1)*100:.2f}%)")
 
-            print(
-                name,
-                count,
-                f"({count/max(total,1)*100:.2f}%)"
-            )
         print()
         print("[Recall@K]")
         for k, count in recall_counts.items():
-            print(
-                f"Recall@{k}: ",
-                count,
-                f"({count/max(total,1)*100:.2f}%)"
-
-                )
+            print(f"Recall@{k}: ", count, f"({count/max(total,1)*100:.2f}%)")
 
         print()
-
         print("=" * 60)
 
     # -------------------------------------
