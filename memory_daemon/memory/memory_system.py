@@ -14,7 +14,7 @@ from ranking.ranking_pipeline import RankingPipeline
 from graph.search import GraphSearch
 from graph.edge_store import EdgeStore
 from cache.config import settings
-from ranking.models import CandidateRecord   # <-- added
+from ranking.models import CandidateRecord
 
 from graph.entity_resolver import EntityResolver
 from graph.relationship_builder import RelationshipBuilder
@@ -24,7 +24,8 @@ import time
 from blackboard.core import Blackboard, BlackboardEntry
 from blackboard.scheduler import Scheduler
 from blackboard.workers import (
-    FAISSWorker, BM25Worker, GraphWorker, RankingWorker
+    FAISSWorker, BM25Worker, GraphWorker, RankingWorker,
+    PhraseWorker   # <--- added
 )
 
 class MemorySystem:
@@ -82,6 +83,11 @@ class MemorySystem:
             self.scheduler.register_worker("graph", graph_worker)
             self.scheduler.register_worker("ranking", ranking_worker)
 
+            # Register PhraseWorker if inverted index is available
+            if getattr(settings, "USE_INVERTED_INDEX", False) and self.inverted_index:
+                phrase_worker = PhraseWorker(self.blackboard, self.inverted_index)
+                self.scheduler.register_worker("phrase", phrase_worker)
+
             # Start scheduler
             self.scheduler.start()
         else:
@@ -92,7 +98,7 @@ class MemorySystem:
         self.pipeline = RankingPipeline(
             attribute_map=self.attribute_map,
             db=self.db,
-            bm25_ranker=self.bm25_ranker,      # <-- pass shared BM25
+            bm25_ranker=self.bm25_ranker,
             ranker=None,
             normalizer=None,
             booster=None,
@@ -115,7 +121,121 @@ class MemorySystem:
             self.graph_search
         )
 
-    # ... (store, store_many, register_embedding remain unchanged)
+    # -------------------------------------
+    # STORE (unchanged)
+    # -------------------------------------
+
+    def store(self, text):
+        import time
+        t0 = time.perf_counter()
+        record = self.extractor.extract(text)
+        debug("extract:", time.perf_counter() - t0)
+
+        debug("\n[TEST EXTRACTOR OUTPUT]")
+        debug("TEXT:", record.text)
+        debug("TYPE:", record.memory_type)
+        debug("META:", record.metadata)
+        debug("IMPORTANCE:", record.importance)
+        debug("TEXT:", record.text)
+        debug("NORMALIZED:", record.normalized_text)
+        debug("TOKENS:", record.tokens)
+        debug("TOKEN COUNT:", record.token_count)
+        t0 = time.perf_counter()
+
+        record.importance = self.scorer.score(
+            record.text,
+            record.metadata
+        )
+        debug("score:", time.perf_counter() - t0)
+
+        t0 = time.perf_counter()
+        debug(id(self.vector_store))
+        vec = self.embedder.embed(record.normalized_text)
+        debug("embed:", time.perf_counter() - t0)
+
+        t0 = time.perf_counter()
+        mem_id = self.db.insert(record)
+        self.relationship_builder.build(
+            mem_id,
+            record.relationships
+        )
+        debug("\n[TEST DB INSERT]")
+        row = self.db.fetch(mem_id)
+        debug(f"[CACHE] {self.embedding_cache.count()} vectors")
+        debug(row)
+        debug("db:", time.perf_counter() - t0)
+
+        self.register_embedding(mem_id, vec)
+
+        t0 = time.perf_counter()
+        debug("\n[TEST FAISS SYNC]")
+        debug("FAISS COUNT:", self.vector_store.count())
+        debug("DB COUNT:", self.db.count())
+        debug("faiss:", time.perf_counter() - t0)
+
+        debug(f"Stored memory {mem_id}")
+        return mem_id
+
+    # -------------------------------------
+    # STORE MANY (unchanged)
+    # -------------------------------------
+
+    def store_many(self, texts):
+        import time
+        overall_start = time.perf_counter()
+        total = len(texts)
+
+        debug()
+        debug("=" * 60)
+        debug("[STORE MANY]")
+        debug("=" * 60)
+        debug(f"Loading {total} memories")
+
+        records = []
+        vectors = []
+
+        for text in texts:
+            record = self.extractor.extract(text)
+            record.importance = self.scorer.score(
+                record.text,
+                record.metadata
+            )
+            vector = self.embedder.embed(
+                record.normalized_text
+            )
+            records.append(record)
+            vectors.append(vector)
+        debug(f"[READY] {len(records)} records")
+
+        ids = self.db.insert_many(records)
+        for mem_id, record in zip(ids, records):
+            self.relationship_builder.build(
+                mem_id,
+                record.relationships
+            )
+
+        self.embedding_cache.add_many(
+            ids,
+            vectors
+        )
+        self.vector_store.add_many(
+            ids,
+            vectors,
+            persist=False
+        )
+        debug("[DB] Insert complete")
+        self.vector_store.save()
+
+        runtime = time.perf_counter() - overall_start
+        debug(
+            f"[COMPLETE] {len(ids)} memories "
+            f"in {runtime:.2f}s"
+        )
+        return ids
+
+    # -------------------------------------
+    # QUERY — with Blackboard + Phrase support
+    # -------------------------------------
 
     def query(self, text):
         overall_start = time.perf_counter()
@@ -133,6 +253,11 @@ class MemorySystem:
             if self.bm25_ranker:
                 self.scheduler.submit("bm25", {"tokens": query.tokens})
             self.scheduler.submit("graph", {"entities": query.entities})
+
+            # Submit phrase search if phrases exist
+            phrases = query.metadata.get("phrases", [])
+            if phrases and self.inverted_index:
+                self.scheduler.submit("phrase", {"phrases": phrases})
 
             # Allow workers to process (simple polling)
             time.sleep(0.1)
@@ -194,6 +319,22 @@ class MemorySystem:
                                     )
                                 )
                                 existing_ids.add(mem_id)
+                elif source == "phrase":
+                    for doc_id, score in cand_list:
+                        if doc_id not in existing_ids:
+                            row = self.db.fetch(doc_id)
+                            if row:
+                                memory = self.retrieval._build_memory_record(row)
+                                embedding = self.embedding_cache.get(doc_id) or self.vector_store.get(doc_id)
+                                candidates.append(
+                                    CandidateRecord(
+                                        memory=memory,
+                                        distance=0.0,
+                                        embedding=embedding,
+                                        graph_hit=False
+                                    )
+                                )
+                                existing_ids.add(doc_id)
 
             faiss_ms = (time.perf_counter() - t0_faiss) * 1000
             database_ms = faiss_ms  # approximate, since we don't separate DB fetch time
@@ -310,4 +451,14 @@ class MemorySystem:
                 }
             }
 
-    # ... register_embedding remains unchanged
+    # -------------------------------------
+    # EMBEDDING REGISTRATION (unchanged)
+    # -------------------------------------
+
+    def register_embedding(self, mem_id, vector):
+        debug("\nREGISTER EMBEDDING")
+        debug(mem_id)
+        debug(len(vector))
+        debug(vector[:5])
+        self.embedding_cache.add(mem_id, vector)
+        self.vector_store.add(mem_id, vector, persist=True)
