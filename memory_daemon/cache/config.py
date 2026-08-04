@@ -27,6 +27,7 @@ class Settings(BaseModel):
 
     # After existing fields
     USE_INVERTED_INDEX: bool = True
+    USE_PHRASE_SEARCH: bool = True
     USE_BM25: bool = True
     USE_BLACKBOARD: bool = True
     USE_CASE_FOLDING: bool = True
