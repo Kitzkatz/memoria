@@ -2,6 +2,7 @@ from core.logger import debug
 import re
 from typing import List, Optional, Set
 
+from retrieval.case_folding import fold_case
 from ranking.attribute_map import ATTRIBUTE_MAP
 from retrieval.query_models import QueryRecord
 
@@ -37,7 +38,7 @@ class QueryProcessor:
 
     def normalize(self, text: str) -> str:
         """Lowercase, collapse whitespace, strip."""
-        text = text.lower()
+        text = fold_case(text)
         text = re.sub(r"\s+", " ", text)
         return text.strip()
 

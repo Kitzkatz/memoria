@@ -2,6 +2,8 @@ from core.logger import debug
 import json
 import re
 
+from retrieval.case_folding import fold_case
+
 from ingestion.attribute_extractor import AttributeExtractor
 from memory.models import MemoryRecord
 
@@ -26,7 +28,7 @@ class MemoryExtractor:
         Strip leading/trailing whitespace
         """
 
-        text = text.lower()
+        text = fold_case(text)
         text = re.sub(r"\s+", " ", text)
 
         return text.strip()
