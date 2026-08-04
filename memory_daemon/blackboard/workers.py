@@ -24,9 +24,18 @@ class FAISSWorker(Worker):
             return {"error": "No vector provided", "candidates": []}
 
         ids, distances = self.vector_store.search(query_vec, k=top_k)
+        candidates = list(zip(ids, distances))
+        
+        # Post to blackboard
+        self.blackboard.post(BlackboardEntry(
+            type="candidates",
+            content={"source": "faiss", "candidates": candidates},
+            source="faiss_worker"
+        ))
+        
         return {
             "source": "faiss",
-            "candidates": list(zip(ids, distances)),
+            "candidates": candidates,
             "count": len(ids)
         }
 
@@ -43,8 +52,12 @@ class BM25Worker(Worker):
         if not query_tokens:
             return {"error": "No tokens provided", "candidates": []}
 
-        # Get candidate IDs from inverted index (or use all docs if index is empty)
-        candidate_ids = self.inverted_index.search(query_tokens) if self.inverted_index else None
+        # Get candidate IDs from inverted index if available
+        if self.inverted_index:
+            candidate_ids = self.inverted_index.search(query_tokens)
+        else:
+            candidate_ids = None
+
         if candidate_ids is None:
             # Fallback: score all documents
             scores = self.bm25_ranker.get_scores(query_tokens)
@@ -55,6 +68,13 @@ class BM25Worker(Worker):
             scores = self.bm25_ranker.get_scores(query_tokens)
             candidates = [(doc_id, scores[doc_id]) for doc_id in candidate_ids if scores[doc_id] > 0]
             candidates.sort(key=lambda x: x[1], reverse=True)
+
+        # Post to blackboard
+        self.blackboard.post(BlackboardEntry(
+            type="candidates",
+            content={"source": "bm25", "candidates": candidates},
+            source="bm25_worker"
+        ))
 
         return {
             "source": "bm25",
@@ -76,6 +96,14 @@ class GraphWorker(Worker):
             return {"error": "No entities provided", "candidates": []}
 
         memory_ids = self.graph_search.search(entities, depth=1)
+        
+        # Post to blackboard
+        self.blackboard.post(BlackboardEntry(
+            type="candidates",
+            content={"source": "graph", "candidates": memory_ids},
+            source="graph_worker"
+        ))
+
         return {
             "source": "graph",
             "candidates": memory_ids,
@@ -96,13 +124,20 @@ class RankingWorker(Worker):
         if not candidates or not query:
             return {"error": "Missing candidates or query", "ranked": []}
 
-        # Use BM25 if available, otherwise fallback to the base ranker
+        # Use BM25 if available, otherwise fallback to base ranker
         if self.bm25_ranker:
             # Here you'd integrate BM25 scores into the ranking
             # For now, we just pass through
             ranked = self.ranker.rank(candidates, query)
         else:
             ranked = self.ranker.rank(candidates, query)
+
+        # Post to blackboard
+        self.blackboard.post(BlackboardEntry(
+            type="ranked",
+            content={"source": "ranker", "ranked": ranked},
+            source="ranking_worker"
+        ))
 
         return {
             "source": "ranker",
