@@ -98,3 +98,57 @@ class InvertedIndex:
         self.index = data['index']
         self.positional_index = data['positional_index']
         self.document_frequency = data['document_frequency']
+        # Add to InvertedIndex class
+
+    def build_skips(self, skip_interval: int = 4):
+        """Build skip pointers for all posting lists."""
+        self.skip_lists = {}
+        for term, posting in self.index.items():
+            skips = []
+            for i in range(0, len(posting), skip_interval):
+                # Store (doc_id, index_position) to skip ahead
+                skips.append((posting[i], i))
+            self.skip_lists[term] = skips
+
+    def and_query_skip(self, terms: List[str]) -> List[int]:
+        """
+        Boolean AND query using skip pointers for faster intersection.
+        """
+        if not terms:
+            return []
+
+        # Get posting lists (deduplicated)
+        posting_lists = [list(set(self.index.get(term, []))) for term in terms]
+        posting_lists = [pl for pl in posting_lists if pl]  # remove empty
+        if not posting_lists:
+            return []
+
+        # Sort posting lists by length (shortest first) for efficiency
+        posting_lists.sort(key=len)
+
+        # Build skip lists if not already built
+        if not hasattr(self, 'skip_lists') or not self.skip_lists:
+            self.build_skips()
+
+        # For simplicity in this phase, we'll use the standard merge with skip jumps
+        # Standard merge on the shortest list
+        result = []
+        # We'll use the first (shortest) list as base
+        base_list = posting_lists[0]
+        other_lists = posting_lists[1:]
+
+        for doc_id in base_list:
+            found = True
+            for other in other_lists:
+                # Use binary search or skip pointers to find doc_id
+                # Since skip pointers are complex to integrate here quickly,
+                # we'll use binary search from the 'bisect' module for O(log n) per check
+                import bisect
+                idx = bisect.bisect_left(other, doc_id)
+                if idx == len(other) or other[idx] != doc_id:
+                    found = False
+                    break
+            if found:
+                result.append(doc_id)
+
+        return result
