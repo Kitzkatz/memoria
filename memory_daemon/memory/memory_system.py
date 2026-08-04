@@ -263,6 +263,7 @@ class MemorySystem:
             time.sleep(0.1)
 
             # Collect all candidates from blackboard
+            
             entries = self.blackboard.get_entries(type="candidates")
             candidates = []
             existing_ids = set()
@@ -336,9 +337,18 @@ class MemorySystem:
                                 )
                                 existing_ids.add(doc_id)
 
+            # --- Memory Type Filtering (NEW) ---
+            memory_type_hint = query.metadata.get("memory_type_hint")
+            if memory_type_hint and memory_type_hint != "general":
+                filtered = [c for c in candidates if c.memory.memory_type == memory_type_hint]
+                if filtered:
+                    candidates = filtered
+                    debug(f"[MemorySystem] Filtered to {len(candidates)} candidates of type '{memory_type_hint}'")
+                else:
+                    debug(f"[MemorySystem] No candidates of type '{memory_type_hint}', keeping all")
+
             faiss_ms = (time.perf_counter() - t0_faiss) * 1000
             database_ms = faiss_ms  # approximate, since we don't separate DB fetch time
-
             t0_rank = time.perf_counter()
             results, ranking_diag = self.pipeline.run(query, candidates)
             ranking_ms = (time.perf_counter() - t0_rank) * 1000
