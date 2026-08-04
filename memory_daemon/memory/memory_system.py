@@ -31,7 +31,6 @@ from blackboard.workers import (
 class MemorySystem:
 
     def __init__(self, db, vector_store, embedder, entity_store, llm=None):
-
         self.db = db
         self.vector_store = vector_store
         self.embedder = embedder
@@ -41,22 +40,32 @@ class MemorySystem:
 
         self.extractor = MemoryExtractor(llm)
         self.scorer = ImportanceScorer()
-
         self.embedding_cache = EmbeddingCache()
 
-        # -------------------------
-        # V4 Blackboard Integration
-        # -------------------------
+        # ---- Core components (needed before blackboard) ----
+        self.query_processor = QueryProcessor()
+        self.entity_store = entity_store
+        self.edge_store = EdgeStore(db)
+        self.entity_resolver = EntityResolver(entity_store)
+        self.relationship_builder = RelationshipBuilder(self.edge_store, self.entity_store)
+        self.graph_search = GraphSearch(self.edge_store, entity_store)
+        self.retrieval = RetrievalEngine(
+            db,
+            vector_store,
+            self.embedding_cache,
+            self.graph_search
+        )
+
+        # ---- Blackboard / V4 Integration ----
         self.use_blackboard = getattr(settings, "USE_BLACKBOARD", False)
         self.bm25_ranker = None
         self.inverted_index = None
 
         if self.use_blackboard:
-            # Initialize blackboard and scheduler
             self.blackboard = Blackboard()
             self.scheduler = Scheduler(self.blackboard)
 
-            # Build BM25 ranker and inverted index (if toggles enabled)
+            # Build BM25 and inverted index
             if getattr(settings, "USE_BM25", False):
                 from ranking.bm25_ranker import BM25
                 self.bm25_ranker = BM25()
@@ -70,31 +79,28 @@ class MemorySystem:
                 self.inverted_index = InvertedIndex(self.db)
                 self.inverted_index.build()
 
-            # Create workers
+            # Create workers – now self.graph_search exists
             faiss_worker = FAISSWorker(self.blackboard, self.vector_store)
             bm25_worker = BM25Worker(self.blackboard, self.bm25_ranker, self.inverted_index) if self.bm25_ranker else None
             graph_worker = GraphWorker(self.blackboard, self.graph_search, self.entity_store)
-            ranking_worker = RankingWorker(self.blackboard, None, self.bm25_ranker)  # pipeline passed later
+            ranking_worker = RankingWorker(self.blackboard, None, self.bm25_ranker)
 
-            # Register workers
             self.scheduler.register_worker("faiss", faiss_worker)
             if bm25_worker:
                 self.scheduler.register_worker("bm25", bm25_worker)
             self.scheduler.register_worker("graph", graph_worker)
             self.scheduler.register_worker("ranking", ranking_worker)
 
-            # Register PhraseWorker if inverted index is available
             if getattr(settings, "USE_INVERTED_INDEX", False) and self.inverted_index:
                 phrase_worker = PhraseWorker(self.blackboard, self.inverted_index)
                 self.scheduler.register_worker("phrase", phrase_worker)
 
-            # Start scheduler
             self.scheduler.start()
         else:
             self.blackboard = None
             self.scheduler = None
 
-        # Initialize ranking pipeline (always needed)
+        # ---- Ranking Pipeline (can be initialized anytime) ----
         self.pipeline = RankingPipeline(
             attribute_map=self.attribute_map,
             db=self.db,
@@ -105,20 +111,6 @@ class MemorySystem:
             context_builder=None,
             mmr=None,
             finalizer=None,
-        )
-
-        # Other components (kept outside blackboard branch)
-        self.query_processor = QueryProcessor()
-        self.entity_store = entity_store
-        self.edge_store = EdgeStore(db)
-        self.entity_resolver = EntityResolver(entity_store)
-        self.relationship_builder = RelationshipBuilder(self.edge_store, self.entity_store)
-        self.graph_search = GraphSearch(self.edge_store, entity_store)
-        self.retrieval = RetrievalEngine(
-            db,
-            vector_store,
-            self.embedding_cache,
-            self.graph_search
         )
 
     # -------------------------------------
