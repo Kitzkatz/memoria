@@ -19,7 +19,7 @@ build/
 *.sqlite3
 *.sqlite
 benchmark_output/results/
-cache/
+
 *.json
 !requirements.txt
 !.gitignore
