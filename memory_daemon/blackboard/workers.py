@@ -144,3 +144,48 @@ class RankingWorker(Worker):
             "ranked": ranked,
             "count": len(ranked)
         }
+
+
+# ------------------------------
+# NEW: PhraseWorker
+# ------------------------------
+class PhraseWorker(Worker):
+    """Worker that performs phrase search using the inverted index."""
+    def __init__(self, blackboard: Blackboard, inverted_index):
+        super().__init__(blackboard)
+        self.inverted_index = inverted_index
+
+    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        phrases = payload.get("phrases", [])
+        if not phrases or not self.inverted_index:
+            return {"error": "No phrases or inverted index missing", "candidates": []}
+
+        # Collect all phrase matches
+        results = []  # list of (doc_id, score)
+        for phrase_tokens in phrases:
+            doc_ids = self.inverted_index.phrase_search(phrase_tokens)
+            for doc_id in doc_ids:
+                results.append((doc_id, 1.0))  # exact phrase gets score 1.0
+
+        # Deduplicate, keeping highest score (always 1.0)
+        unique = {}
+        for doc_id, score in results:
+            if doc_id not in unique or score > unique[doc_id]:
+                unique[doc_id] = score
+
+        candidates = list(unique.items())  # (doc_id, score)
+        # Sort by score descending (optional)
+        candidates.sort(key=lambda x: x[1], reverse=True)
+
+        # Post to blackboard
+        self.blackboard.post(BlackboardEntry(
+            type="candidates",
+            content={"source": "phrase", "candidates": candidates},
+            source="phrase_worker"
+        ))
+
+        return {
+            "source": "phrase",
+            "candidates": candidates,
+            "count": len(candidates)
+        }
