@@ -1,30 +1,37 @@
-# Python
+# Python cache & compiled files
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
+
+# Virtual environments
 env/
 venv/
 .venv/
+
+# Packaging
 *.egg-info/
 dist/
 build/
 
-# Project-specific large files
+# Project-specific large data
 *.db
 *.index
 *.pkl
 *.log
 *.sqlite3
 *.sqlite
+
+# Benchmark results (keep the folder, ignore its contents)
 benchmark_output/results/
+*.benchmark.json   # optional: if you have any other JSON results
 
-*.json
-!requirements.txt
-!.gitignore
+# Local models (download/embedding models)
+models/
+cache/
 
-# IDE / OS
+# IDE / OS files
 .vscode/
 .idea/
 *.swp
@@ -34,3 +41,8 @@ Thumbs.db
 
 # Patches (if any)
 patches/
+
+# Allow essential files (optional)
+!requirements.txt
+!.gitignore
+!.gitkeep      # to keep empty folders tracked
