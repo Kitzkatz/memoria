@@ -246,8 +246,8 @@ class MemorySystem:
             # Submit tasks – scheduler now uses ThreadPoolExecutor
             self.scheduler.submit("faiss", {"vector": vec, "top_k": settings.TOP_K})
             if self.bm25_ranker:
-                self.scheduler.submit("bm25", {"tokens": query.tokens})
-            self.scheduler.submit("graph", {"entities": query.entities})
+                self.scheduler.submit("bm25", {"tokens": query.tokens, "limit": settings.TOP_K})
+            self.scheduler.submit("graph", {"entities": query.entities, "limit": settings.GRAPH_TOP_K})
 
             phrases = query.metadata.get("phrases", [])
             if phrases and self.inverted_index:
