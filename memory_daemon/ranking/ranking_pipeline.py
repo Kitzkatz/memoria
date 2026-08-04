@@ -6,7 +6,7 @@ from ranking.mmr_reranker import MMRReranker
 from core.context_builder import ContextBuilder
 from ranking.score_finalizer import ScoreFinalizer
 from cache.config import settings
-from ranking.bm25_ranker import BM25   # ← new import
+from ranking.bm25_ranker import BM25
 
 
 class RankingPipeline:
@@ -21,7 +21,8 @@ class RankingPipeline:
     def __init__(
         self,
         attribute_map,
-        db=None,                     # ← new param
+        db=None,
+        bm25_ranker=None,           # <-- new parameter
         ranker=None,
         normalizer=None,
         booster=None,
@@ -48,7 +49,17 @@ class RankingPipeline:
         # --- BM25 Setup ---
         self.bm25 = None
         self.id_to_idx = {}
-        if getattr(settings, "USE_BM25", False) and db is not None:
+
+        # Use provided ranker if given
+        if bm25_ranker is not None:
+            self.bm25 = bm25_ranker
+            # Build id_to_idx from the same DB to map scores
+            if db:
+                all_memories = db.fetch_all()
+                self.id_to_idx = {m["id"]: idx for idx, m in enumerate(all_memories)}
+                debug(f"Using provided BM25 ranker with {len(self.id_to_idx)} memories")
+        elif getattr(settings, "USE_BM25", False) and db is not None:
+            # Fallback: build BM25 from scratch
             all_memories = db.fetch_all()
             if all_memories:
                 corpus_tokens = [m["tokens"] for m in all_memories if m.get("tokens")]
