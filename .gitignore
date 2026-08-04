@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Project-specific large files
+*.db
+*.index
+*.pkl
+*.log
+*.sqlite3
+*.sqlite
+benchmark_output/results/
+cache/
+*.json
+!requirements.txt
+!.gitignore
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Patches (if any)
+patches/

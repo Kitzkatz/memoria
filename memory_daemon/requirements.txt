@@ -1,0 +1,12 @@
+faiss-cpu
+sentence-transformers
+numpy
+pydantic
+aiohttp
+orjson
+tenacity
+psutil
+fastapi
+uvicorn
+sqlalchemy
+requests
