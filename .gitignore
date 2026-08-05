@@ -28,8 +28,9 @@ benchmark_output/results/
 *.benchmark.json   # optional: if you have any other JSON results
 
 # Local models (download/embedding models)
-models/
-cache/
+**/models/
+**/benchmark_output/
+
 
 # IDE / OS files
 .vscode/
