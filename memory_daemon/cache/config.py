@@ -20,7 +20,7 @@ class Settings(BaseModel):
     
 
     # Retrieval
-    TOP_K: int = 200
+    TOP_K: int = 300
     TOP_N: int = 3
     GRAPH_TOP_K: int = 50
     GRAPH_SEARCH_LIMIT: int = 200

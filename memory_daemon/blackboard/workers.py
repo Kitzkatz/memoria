@@ -1,38 +1,37 @@
 import time
 from typing import Dict, Any, List, Optional
-from .core import Blackboard, BlackboardEntry
 from cache.config import settings
+
+try:
+    from core.logger import debug
+except ImportError:
+    def debug(*args):
+        print("[DEBUG]", *args)
+
 
 class Worker:
     """Base class for all workers."""
-    def __init__(self, blackboard: Blackboard):
-        self.blackboard = blackboard
-
     def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError
 
 
 class FAISSWorker(Worker):
     """Worker that performs FAISS vector search."""
-    def __init__(self, blackboard: Blackboard, vector_store):
-        super().__init__(blackboard)
+    def __init__(self, vector_store):
         self.vector_store = vector_store
 
     def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        start = time.perf_counter()
         query_vec = payload.get("vector")
         top_k = payload.get("top_k", settings.TOP_K)
         if query_vec is None:
-            return {"error": "No vector provided", "candidates": []}
+            return {"error": "No vector provided", "source": "faiss", "candidates": []}
 
         ids, distances = self.vector_store.search(query_vec, k=top_k)
         candidates = list(zip(ids, distances))
-        
-        self.blackboard.post(BlackboardEntry(
-            type="candidates",
-            content={"source": "faiss", "candidates": candidates},
-            source="faiss_worker"
-        ))
-        
+        search_time = (time.perf_counter() - start) * 1000
+
+        debug(f"FAISSWorker: search={search_time:.2f}ms, count={len(ids)}")
         return {
             "source": "faiss",
             "candidates": candidates,
@@ -42,44 +41,32 @@ class FAISSWorker(Worker):
 
 class BM25Worker(Worker):
     """Worker that performs BM25 lexical search."""
-    def __init__(self, blackboard: Blackboard, bm25_ranker, inverted_index):
-        super().__init__(blackboard)
+    def __init__(self, bm25_ranker, inverted_index):
         self.bm25_ranker = bm25_ranker
         self.inverted_index = inverted_index
 
     def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        start = time.perf_counter()
         query_tokens = payload.get("tokens", [])
         limit = payload.get("limit", settings.TOP_K)
-        if not query_tokens or not self.bm25_ranker:
-            return {"error": "No tokens or BM25", "candidates": []}
+        if not query_tokens or not self.inverted_index:
+            return {"error": "No tokens or inverted index", "source": "bm25", "candidates": []}
 
-        # Get candidate IDs from inverted index (union of all token postings)
-        if self.inverted_index:
-            candidate_ids = set()
-            for token in query_tokens:
-                candidate_ids.update(self.inverted_index.search(token))
-            candidate_ids = list(candidate_ids)
-        else:
-            candidate_ids = None
+        candidate_ids = set()
+        for token in query_tokens:
+            candidate_ids.update(self.inverted_index.search(token))
+        candidate_ids = list(candidate_ids)
 
-        if candidate_ids is None:
-            # Fallback: score all documents (slow)
-            scores = self.bm25_ranker.get_scores(query_tokens)
-            candidates = [(i, scores[i]) for i in range(len(scores)) if scores[i] > 0]
-        else:
-            # Score only candidates from inverted index (fast)
-            scores = self.bm25_ranker.get_scores(query_tokens)
-            candidates = [(doc_id, scores[doc_id]) for doc_id in candidate_ids if scores[doc_id] > 0]
+        candidates = [
+            (doc_id, self.bm25_ranker.score(doc_id, query_tokens))
+            for doc_id in candidate_ids
+        ]
 
         candidates.sort(key=lambda x: x[1], reverse=True)
-        # Limit to TOP_K to match FAISS
         candidates = candidates[:limit]
 
-        self.blackboard.post(BlackboardEntry(
-            type="candidates",
-            content={"source": "bm25", "candidates": candidates},
-            source="bm25_worker"
-        ))
+        build_time = (time.perf_counter() - start) * 1000
+        debug(f"BM25Worker: build={build_time:.2f}ms, count={len(candidates)}")
 
         return {
             "source": "bm25",
@@ -90,25 +77,21 @@ class BM25Worker(Worker):
 
 class GraphWorker(Worker):
     """Worker that performs graph-based retrieval."""
-    def __init__(self, blackboard: Blackboard, graph_search, entity_store):
-        super().__init__(blackboard)
+    def __init__(self, graph_search, entity_store):
         self.graph_search = graph_search
         self.entity_store = entity_store
 
     def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        start = time.perf_counter()
         entities = payload.get("entities", [])
         limit = payload.get("limit", settings.GRAPH_TOP_K)
         if not entities:
-            return {"error": "No entities provided", "candidates": []}
+            return {"error": "No entities provided", "source": "graph", "candidates": []}
 
         memory_ids = self.graph_search.search(entities, depth=1, limit=limit)
-        
-        self.blackboard.post(BlackboardEntry(
-            type="candidates",
-            content={"source": "graph", "candidates": memory_ids},
-            source="graph_worker"
-        ))
+        search_time = (time.perf_counter() - start) * 1000
 
+        debug(f"GraphWorker: search={search_time:.2f}ms, count={len(memory_ids)}")
         return {
             "source": "graph",
             "candidates": memory_ids,
@@ -116,48 +99,16 @@ class GraphWorker(Worker):
         }
 
 
-class RankingWorker(Worker):
-    """Worker that ranks candidates using BM25 (or fallback)."""
-    def __init__(self, blackboard: Blackboard, ranker, bm25_ranker=None):
-        super().__init__(blackboard)
-        self.ranker = ranker
-        self.bm25_ranker = bm25_ranker
-
-    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        candidates = payload.get("candidates", [])
-        query = payload.get("query")
-        if not candidates or not query:
-            return {"error": "Missing candidates or query", "ranked": []}
-
-        if self.bm25_ranker:
-            # Pass BM25 scores to ranking (already attached during pipeline)
-            ranked = self.ranker.rank(candidates, query)
-        else:
-            ranked = self.ranker.rank(candidates, query)
-
-        self.blackboard.post(BlackboardEntry(
-            type="ranked",
-            content={"source": "ranker", "ranked": ranked},
-            source="ranking_worker"
-        ))
-
-        return {
-            "source": "ranker",
-            "ranked": ranked,
-            "count": len(ranked)
-        }
-
-
 class PhraseWorker(Worker):
     """Worker that performs phrase search using the inverted index."""
-    def __init__(self, blackboard: Blackboard, inverted_index):
-        super().__init__(blackboard)
+    def __init__(self, inverted_index):
         self.inverted_index = inverted_index
 
     def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        start = time.perf_counter()
         phrases = payload.get("phrases", [])
         if not phrases or not self.inverted_index:
-            return {"error": "No phrases or inverted index missing", "candidates": []}
+            return {"error": "No phrases or inverted index missing", "source": "phrase", "candidates": []}
 
         results = []
         for phrase_tokens in phrases:
@@ -165,7 +116,6 @@ class PhraseWorker(Worker):
             for doc_id in doc_ids:
                 results.append((doc_id, 1.0))
 
-        # Deduplicate
         unique = {}
         for doc_id, score in results:
             if doc_id not in unique or score > unique[doc_id]:
@@ -173,17 +123,34 @@ class PhraseWorker(Worker):
 
         candidates = list(unique.items())
         candidates.sort(key=lambda x: x[1], reverse=True)
-        # Limit to e.g. 100 phrase matches
         candidates = candidates[:100]
 
-        self.blackboard.post(BlackboardEntry(
-            type="candidates",
-            content={"source": "phrase", "candidates": candidates},
-            source="phrase_worker"
-        ))
+        phrase_time = (time.perf_counter() - start) * 1000
+        debug(f"PhraseWorker: phrase_time={phrase_time:.2f}ms, count={len(candidates)}")
 
         return {
             "source": "phrase",
+            "candidates": candidates,
+            "count": len(candidates)
+        }
+
+
+class AttributeWorker(Worker):
+    """Worker that performs attribute-based retrieval."""
+    def __init__(self, db):
+        self.db = db
+
+    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        subject = payload.get("subject")
+        attribute = payload.get("attribute")
+        if not subject or not attribute:
+            return {"error": "No subject or attribute", "source": "attribute", "candidates": []}
+
+        rows = self.db.search_attribute(subject, attribute)
+        candidates = [(row["id"], 0.0) for row in rows]
+
+        return {
+            "source": "attribute",
             "candidates": candidates,
             "count": len(candidates)
         }

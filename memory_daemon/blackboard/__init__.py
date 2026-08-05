@@ -1,6 +1,6 @@
 from .core import Blackboard
 from .scheduler import Scheduler
-from .workers import Worker, FAISSWorker, BM25Worker, GraphWorker, RankingWorker
+from .workers import Worker, FAISSWorker, BM25Worker, GraphWorker
 
 __all__ = [
     "Blackboard",
@@ -9,5 +9,5 @@ __all__ = [
     "FAISSWorker",
     "BM25Worker",
     "GraphWorker",
-    "RankingWorker"
+    
 ]

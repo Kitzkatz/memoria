@@ -24,8 +24,8 @@ import time
 from blackboard.core import Blackboard, BlackboardEntry
 from blackboard.scheduler import Scheduler
 from blackboard.workers import (
-    FAISSWorker, BM25Worker, GraphWorker, RankingWorker,
-    PhraseWorker   # <--- added
+    FAISSWorker, BM25Worker, GraphWorker,
+    PhraseWorker, AttributeWorker   # <-- add this
 )
 
 class MemorySystem:
@@ -80,23 +80,25 @@ class MemorySystem:
                 self.inverted_index.build()
 
             # Create workers
-            faiss_worker = FAISSWorker(self.blackboard, self.vector_store)
-            bm25_worker = BM25Worker(self.blackboard, self.bm25_ranker, self.inverted_index) if self.bm25_ranker else None
-            graph_worker = GraphWorker(self.blackboard, self.graph_search, self.entity_store)
-            ranking_worker = RankingWorker(self.blackboard, None, self.bm25_ranker)
+            faiss_worker = FAISSWorker(self.vector_store)
+            bm25_worker = BM25Worker(self.bm25_ranker, self.inverted_index) if self.bm25_ranker else None
+            graph_worker = GraphWorker(self.graph_search, self.entity_store)
+##            ranking_worker = RankingWorker(self.blackboard, None, self.bm25_ranker)
+            attribute_worker = AttributeWorker(self.db)
+            self.scheduler.register_worker("attribute", attribute_worker.process)
 
             # Register workers (pass the process method, not the object)
             self.scheduler.register_worker("faiss", faiss_worker.process)
             if bm25_worker:
                 self.scheduler.register_worker("bm25", bm25_worker.process)
             self.scheduler.register_worker("graph", graph_worker.process)
-            self.scheduler.register_worker("ranking", ranking_worker.process)
+##            self.scheduler.register_worker("ranking", ranking_worker.process)
 
             if getattr(settings, "USE_INVERTED_INDEX", False) and self.inverted_index:
-                phrase_worker = PhraseWorker(self.blackboard, self.inverted_index)
+                phrase_worker = PhraseWorker(self.inverted_index)
                 self.scheduler.register_worker("phrase", phrase_worker.process)
 
-            self.scheduler.start()
+##            self.scheduler.start()
         else:
             self.blackboard = None
             self.scheduler = None
@@ -240,133 +242,311 @@ class MemorySystem:
         embedding_ms = (time.perf_counter() - t0_embed) * 1000
 
         if self.use_blackboard and self.scheduler:
-            # ---------- Blackboard Path ----------
-            t0_faiss = time.perf_counter()
 
-            # Submit tasks – scheduler now uses ThreadPoolExecutor
-            self.scheduler.submit("faiss", {"vector": vec, "top_k": settings.TOP_K})
+            t0_retrieval = time.perf_counter()
+
+            task_ids = []
+
+            task_ids.append(
+                self.scheduler.submit(
+                    "faiss",
+                    {
+                        "vector": vec,
+                        "top_k": settings.TOP_K,
+                    },
+                )
+            )
+
             if self.bm25_ranker:
-                self.scheduler.submit("bm25", {"tokens": query.tokens, "limit": settings.TOP_K})
-            self.scheduler.submit("graph", {"entities": query.entities, "limit": settings.GRAPH_TOP_K})
+                task_ids.append(
+                    self.scheduler.submit(
+                        "bm25",
+                        {
+                            "tokens": query.tokens,
+                            "limit": settings.TOP_K,
+                        },
+                    )
+                )
+
+            if query.entities:
+                task_ids.append(
+                    self.scheduler.submit(
+                        "graph",
+                        {
+                            "entities": query.entities,
+                            "limit": settings.GRAPH_TOP_K,
+                        },
+                    )
+                )
 
             phrases = query.metadata.get("phrases", [])
+
             if phrases and self.inverted_index:
-                self.scheduler.submit("phrase", {"phrases": phrases})
+                task_ids.append(
+                    self.scheduler.submit(
+                        "phrase",
+                        {
+                            "phrases": phrases,
+                            "limit": 100,
+                        },
+                    )
+                )
 
-            # Wait for all tasks to complete (max 2 seconds)
-            if not self.scheduler.wait_for_tasks(timeout=2.0):
-                debug("Blackboard: some tasks timed out")
+            subject = query.metadata.get("subject")
+            attribute = query.metadata.get("attribute")
 
-            # Collect all candidates from blackboard
-            entries = self.blackboard.get_entries(type="candidates")
+            if subject and attribute:
+                task_ids.append(
+                    self.scheduler.submit(
+                        "attribute",
+                        {
+                            "subject": subject,
+                            "attribute": attribute,
+                        },
+                    )
+                )
+
+            t_wait = time.perf_counter()
+
+            completed = self.scheduler.wait_for_tasks(
+                task_ids,
+                timeout=0.05,
+            )
+
+            debug(
+                f"Scheduler wait {(time.perf_counter()-t_wait)*1000:.2f}ms "
+                f"({'complete' if completed else 'timeout'})"
+            )
+
+            worker_results = self.scheduler.results(task_ids)
+
             mem_ids = set()
-            source_map = {}  # mem_id -> (source, dist, graph_hit)
-            for entry in entries:
-                source = entry.content.get("source")
-                cand_list = entry.content.get("candidates", [])
-                if source == "faiss":
-                    for mem_id, dist in cand_list:
-                        mem_ids.add(mem_id)
-                        source_map[mem_id] = ("faiss", float(dist), False)
-                elif source == "bm25":
-                    for doc_id, score in cand_list:
-                        mem_ids.add(doc_id)
-                        pseudo_dist = 1.0 / (score + 1e-6)
-                        source_map[doc_id] = ("bm25", pseudo_dist, False)
-                elif source == "graph":
-                    for mem_id in cand_list:
-                        mem_ids.add(mem_id)
-                        source_map[mem_id] = ("graph", 0.0, True)
-                elif source == "phrase":
-                    for doc_id, score in cand_list:
-                        mem_ids.add(doc_id)
-                        source_map[doc_id] = ("phrase", 0.0, False)
+            source_map = {}
 
-            # Batch fetch all rows in one query
+            for result in worker_results:
+
+                if not result:
+                    continue
+
+                source = result["source"]
+
+                candidates = result["candidates"]
+
+                if source == "faiss":
+
+                    for mem_id, dist in candidates:
+
+                        mem_ids.add(mem_id)
+
+                        source_map[mem_id] = (
+                            "faiss",
+                            float(dist),
+                            False,
+                        )
+
+                elif source == "bm25":
+
+                    for mem_id, score in candidates:
+
+                        mem_ids.add(mem_id)
+
+                        source_map[mem_id] = (
+                            "bm25",
+                            1.0 / (score + 1e-6),
+                            False,
+                        )
+
+                elif source == "graph":
+
+                    for mem_id in candidates:
+
+                        mem_ids.add(mem_id)
+
+                        source_map[mem_id] = (
+                            "graph",
+                            0.0,
+                            True,
+                        )
+
+                elif source == "phrase":
+
+                    for mem_id, score in candidates:
+
+                        mem_ids.add(mem_id)
+
+                        source_map[mem_id] = (
+                            "phrase",
+                            0.0,
+                            False,
+                        )
+
+                elif source == "attribute":
+
+                    for mem_id, dist in candidates:
+
+                        mem_ids.add(mem_id)
+
+                        source_map[mem_id] = (
+                            "attribute",
+                            float(dist),
+                            False,
+                        )
+
+            t_db = time.perf_counter()
+
             rows = self.db.fetch_many(list(mem_ids))
 
-            # Build CandidateRecords
+            database_ms = (time.perf_counter() - t_db) * 1000
+
             candidates = []
-            existing_ids = set()
+
             for mem_id, row in rows.items():
+
                 if row is None:
                     continue
-                source, dist, graph_hit = source_map.get(mem_id, (None, 0.0, False))
+
+                source, dist, graph_hit = source_map.get(
+                    mem_id,
+                    (None, 0.0, False),
+                )
+
                 memory = self.retrieval._build_memory_record(row)
-                embedding = self.embedding_cache.get(mem_id) or self.vector_store.get(mem_id)
+
+                embedding = (
+                    self.embedding_cache.get(mem_id)
+                    or self.vector_store.get(mem_id)
+                )
+
                 candidates.append(
                     CandidateRecord(
                         memory=memory,
-                        distance=float(dist),
+                        distance=dist,
                         embedding=embedding,
-                        graph_hit=graph_hit
+                        graph_hit=graph_hit,
                     )
                 )
-                existing_ids.add(mem_id)
 
-            # --- Memory Type Filtering ---
-            memory_type_hint = query.metadata.get("memory_type_hint")
-            if memory_type_hint and memory_type_hint != "general":
-                filtered = [c for c in candidates if c.memory.memory_type == memory_type_hint]
+            memory_type_hint = query.metadata.get(
+                "memory_type_hint"
+            )
+
+            if (
+                memory_type_hint
+                and memory_type_hint != "general"
+            ):
+
+                filtered = [
+                    c
+                    for c in candidates
+                    if c.memory.memory_type == memory_type_hint
+                ]
+
                 if filtered:
                     candidates = filtered
-                    debug(f"[MemorySystem] Filtered to {len(candidates)} candidates of type '{memory_type_hint}'")
-                else:
-                    debug(f"[MemorySystem] No candidates of type '{memory_type_hint}', keeping all")
 
-            faiss_ms = (time.perf_counter() - t0_faiss) * 1000
-            database_ms = faiss_ms
-            t0_rank = time.perf_counter()
-            results, ranking_diag = self.pipeline.run(query, candidates)
-            ranking_ms = (time.perf_counter() - t0_rank) * 1000
+            faiss_ms = (
+                time.perf_counter() - t0_retrieval
+            ) * 1000
+
+            t_rank = time.perf_counter()
+
+            results, ranking_diag = self.pipeline.run(
+                query,
+                candidates,
+            )
+
+            ranking_ms = (
+                time.perf_counter() - t_rank
+            ) * 1000
 
             response = []
-            for rank, candidate in enumerate(results, start=1):
-                response.append({
-                    "rank": rank,
-                    "id": candidate.memory.id,
-                    "text": candidate.memory.text,
-                    "normalized_text": candidate.memory.normalized_text,
-                    "memory_type": candidate.memory.memory_type,
-                    "importance": candidate.memory.importance,
-                    "distance": candidate.distance,
-                    "score": candidate.normalized_score,
-                    "final_score": candidate.final_score,
-                    "created_at": candidate.memory.created_at.isoformat(),
-                    "last_accessed": candidate.memory.last_accessed.isoformat(),
-                    "token_count": candidate.memory.token_count,
-                    "tokens": candidate.memory.tokens,
-                    "metadata": candidate.memory.metadata,
-                    "entities": candidate.memory.entities,
-                    "relationships": candidate.memory.relationships,
-                    "graph_hit": candidate.graph_hit,
-                    "diagnostics": candidate.diagnostics,
-                    "mmr_score": candidate.mmr_score,
-                    "diversity": candidate.diversity_score,
-                })
 
-            formatting_ms = (time.perf_counter() - t0_rank) * 1000
-            total_query_ms = (time.perf_counter() - overall_start) * 1000
+            for rank, candidate in enumerate(results, start=1):
+
+                response.append(
+                    {
+                        "rank": rank,
+                        "id": candidate.memory.id,
+                        "text": candidate.memory.text,
+                        "normalized_text": candidate.memory.normalized_text,
+                        "memory_type": candidate.memory.memory_type,
+                        "importance": candidate.memory.importance,
+                        "distance": candidate.distance,
+                        "score": candidate.normalized_score,
+                        "final_score": candidate.final_score,
+                        "created_at": candidate.memory.created_at.isoformat(),
+                        "last_accessed": candidate.memory.last_accessed.isoformat(),
+                        "token_count": candidate.memory.token_count,
+                        "tokens": candidate.memory.tokens,
+                        "metadata": candidate.memory.metadata,
+                        "entities": candidate.memory.entities,
+                        "relationships": candidate.memory.relationships,
+                        "graph_hit": candidate.graph_hit,
+                        "diagnostics": candidate.diagnostics,
+                        "mmr_score": candidate.mmr_score,
+                        "diversity": candidate.diversity_score,
+                    }
+                )
+
+            formatting_ms = (
+                time.perf_counter() - t_rank
+            ) * 1000
+
+            total_query_ms = (
+                time.perf_counter() - overall_start
+            ) * 1000
 
             return {
                 "results": response,
                 "diagnostics": {
                     "candidate_count": len(candidates),
                     "returned_count": len(response),
-                    "embedding_ms": round(embedding_ms, 3),
-                    "faiss_ms": round(faiss_ms, 3),
-                    "database_ms": round(database_ms, 3),
-                    "ranking_ms": round(ranking_ms, 3),
-                    "before_mmr": ranking_diag.get("before_mmr"),
-                    "after_mmr": ranking_diag.get("after_mmr"),
-                    "mmr_changed": ranking_diag.get("mmr_changed", False),
-                    "mmr_moves": ranking_diag.get("mmr_moves", 0),
-                    "formatting_ms": round(formatting_ms, 3),
-                    "total_query_ms": round(total_query_ms, 3)
-                }
+                    "embedding_ms": round(
+                        embedding_ms,
+                        3,
+                    ),
+                    "faiss_ms": round(
+                        faiss_ms,
+                        3,
+                    ),
+                    "database_ms": round(
+                        database_ms,
+                        3,
+                    ),
+                    "ranking_ms": round(
+                        ranking_ms,
+                        3,
+                    ),
+                    "before_mmr": ranking_diag.get(
+                        "before_mmr"
+                    ),
+                    "after_mmr": ranking_diag.get(
+                        "after_mmr"
+                    ),
+                    "mmr_changed": ranking_diag.get(
+                        "mmr_changed",
+                        False,
+                    ),
+                    "mmr_moves": ranking_diag.get(
+                        "mmr_moves",
+                        0,
+                    ),
+                    "formatting_ms": round(
+                        formatting_ms,
+                        3,
+                    ),
+                    "total_query_ms": round(
+                        total_query_ms,
+                        3,
+                    ),
+                },
             }
 
         else:
+            # ---------- V3 Fallback Path ----------
+            # ... (keep exactly as before)
+            
+            
             # ---------- V3 Fallback Path (unchanged) ----------
             # ... (keep the existing fallback code exactly as before) ...
             # ---------- V3 Fallback Path (unchanged) ----------
