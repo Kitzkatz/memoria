@@ -20,10 +20,12 @@ class Settings(BaseModel):
     
 
     # Retrieval
-    TOP_K: int = 300
+    TOP_K: int = 500
     TOP_N: int = 3
     GRAPH_TOP_K: int = 50
     GRAPH_SEARCH_LIMIT: int = 200
+
+    GRAPH_DEPTH: int = 3
 
     # After existing fields
     USE_INVERTED_INDEX: bool = True
@@ -42,22 +44,33 @@ class Settings(BaseModel):
     MEMORY_DECAY_RATE: float = 0.001
     IMPORTANCE_DELTA: float = 0.01
 
+    # Add to Settings class
+    NUM_SHARDS: int = 5
+    USE_SHARDING: bool = False
+    TOP_K_PER_SHARD: int = 150
+
     # Debug
     DEBUG: bool = False
 
     # Add to Settings class
     ENTITY_BOOST: float = 0.50
 
+    # ---- Adaptive Weighter ----
+    USE_ADAPTIVE_WEIGHTS: bool = True
+    ADAPTIVE_WEIGHT_STEP: float = 0.02
+    ADAPTIVE_WEIGHT_MAX: float = 0.40
+    ADAPTIVE_WEIGHT_MIN: float = 0.01
+
     # Ranking Weights
-    RANKING_SEMANTIC: float = 0.20
-    RANKING_IMPORTANCE: float = 0.08
-    RANKING_RECENCY: float = 0.05
-    RANKING_TOKEN: float = 0.07
-    RANKING_FEEDBACK: float = 0.02
-    RANKING_ENTITY: float = 0.23
-    RANKING_SUBJECT: float = 0.20
-    RANKING_ATTRIBUTE: float = 0.15
-    RANKING_TFIDF: float = 0.08
+    RANKING_SEMANTIC: float = 0.2250
+    RANKING_IMPORTANCE: float = 0.0360
+    RANKING_RECENCY: float = 0.0100
+    RANKING_TOKEN: float = 0.1038
+    RANKING_FEEDBACK: float = 0.0100
+    RANKING_ENTITY: float = 0.2144
+    RANKING_SUBJECT: float = 0.1864
+    RANKING_ATTRIBUTE: float = 0.1398
+    RANKING_TFIDF: float = 0.0746
 
     # Finalizer Weights
     FINALIZER_RELEVANCE: float = 0.25

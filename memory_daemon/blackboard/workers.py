@@ -16,7 +16,7 @@ class Worker:
 
 
 class FAISSWorker(Worker):
-    """Worker that performs FAISS vector search."""
+    """Worker that performs FAISS vector search with shard support."""
     def __init__(self, vector_store):
         self.vector_store = vector_store
 
@@ -24,23 +24,31 @@ class FAISSWorker(Worker):
         start = time.perf_counter()
         query_vec = payload.get("vector")
         top_k = payload.get("top_k", settings.TOP_K)
+        shard_id = payload.get("shard_id", 0)
+        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
+
         if query_vec is None:
             return {"error": "No vector provided", "source": "faiss", "candidates": []}
 
-        ids, distances = self.vector_store.search(query_vec, k=top_k)
+        ids, distances = self.vector_store.search(query_vec, k=top_k * num_shards)
         candidates = list(zip(ids, distances))
-        search_time = (time.perf_counter() - start) * 1000
 
-        debug(f"FAISSWorker: search={search_time:.2f}ms, count={len(ids)}")
+        # Filter by shard (simple modulo)
+        if num_shards > 1:
+            candidates = [(mid, dist) for mid, dist in candidates if mid % num_shards == shard_id]
+            candidates = candidates[:top_k]
+
+        search_time = (time.perf_counter() - start) * 1000
+        debug(f"FAISSWorker (shard {shard_id}): search={search_time:.2f}ms, count={len(candidates)}")
         return {
             "source": "faiss",
             "candidates": candidates,
-            "count": len(ids)
+            "count": len(candidates)
         }
 
 
 class BM25Worker(Worker):
-    """Worker that performs BM25 lexical search."""
+    """Worker that performs BM25 lexical search with shard support."""
     def __init__(self, bm25_ranker, inverted_index):
         self.bm25_ranker = bm25_ranker
         self.inverted_index = inverted_index
@@ -49,8 +57,9 @@ class BM25Worker(Worker):
         start = time.perf_counter()
         query_tokens = payload.get("tokens", [])
         limit = payload.get("limit", settings.TOP_K)
-        
-        # --- FIX: ensure limit is an int ---
+        shard_id = payload.get("shard_id", 0)
+        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
+
         if not isinstance(limit, int):
             limit = int(limit) if limit else settings.TOP_K
 
@@ -61,24 +70,25 @@ class BM25Worker(Worker):
         for token in query_tokens:
             candidate_ids.update(self.inverted_index.search(token))
         candidate_ids = list(candidate_ids)
-
-        # --- FIX: ensure candidate_ids are ints ---
         candidate_ids = [int(x) for x in candidate_ids if x is not None]
 
         if not candidate_ids:
             return {"error": "No candidates found", "source": "bm25", "candidates": []}
 
+        # Filter by shard
+        if num_shards > 1:
+            candidate_ids = [cid for cid in candidate_ids if cid % num_shards == shard_id]
+
         candidates = [
             (doc_id, self.bm25_ranker.score(query_tokens, doc_id))
-            for doc_id in candidate_ids[:limit]
+            for doc_id in candidate_ids[:limit * num_shards]
         ]
 
         candidates.sort(key=lambda x: x[1], reverse=True)
         candidates = candidates[:limit]
 
         build_time = (time.perf_counter() - start) * 1000
-        debug(f"BM25Worker: build={build_time:.2f}ms, count={len(candidates)}")
-
+        debug(f"BM25Worker (shard {shard_id}): build={build_time:.2f}ms, count={len(candidates)}")
         return {
             "source": "bm25",
             "candidates": candidates,
@@ -87,7 +97,7 @@ class BM25Worker(Worker):
 
 
 class GraphWorker(Worker):
-    """Worker that performs graph-based retrieval using Numpy graph."""
+    """Worker that performs graph-based retrieval using Numpy graph with shard support."""
     def __init__(self, numpy_graph):
         self.numpy_graph = numpy_graph
 
@@ -96,16 +106,24 @@ class GraphWorker(Worker):
         entities = payload.get("entities", [])
         depth = payload.get("depth", 2)
         limit = payload.get("limit", settings.GRAPH_TOP_K)
+        shard_id = payload.get("shard_id", 0)
+        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
+
         if not entities or not self.numpy_graph:
             return {"error": "No entities or graph", "source": "graph", "candidates": []}
 
-        memory_ids = self.numpy_graph.multi_hop_search(entities, depth=depth, limit=limit)
-        # Ensure memory_ids are ints
+        memory_ids = self.numpy_graph.multi_hop_search(entities, depth=depth, limit=limit * num_shards)
         memory_ids = [int(x) for x in memory_ids if x is not None]
+
+        # Filter by shard
+        if num_shards > 1:
+            memory_ids = [mid for mid in memory_ids if mid % num_shards == shard_id]
+            memory_ids = memory_ids[:limit]
+
         candidates = [(mem_id, 0.0) for mem_id in memory_ids]
         search_time = (time.perf_counter() - start) * 1000
 
-        debug(f"GraphWorker: search={search_time:.2f}ms, count={len(candidates)}")
+        debug(f"GraphWorker (shard {shard_id}): search={search_time:.2f}ms, count={len(candidates)}")
         return {
             "source": "graph",
             "candidates": candidates,
@@ -114,13 +132,16 @@ class GraphWorker(Worker):
 
 
 class PhraseWorker(Worker):
-    """Worker that performs phrase search using the inverted index."""
+    """Worker that performs phrase search using the inverted index with shard support."""
     def __init__(self, inverted_index):
         self.inverted_index = inverted_index
 
     def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         start = time.perf_counter()
         phrases = payload.get("phrases", [])
+        shard_id = payload.get("shard_id", 0)
+        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
+
         if not phrases or not self.inverted_index:
             return {"error": "No phrases or inverted index missing", "source": "phrase", "candidates": []}
 
@@ -137,11 +158,14 @@ class PhraseWorker(Worker):
 
         candidates = list(unique.items())
         candidates.sort(key=lambda x: x[1], reverse=True)
+
+        # Filter by shard
+        if num_shards > 1:
+            candidates = [(mid, score) for mid, score in candidates if mid % num_shards == shard_id]
         candidates = candidates[:100]
 
         phrase_time = (time.perf_counter() - start) * 1000
-        debug(f"PhraseWorker: phrase_time={phrase_time:.2f}ms, count={len(candidates)}")
-
+        debug(f"PhraseWorker (shard {shard_id}): phrase_time={phrase_time:.2f}ms, count={len(candidates)}")
         return {
             "source": "phrase",
             "candidates": candidates,
@@ -150,18 +174,25 @@ class PhraseWorker(Worker):
 
 
 class AttributeWorker(Worker):
-    """Worker that performs attribute-based retrieval."""
+    """Worker that performs attribute-based retrieval with shard support."""
     def __init__(self, db):
         self.db = db
 
     def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         subject = payload.get("subject")
         attribute = payload.get("attribute")
+        shard_id = payload.get("shard_id", 0)
+        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
+
         if not subject or not attribute:
             return {"error": "No subject or attribute", "source": "attribute", "candidates": []}
 
         rows = self.db.search_attribute(subject, attribute)
         candidates = [(row["id"], 0.0) for row in rows]
+
+        # Filter by shard
+        if num_shards > 1:
+            candidates = [(mid, score) for mid, score in candidates if mid % num_shards == shard_id]
 
         return {
             "source": "attribute",

@@ -19,6 +19,8 @@ from ranking.models import CandidateRecord
 from graph.entity_resolver import EntityResolver
 from graph.relationship_builder import RelationshipBuilder
 
+from retrieval.shard_manager import ShardManager
+
 # ---- Ingestion workers (V4) ----
 from ingestion.code_worker import CodeWorker
 from ingestion.pdf_worker import PDFWorker
@@ -64,7 +66,13 @@ class MemorySystem:
         self.pdf_worker = PDFWorker(self)
         self.code_worker = CodeWorker(self)
 
-        # ---- Numpy Graph (V4 - fast, in-memory) ----
+        # ---- Sharding (V4) ----
+        
+        self.shard_manager = ShardManager(
+            num_shards=getattr(settings, "NUM_SHARDS", 5)  # 5 types: semantic, episodic, procedural, code, science
+        )
+        debug(f"Shard manager initialized: {self.shard_manager.num_shards} shards (type-based)")        # ---- Numpy Graph (V4 - fast, in-memory) ----
+        
         from graph.numpy_graph import NumpyGraph
         self.numpy_graph = NumpyGraph(db)
         debug(f"Numpy graph built: {len(self.numpy_graph.entities)} entities, {np.count_nonzero(self.numpy_graph.adj_matrix)} edges")
@@ -319,79 +327,93 @@ class MemorySystem:
                 candidates = relevance_candidates
                 debug("[MemorySystem] Using relevance pool only (skipping workers)")
             else:
-                # --- Step 3: Submit tasks ---
+                # --- Step 3: Get shards based on memory type hint ---
+                use_sharding = getattr(settings, "USE_SHARDING", False)
+                if use_sharding and hasattr(self, 'shard_manager'):
+                    shards = self.shard_manager.get_shards_for_query(query, memory_type_hint)
+                    num_shards = len(shards)
+                    debug(f"[MemorySystem] Using type sharding: {num_shards} shard(s) for type '{memory_type_hint}'")
+                else:
+                    shards = [0]
+                    num_shards = 1
+
+                # --- Step 4: Submit tasks per shard ---
                 task_ids = []
+                top_k_per_shard = getattr(settings, "TOP_K_PER_SHARD", 300)
+                graph_limit_per_shard = settings.GRAPH_TOP_K // num_shards if num_shards > 1 else settings.GRAPH_TOP_K
 
-                task_ids.append(
-                    self.scheduler.submit(
-                        "faiss",
-                        {
-                            "vector": vec,
-                            "top_k": settings.TOP_K,
-                        },
-                    )
-                )
-
-                if self.bm25_ranker:
+                for shard_id in shards:
                     task_ids.append(
                         self.scheduler.submit(
-                            "bm25",
+                            "faiss",
                             {
-                                "tokens": query.tokens,
-                                "limit": settings.TOP_K,
-                            },
+                                "vector": vec,
+                                "top_k": top_k_per_shard,
+                                "shard_id": shard_id,
+                                "num_shards": num_shards,
+                            }
                         )
                     )
 
-                if query.entities:
-                    task_ids.append(
-                        self.scheduler.submit(
-                            "graph",
-                            {
-                                "entities": query.entities,
-                                "limit": settings.GRAPH_TOP_K,
-                            },
+                    if self.bm25_ranker:
+                        task_ids.append(
+                            self.scheduler.submit(
+                                "bm25",
+                                {
+                                    "tokens": query.tokens,
+                                    "limit": top_k_per_shard,
+                                    "shard_id": shard_id,
+                                    "num_shards": num_shards,
+                                }
+                            )
                         )
-                    )
 
-                phrases = query.metadata.get("phrases", [])
-
-                if phrases and self.inverted_index:
-                    task_ids.append(
-                        self.scheduler.submit(
-                            "phrase",
-                            {
-                                "phrases": phrases,
-                                "limit": 100,
-                            },
+                    if query.entities:
+                        task_ids.append(
+                            self.scheduler.submit(
+                                "graph",
+                                {
+                                    "entities": query.entities,
+                                    "limit": graph_limit_per_shard,
+                                    "shard_id": shard_id,
+                                    "num_shards": num_shards,
+                                    "depth": getattr(settings, "GRAPH_DEPTH", 2),
+                                }
+                            )
                         )
-                    )
 
-                subject = query.metadata.get("subject")
-                attribute = query.metadata.get("attribute")
-
-                if subject and attribute:
-                    task_ids.append(
-                        self.scheduler.submit(
-                            "attribute",
-                            {
-                                "subject": subject,
-                                "attribute": attribute,
-                            },
+                    phrases = query.metadata.get("phrases", [])
+                    if phrases and self.inverted_index:
+                        task_ids.append(
+                            self.scheduler.submit(
+                                "phrase",
+                                {
+                                    "phrases": phrases,
+                                    "limit": 100 // num_shards,
+                                    "shard_id": shard_id,
+                                    "num_shards": num_shards,
+                                }
+                            )
                         )
-                    )
+
+                    subject = query.metadata.get("subject")
+                    attribute = query.metadata.get("attribute")
+                    if subject and attribute:
+                        task_ids.append(
+                            self.scheduler.submit(
+                                "attribute",
+                                {
+                                    "subject": subject,
+                                    "attribute": attribute,
+                                    "shard_id": shard_id,
+                                    "num_shards": num_shards,
+                                }
+                            )
+                        )
 
                 t_wait = time.perf_counter()
-
-                completed = self.scheduler.wait_for_tasks(
-                    task_ids,
-                    timeout=0.05,
-                )
-
-                debug(
-                    f"Scheduler wait {(time.perf_counter()-t_wait)*1000:.2f}ms "
-                    f"({'complete' if completed else 'timeout'})"
-                )
+                completed = self.scheduler.wait_for_tasks(task_ids, timeout=0.05)
+                debug(f"Scheduler wait {(time.perf_counter()-t_wait)*1000:.2f}ms ({'complete' if completed else 'timeout'})")
 
                 worker_results = self.scheduler.results(task_ids)
 
@@ -399,99 +421,43 @@ class MemorySystem:
                 source_map = {}
 
                 for result in worker_results:
-
                     if not result:
                         continue
-
                     source = result["source"]
-
                     candidates = result["candidates"]
 
                     if source == "faiss":
-
                         for mem_id, dist in candidates:
-
                             mem_ids.add(mem_id)
-
-                            source_map[mem_id] = (
-                                "faiss",
-                                float(dist),
-                                False,
-                            )
-
+                            source_map[mem_id] = ("faiss", float(dist), False)
                     elif source == "bm25":
-
                         for mem_id, score in candidates:
-
                             mem_ids.add(mem_id)
-
-                            source_map[mem_id] = (
-                                "bm25",
-                                1.0 / (score + 1e-6),
-                                False,
-                            )
-
+                            source_map[mem_id] = ("bm25", 1.0 / (score + 1e-6), False)
                     elif source == "graph":
-
                         for mem_id in candidates:
-
                             mem_ids.add(mem_id)
-
-                            source_map[mem_id] = (
-                                "graph",
-                                0.0,
-                                True,
-                            )
-
+                            source_map[mem_id] = ("graph", 0.0, True)
                     elif source == "phrase":
-
                         for mem_id, score in candidates:
-
                             mem_ids.add(mem_id)
-
-                            source_map[mem_id] = (
-                                "phrase",
-                                0.0,
-                                False,
-                            )
-
+                            source_map[mem_id] = ("phrase", 0.0, False)
                     elif source == "attribute":
-
                         for mem_id, dist in candidates:
-
                             mem_ids.add(mem_id)
-
-                            source_map[mem_id] = (
-                                "attribute",
-                                float(dist),
-                                False,
-                            )
+                            source_map[mem_id] = ("attribute", float(dist), False)
 
                 t_db = time.perf_counter()
-
                 rows = self.db.fetch_many(list(mem_ids))
-
                 database_ms = (time.perf_counter() - t_db) * 1000
 
                 worker_candidates = []
-
                 for mem_id, row in rows.items():
-
                     if row is None:
                         continue
-
-                    source, dist, graph_hit = source_map.get(
-                        mem_id,
-                        (None, 0.0, False),
-                    )
-
+                    source, dist, graph_hit = source_map.get(mem_id, (None, 0.0, False))
                     memory = self.retrieval._build_memory_record(row)
-
-                    embedding = (
-                        self.embedding_cache.get(mem_id)
-                        or self.vector_store.get(mem_id)
-                    )
-
+                    embedding = self.embedding_cache.get(mem_id) or self.vector_store.get(mem_id)
                     worker_candidates.append(
                         CandidateRecord(
                             memory=memory,
@@ -501,9 +467,8 @@ class MemorySystem:
                         )
                     )
 
-                # --- Step 4: Merge relevance + worker candidates ---
+                # --- Step 5: Merge relevance + worker candidates ---
                 candidates = relevance_candidates + worker_candidates
-                # Deduplicate by memory ID
                 seen = set()
                 unique_candidates = []
                 for c in candidates:
@@ -513,119 +478,69 @@ class MemorySystem:
                 candidates = unique_candidates
                 debug(f"[MemorySystem] Total unique candidates: {len(candidates)} (relevance: {len(relevance_candidates)}, workers: {len(worker_candidates)})")
 
-            # --- Step 5: Memory Type Filtering (final pass) ---
+            # --- Step 6: Memory Type Filtering ---
             if memory_type_hint and memory_type_hint != "general":
-                filtered = [
-                    c
-                    for c in candidates
-                    if c.memory.memory_type == memory_type_hint
-                ]
-
+                filtered = [c for c in candidates if c.memory.memory_type == memory_type_hint]
                 if filtered:
                     candidates = filtered
                     debug(f"[MemorySystem] Final type filter: {len(candidates)} candidates of type '{memory_type_hint}'")
                 else:
                     debug(f"[MemorySystem] No candidates of type '{memory_type_hint}', keeping all")
 
-            faiss_ms = (
-                time.perf_counter() - t0_retrieval
-            ) * 1000
+            faiss_ms = (time.perf_counter() - t0_retrieval) * 1000
 
             t_rank = time.perf_counter()
-
-            results, ranking_diag = self.pipeline.run(
-                query,
-                candidates,
-            )
-
-            ranking_ms = (
-                time.perf_counter() - t_rank
-            ) * 1000
+            results, ranking_diag = self.pipeline.run(query, candidates)
+            ranking_ms = (time.perf_counter() - t_rank) * 1000
 
             response = []
-
             for rank, candidate in enumerate(results, start=1):
+                response.append({
+                    "rank": rank,
+                    "id": candidate.memory.id,
+                    "text": candidate.memory.text,
+                    "normalized_text": candidate.memory.normalized_text,
+                    "memory_type": candidate.memory.memory_type,
+                    "importance": candidate.memory.importance,
+                    "distance": candidate.distance,
+                    "score": candidate.normalized_score,
+                    "final_score": candidate.final_score,
+                    "created_at": candidate.memory.created_at.isoformat(),
+                    "last_accessed": candidate.memory.last_accessed.isoformat(),
+                    "token_count": candidate.memory.token_count,
+                    "tokens": candidate.memory.tokens,
+                    "metadata": candidate.memory.metadata,
+                    "entities": candidate.memory.entities,
+                    "relationships": candidate.memory.relationships,
+                    "graph_hit": candidate.graph_hit,
+                    "diagnostics": candidate.diagnostics,
+                    "mmr_score": candidate.mmr_score,
+                    "diversity": candidate.diversity_score,
+                })
 
-                response.append(
-                    {
-                        "rank": rank,
-                        "id": candidate.memory.id,
-                        "text": candidate.memory.text,
-                        "normalized_text": candidate.memory.normalized_text,
-                        "memory_type": candidate.memory.memory_type,
-                        "importance": candidate.memory.importance,
-                        "distance": candidate.distance,
-                        "score": candidate.normalized_score,
-                        "final_score": candidate.final_score,
-                        "created_at": candidate.memory.created_at.isoformat(),
-                        "last_accessed": candidate.memory.last_accessed.isoformat(),
-                        "token_count": candidate.memory.token_count,
-                        "tokens": candidate.memory.tokens,
-                        "metadata": candidate.memory.metadata,
-                        "entities": candidate.memory.entities,
-                        "relationships": candidate.memory.relationships,
-                        "graph_hit": candidate.graph_hit,
-                        "diagnostics": candidate.diagnostics,
-                        "mmr_score": candidate.mmr_score,
-                        "diversity": candidate.diversity_score,
-                    }
-                )
-
-            formatting_ms = (
-                time.perf_counter() - t_rank
-            ) * 1000
-
-            total_query_ms = (
-                time.perf_counter() - overall_start
-            ) * 1000
+            formatting_ms = (time.perf_counter() - t_rank) * 1000
+            total_query_ms = (time.perf_counter() - overall_start) * 1000
 
             return {
                 "results": response,
                 "diagnostics": {
                     "candidate_count": len(candidates),
                     "returned_count": len(response),
-                    "embedding_ms": round(
-                        embedding_ms,
-                        3,
-                    ),
-                    "faiss_ms": round(
-                        faiss_ms,
-                        3,
-                    ),
-                    "database_ms": round(
-                        database_ms,
-                        3,
-                    ),
-                    "ranking_ms": round(
-                        ranking_ms,
-                        3,
-                    ),
-                    "before_mmr": ranking_diag.get(
-                        "before_mmr"
-                    ),
-                    "after_mmr": ranking_diag.get(
-                        "after_mmr"
-                    ),
-                    "mmr_changed": ranking_diag.get(
-                        "mmr_changed",
-                        False,
-                    ),
-                    "mmr_moves": ranking_diag.get(
-                        "mmr_moves",
-                        0,
-                    ),
-                    "formatting_ms": round(
-                        formatting_ms,
-                        3,
-                    ),
-                    "total_query_ms": round(
-                        total_query_ms,
-                        3,
-                    ),
+                    "embedding_ms": round(embedding_ms, 3),
+                    "faiss_ms": round(faiss_ms, 3),
+                    "database_ms": round(database_ms, 3),
+                    "ranking_ms": round(ranking_ms, 3),
+                    "before_mmr": ranking_diag.get("before_mmr"),
+                    "after_mmr": ranking_diag.get("after_mmr"),
+                    "mmr_changed": ranking_diag.get("mmr_changed", False),
+                    "mmr_moves": ranking_diag.get("mmr_moves", 0),
+                    "formatting_ms": round(formatting_ms, 3),
+                    "total_query_ms": round(total_query_ms, 3),
                 },
             }
 
         else:
+            
             
             # ---------- V3 Fallback Path (unchanged) ----------
             # ... (keep the existing fallback code exactly as before) ...
