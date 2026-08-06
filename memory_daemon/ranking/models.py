@@ -21,7 +21,10 @@ class CandidateRecord(BaseModel):
     importance_score: float = 0.0
     recency_score: float = 0.0
     token_score: float = 0.0
+    graph_distance_score: float = 0.0
+    tfidf_score: float = 0.0
     feedback_score: float = 0.0
+    
 
     # Pipeline Scores
     base_score: float = 0.0

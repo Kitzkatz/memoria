@@ -89,6 +89,130 @@ class MemoryDB:
                 )
             """)
 
+                        # --- Type-specific tables (V4) ---
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS memories_semantic (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    normalized_text TEXT,
+                    tokens TEXT,
+                    token_count INTEGER DEFAULT 0,
+                    memory_type TEXT DEFAULT 'semantic',
+                    metadata TEXT,
+                    entities TEXT,
+                    relationships TEXT,
+                    importance REAL DEFAULT 0.5,
+                    created_at TEXT,
+                    last_accessed TEXT,
+                    tombstone INTEGER DEFAULT 0,
+                    subject TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.subject')) VIRTUAL,
+                    attribute TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.attribute')) VIRTUAL
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS memories_episodic (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    normalized_text TEXT,
+                    tokens TEXT,
+                    token_count INTEGER DEFAULT 0,
+                    memory_type TEXT DEFAULT 'episodic',
+                    metadata TEXT,
+                    entities TEXT,
+                    relationships TEXT,
+                    importance REAL DEFAULT 0.5,
+                    created_at TEXT,
+                    last_accessed TEXT,
+                    tombstone INTEGER DEFAULT 0,
+                    subject TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.subject')) VIRTUAL,
+                    attribute TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.attribute')) VIRTUAL
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS memories_procedural (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    normalized_text TEXT,
+                    tokens TEXT,
+                    token_count INTEGER DEFAULT 0,
+                    memory_type TEXT DEFAULT 'procedural',
+                    metadata TEXT,
+                    entities TEXT,
+                    relationships TEXT,
+                    importance REAL DEFAULT 0.5,
+                    created_at TEXT,
+                    last_accessed TEXT,
+                    tombstone INTEGER DEFAULT 0,
+                    subject TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.subject')) VIRTUAL,
+                    attribute TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.attribute')) VIRTUAL
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS memories_code (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    normalized_text TEXT,
+                    tokens TEXT,
+                    token_count INTEGER DEFAULT 0,
+                    memory_type TEXT DEFAULT 'code',
+                    metadata TEXT,
+                    entities TEXT,
+                    relationships TEXT,
+                    importance REAL DEFAULT 0.5,
+                    created_at TEXT,
+                    last_accessed TEXT,
+                    tombstone INTEGER DEFAULT 0,
+                    subject TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.subject')) VIRTUAL,
+                    attribute TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.attribute')) VIRTUAL
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS memories_science (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    normalized_text TEXT,
+                    tokens TEXT,
+                    token_count INTEGER DEFAULT 0,
+                    memory_type TEXT DEFAULT 'science',
+                    metadata TEXT,
+                    entities TEXT,
+                    relationships TEXT,
+                    importance REAL DEFAULT 0.5,
+                    created_at TEXT,
+                    last_accessed TEXT,
+                    tombstone INTEGER DEFAULT 0,
+                    subject TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.subject')) VIRTUAL,
+                    attribute TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.attribute')) VIRTUAL
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS memories_relevance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    normalized_text TEXT,
+                    tokens TEXT,
+                    token_count INTEGER DEFAULT 0,
+                    memory_type TEXT,
+                    metadata TEXT,
+                    entities TEXT,
+                    relationships TEXT,
+                    importance REAL DEFAULT 0.5,
+                    created_at TEXT,
+                    last_accessed TEXT,
+                    tombstone INTEGER DEFAULT 0,
+                    subject TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.subject')) VIRTUAL,
+                    attribute TEXT GENERATED ALWAYS AS (json_extract(metadata, '$.attribute')) VIRTUAL
+                )
+            """)
+
+            # --- Indexes for type tables ---
+            for mem_type in ["semantic", "episodic", "procedural", "code", "science", "relevance"]:
+                self.conn.execute(f"CREATE INDEX IF NOT EXISTS idx_subject_{mem_type} ON memories_{mem_type}(subject)")
+                self.conn.execute(f"CREATE INDEX IF NOT EXISTS idx_attribute_{mem_type} ON memories_{mem_type}(attribute)")
+
+            
+            
+
             # Create indexes on virtual columns (IF NOT EXISTS)
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_subject ON memories(subject)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_attribute ON memories(attribute)")
@@ -110,9 +234,9 @@ class MemoryDB:
             tokens = record.tokens or normalized_text.split()
             token_count = record.token_count or len(tokens)
 
+            # --- Main insert (unchanged) ---
             cur.execute("""
                 INSERT INTO memories (
-
                     text,
                     normalized_text,
                     tokens,
@@ -124,36 +248,56 @@ class MemoryDB:
                     importance,
                     created_at,
                     last_accessed
-
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-
                 record.text,
-
                 normalized_text,
-
                 json.dumps(tokens),
-
                 int(token_count),
-
                 record.memory_type,
-
                 json.dumps(record.metadata or {}),
                 json.dumps(record.entities or []),
-
                 json.dumps(record.relationships or []),
-
                 float(record.importance or 0.5),
-
                 now,
-
                 now
-
             ))
 
-            self.conn.commit()
+            # --- NEW: Insert into type-specific table ---
+            mem_type = record.memory_type or "general"
+            if mem_type != "general":
+                type_table = f"memories_{mem_type}"
+                cur.execute(f"""
+                    INSERT INTO {type_table} (
+                        text,
+                        normalized_text,
+                        tokens,
+                        token_count,
+                        memory_type,
+                        metadata,
+                        entities,
+                        relationships,
+                        importance,
+                        created_at,
+                        last_accessed
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    record.text,
+                    normalized_text,
+                    json.dumps(tokens),
+                    int(token_count),
+                    mem_type,
+                    json.dumps(record.metadata or {}),
+                    json.dumps(record.entities or []),
+                    json.dumps(record.relationships or []),
+                    float(record.importance or 0.5),
+                    now,
+                    now
+                ))
 
+            self.conn.commit()
             return cur.lastrowid
         # -------------------------
     # BATCH INSERT
@@ -180,11 +324,11 @@ class MemoryDB:
             next_id = cur.fetchone()[0] + 1
 
             rows = []
+            type_rows = []  # NEW: store type table rows
 
             for offset, record in enumerate(records):
 
                 mem_id = next_id + offset
-
                 ids.append(mem_id)
 
                 normalized_text = (
@@ -202,6 +346,7 @@ class MemoryDB:
                     or len(tokens)
                 )
 
+                # Main table row
                 rows.append((
 
                     mem_id,
@@ -230,10 +375,31 @@ class MemoryDB:
 
                 ))
 
+                # NEW: Type table row (skip if "general")
+                mem_type = record.memory_type or "general"
+                if mem_type != "general":
+                    type_table = f"memories_{mem_type}"
+                    type_rows.append({
+                        "table": type_table,
+                        "data": (
+                            mem_id,
+                            record.text,
+                            normalized_text,
+                            json.dumps(tokens),
+                            int(token_count),
+                            mem_type,
+                            json.dumps(record.metadata or {}),
+                            json.dumps(record.entities or []),
+                            json.dumps(record.relationships or []),
+                            float(record.importance or 0.5),
+                            now,
+                            now
+                        )
+                    })
+
+            # Main insert (unchanged)
             cur.executemany("""
-
                 INSERT INTO memories (
-
                     id,
                     text,
                     normalized_text,
@@ -246,12 +412,31 @@ class MemoryDB:
                     importance,
                     created_at,
                     last_accessed
-
                 )
-
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-
             """, rows)
+
+            # NEW: Insert into type tables
+            for type_row in type_rows:
+                table = type_row["table"]
+                data = type_row["data"]
+                cur.execute(f"""
+                    INSERT INTO {table} (
+                        id,
+                        text,
+                        normalized_text,
+                        tokens,
+                        token_count,
+                        memory_type,
+                        metadata,
+                        entities,
+                        relationships,
+                        importance,
+                        created_at,
+                        last_accessed
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, data)
 
             self.conn.commit()
 
@@ -408,6 +593,43 @@ class MemoryDB:
             })
 
         return result
+
+
+    def fetch_many_by_type(self, mem_type: str, limit: int = 50):
+        """Fetch top N memories of a specific type by importance."""
+        table = f"memories_{mem_type}"
+        cur = self.conn.cursor()
+        cur.execute(f"""
+            SELECT *
+            FROM {table}
+            WHERE tombstone = 0
+            ORDER BY importance DESC, created_at DESC
+            LIMIT ?
+        """, (limit,))
+        rows = cur.fetchall()
+
+        result = []
+        for row in rows:
+            tokens = json.loads(row["tokens"]) if row["tokens"] else []
+            normalized_text = row["normalized_text"] if row["normalized_text"] is not None else row["text"]
+            result.append({
+                "id": row["id"],
+                "text": row["text"],
+                "normalized_text": normalized_text,
+                "tokens": tokens,
+                "token_count": row["token_count"] or len(tokens),
+                "memory_type": row["memory_type"],
+                "metadata": json.loads(row["metadata"]) if row["metadata"] else {},
+                "entities": json.loads(row["entities"]) if row["entities"] else [],
+                "relationships": json.loads(row["relationships"]) if row["relationships"] else [],
+                "importance": float(row["importance"] or 0.5),
+                "created_at": row["created_at"],
+                "last_accessed": row["last_accessed"],
+                "tombstone": row["tombstone"]
+            })
+        return result
+
+    
     def search_attribute(self, subject, attribute):
         if not subject or not attribute:
             return []

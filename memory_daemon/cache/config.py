@@ -57,6 +57,7 @@ class Settings(BaseModel):
     RANKING_ENTITY: float = 0.23
     RANKING_SUBJECT: float = 0.20
     RANKING_ATTRIBUTE: float = 0.15
+    RANKING_TFIDF: float = 0.08
 
     # Finalizer Weights
     FINALIZER_RELEVANCE: float = 0.25

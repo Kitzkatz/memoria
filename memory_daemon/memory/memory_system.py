@@ -19,6 +19,7 @@ from ranking.models import CandidateRecord
 from graph.entity_resolver import EntityResolver
 from graph.relationship_builder import RelationshipBuilder
 import time
+import numpy as np
 
 # V4 blackboard imports
 from blackboard.core import Blackboard, BlackboardEntry
@@ -56,6 +57,33 @@ class MemorySystem:
             self.graph_search
         )
 
+        # ---- Numpy Graph (V4 - fast, in-memory) ----
+        from graph.numpy_graph import NumpyGraph
+        self.numpy_graph = NumpyGraph(db)
+        debug(f"Numpy graph built: {len(self.numpy_graph.entities)} entities, {np.count_nonzero(self.numpy_graph.adj_matrix)} edges")
+
+        # ---- Relevance Manager (V4) ----
+        from memory.relevance_manager import RelevanceManager
+        self.relevance_manager = RelevanceManager(db, persist_path="relevance_data.json")
+
+        # ---- TF/IDF (V4 - built from type tables) ----
+        from ranking.tfidf import TFIDF
+        self.tfidf = TFIDF()
+        corpus_tokens = []
+        mem_types = ["semantic", "episodic", "procedural", "code", "science"]
+        for mem_type in mem_types:
+            rows = self.db.fetch_many_by_type(mem_type, limit=5000)
+            for row in rows:
+                tokens = row.get("tokens", [])
+                if tokens:
+                    corpus_tokens.append(tokens)
+        if corpus_tokens:
+            self.tfidf.build(corpus_tokens)
+            debug(f"TF/IDF built on {len(corpus_tokens)} memories")
+        else:
+            self.tfidf = None
+            debug("TF/IDF: No memories found, skipping")
+
         # ---- Blackboard / V4 Integration ----
         self.use_blackboard = getattr(settings, "USE_BLACKBOARD", False)
         self.bm25_ranker = None
@@ -82,32 +110,30 @@ class MemorySystem:
             # Create workers
             faiss_worker = FAISSWorker(self.vector_store)
             bm25_worker = BM25Worker(self.bm25_ranker, self.inverted_index) if self.bm25_ranker else None
-            graph_worker = GraphWorker(self.graph_search, self.entity_store)
-##            ranking_worker = RankingWorker(self.blackboard, None, self.bm25_ranker)
+            from blackboard.workers import GraphWorker
+            graph_worker = GraphWorker(self.numpy_graph)
             attribute_worker = AttributeWorker(self.db)
+            
             self.scheduler.register_worker("attribute", attribute_worker.process)
-
-            # Register workers (pass the process method, not the object)
             self.scheduler.register_worker("faiss", faiss_worker.process)
             if bm25_worker:
                 self.scheduler.register_worker("bm25", bm25_worker.process)
             self.scheduler.register_worker("graph", graph_worker.process)
-##            self.scheduler.register_worker("ranking", ranking_worker.process)
 
             if getattr(settings, "USE_INVERTED_INDEX", False) and self.inverted_index:
                 phrase_worker = PhraseWorker(self.inverted_index)
                 self.scheduler.register_worker("phrase", phrase_worker.process)
 
-##            self.scheduler.start()
         else:
             self.blackboard = None
             self.scheduler = None
 
-        # ---- Ranking Pipeline (can be initialized anytime) ----
+        # ---- Ranking Pipeline ----
         self.pipeline = RankingPipeline(
             attribute_map=self.attribute_map,
             db=self.db,
             bm25_ranker=self.bm25_ranker,
+            tfidf_ranker=self.tfidf,  # <-- pass TF/IDF to pipeline
             ranker=None,
             normalizer=None,
             booster=None,
@@ -115,7 +141,6 @@ class MemorySystem:
             mmr=None,
             finalizer=None,
         )
-
     # -------------------------------------
     # STORE (unchanged)
     # -------------------------------------
@@ -244,197 +269,245 @@ class MemorySystem:
         if self.use_blackboard and self.scheduler:
 
             t0_retrieval = time.perf_counter()
+            
+            # --- Step 1: Check relevance pool first ---
+            memory_type_hint = query.metadata.get("memory_type_hint", "general")
+            relevance_candidates = []
+            if memory_type_hint != "general" and hasattr(self, 'relevance_manager'):
+                relevance_ids = self.relevance_manager.get_top_relevant_by_type(memory_type_hint, limit=settings.TOP_K)
+                if relevance_ids:
+                    rows = self.db.fetch_many(relevance_ids)
+                    for mem_id, row in rows.items():
+                        if row:
+                            memory = self.retrieval._build_memory_record(row)
+                            embedding = self.embedding_cache.get(mem_id) or self.vector_store.get(mem_id)
+                            relevance_candidates.append(
+                                CandidateRecord(
+                                    memory=memory,
+                                    distance=0.0,
+                                    embedding=embedding,
+                                    graph_hit=False
+                                )
+                            )
+                    debug(f"[MemorySystem] Relevance pool returned {len(relevance_candidates)} candidates")
+                else:
+                    # If no relevance IDs, fetch from type table directly
+                    type_rows = self.db.fetch_many_by_type(memory_type_hint, limit=settings.TOP_K)
+                    for row in type_rows:
+                        if row:
+                            memory = self.retrieval._build_memory_record(row)
+                            embedding = self.embedding_cache.get(row["id"]) or self.vector_store.get(row["id"])
+                            relevance_candidates.append(
+                                CandidateRecord(
+                                    memory=memory,
+                                    distance=0.0,
+                                    embedding=embedding,
+                                    graph_hit=False
+                                )
+                            )
+                    debug(f"[MemorySystem] Type table fallback returned {len(relevance_candidates)} candidates")
 
-            task_ids = []
+            # --- Step 2: If enough relevance candidates, skip workers ---
+            if len(relevance_candidates) >= settings.TOP_K:
+                candidates = relevance_candidates
+                debug("[MemorySystem] Using relevance pool only (skipping workers)")
+            else:
+                # --- Step 3: Submit tasks ---
+                task_ids = []
 
-            task_ids.append(
-                self.scheduler.submit(
-                    "faiss",
-                    {
-                        "vector": vec,
-                        "top_k": settings.TOP_K,
-                    },
-                )
-            )
-
-            if self.bm25_ranker:
                 task_ids.append(
                     self.scheduler.submit(
-                        "bm25",
+                        "faiss",
                         {
-                            "tokens": query.tokens,
-                            "limit": settings.TOP_K,
+                            "vector": vec,
+                            "top_k": settings.TOP_K,
                         },
                     )
                 )
 
-            if query.entities:
-                task_ids.append(
-                    self.scheduler.submit(
-                        "graph",
-                        {
-                            "entities": query.entities,
-                            "limit": settings.GRAPH_TOP_K,
-                        },
-                    )
-                )
-
-            phrases = query.metadata.get("phrases", [])
-
-            if phrases and self.inverted_index:
-                task_ids.append(
-                    self.scheduler.submit(
-                        "phrase",
-                        {
-                            "phrases": phrases,
-                            "limit": 100,
-                        },
-                    )
-                )
-
-            subject = query.metadata.get("subject")
-            attribute = query.metadata.get("attribute")
-
-            if subject and attribute:
-                task_ids.append(
-                    self.scheduler.submit(
-                        "attribute",
-                        {
-                            "subject": subject,
-                            "attribute": attribute,
-                        },
-                    )
-                )
-
-            t_wait = time.perf_counter()
-
-            completed = self.scheduler.wait_for_tasks(
-                task_ids,
-                timeout=0.05,
-            )
-
-            debug(
-                f"Scheduler wait {(time.perf_counter()-t_wait)*1000:.2f}ms "
-                f"({'complete' if completed else 'timeout'})"
-            )
-
-            worker_results = self.scheduler.results(task_ids)
-
-            mem_ids = set()
-            source_map = {}
-
-            for result in worker_results:
-
-                if not result:
-                    continue
-
-                source = result["source"]
-
-                candidates = result["candidates"]
-
-                if source == "faiss":
-
-                    for mem_id, dist in candidates:
-
-                        mem_ids.add(mem_id)
-
-                        source_map[mem_id] = (
-                            "faiss",
-                            float(dist),
-                            False,
-                        )
-
-                elif source == "bm25":
-
-                    for mem_id, score in candidates:
-
-                        mem_ids.add(mem_id)
-
-                        source_map[mem_id] = (
+                if self.bm25_ranker:
+                    task_ids.append(
+                        self.scheduler.submit(
                             "bm25",
-                            1.0 / (score + 1e-6),
-                            False,
+                            {
+                                "tokens": query.tokens,
+                                "limit": settings.TOP_K,
+                            },
                         )
-
-                elif source == "graph":
-
-                    for mem_id in candidates:
-
-                        mem_ids.add(mem_id)
-
-                        source_map[mem_id] = (
-                            "graph",
-                            0.0,
-                            True,
-                        )
-
-                elif source == "phrase":
-
-                    for mem_id, score in candidates:
-
-                        mem_ids.add(mem_id)
-
-                        source_map[mem_id] = (
-                            "phrase",
-                            0.0,
-                            False,
-                        )
-
-                elif source == "attribute":
-
-                    for mem_id, dist in candidates:
-
-                        mem_ids.add(mem_id)
-
-                        source_map[mem_id] = (
-                            "attribute",
-                            float(dist),
-                            False,
-                        )
-
-            t_db = time.perf_counter()
-
-            rows = self.db.fetch_many(list(mem_ids))
-
-            database_ms = (time.perf_counter() - t_db) * 1000
-
-            candidates = []
-
-            for mem_id, row in rows.items():
-
-                if row is None:
-                    continue
-
-                source, dist, graph_hit = source_map.get(
-                    mem_id,
-                    (None, 0.0, False),
-                )
-
-                memory = self.retrieval._build_memory_record(row)
-
-                embedding = (
-                    self.embedding_cache.get(mem_id)
-                    or self.vector_store.get(mem_id)
-                )
-
-                candidates.append(
-                    CandidateRecord(
-                        memory=memory,
-                        distance=dist,
-                        embedding=embedding,
-                        graph_hit=graph_hit,
                     )
+
+                if query.entities:
+                    task_ids.append(
+                        self.scheduler.submit(
+                            "graph",
+                            {
+                                "entities": query.entities,
+                                "limit": settings.GRAPH_TOP_K,
+                            },
+                        )
+                    )
+
+                phrases = query.metadata.get("phrases", [])
+
+                if phrases and self.inverted_index:
+                    task_ids.append(
+                        self.scheduler.submit(
+                            "phrase",
+                            {
+                                "phrases": phrases,
+                                "limit": 100,
+                            },
+                        )
+                    )
+
+                subject = query.metadata.get("subject")
+                attribute = query.metadata.get("attribute")
+
+                if subject and attribute:
+                    task_ids.append(
+                        self.scheduler.submit(
+                            "attribute",
+                            {
+                                "subject": subject,
+                                "attribute": attribute,
+                            },
+                        )
+                    )
+
+                t_wait = time.perf_counter()
+
+                completed = self.scheduler.wait_for_tasks(
+                    task_ids,
+                    timeout=0.05,
                 )
 
-            memory_type_hint = query.metadata.get(
-                "memory_type_hint"
-            )
+                debug(
+                    f"Scheduler wait {(time.perf_counter()-t_wait)*1000:.2f}ms "
+                    f"({'complete' if completed else 'timeout'})"
+                )
 
-            if (
-                memory_type_hint
-                and memory_type_hint != "general"
-            ):
+                worker_results = self.scheduler.results(task_ids)
 
+                mem_ids = set()
+                source_map = {}
+
+                for result in worker_results:
+
+                    if not result:
+                        continue
+
+                    source = result["source"]
+
+                    candidates = result["candidates"]
+
+                    if source == "faiss":
+
+                        for mem_id, dist in candidates:
+
+                            mem_ids.add(mem_id)
+
+                            source_map[mem_id] = (
+                                "faiss",
+                                float(dist),
+                                False,
+                            )
+
+                    elif source == "bm25":
+
+                        for mem_id, score in candidates:
+
+                            mem_ids.add(mem_id)
+
+                            source_map[mem_id] = (
+                                "bm25",
+                                1.0 / (score + 1e-6),
+                                False,
+                            )
+
+                    elif source == "graph":
+
+                        for mem_id in candidates:
+
+                            mem_ids.add(mem_id)
+
+                            source_map[mem_id] = (
+                                "graph",
+                                0.0,
+                                True,
+                            )
+
+                    elif source == "phrase":
+
+                        for mem_id, score in candidates:
+
+                            mem_ids.add(mem_id)
+
+                            source_map[mem_id] = (
+                                "phrase",
+                                0.0,
+                                False,
+                            )
+
+                    elif source == "attribute":
+
+                        for mem_id, dist in candidates:
+
+                            mem_ids.add(mem_id)
+
+                            source_map[mem_id] = (
+                                "attribute",
+                                float(dist),
+                                False,
+                            )
+
+                t_db = time.perf_counter()
+
+                rows = self.db.fetch_many(list(mem_ids))
+
+                database_ms = (time.perf_counter() - t_db) * 1000
+
+                worker_candidates = []
+
+                for mem_id, row in rows.items():
+
+                    if row is None:
+                        continue
+
+                    source, dist, graph_hit = source_map.get(
+                        mem_id,
+                        (None, 0.0, False),
+                    )
+
+                    memory = self.retrieval._build_memory_record(row)
+
+                    embedding = (
+                        self.embedding_cache.get(mem_id)
+                        or self.vector_store.get(mem_id)
+                    )
+
+                    worker_candidates.append(
+                        CandidateRecord(
+                            memory=memory,
+                            distance=dist,
+                            embedding=embedding,
+                            graph_hit=graph_hit,
+                        )
+                    )
+
+                # --- Step 4: Merge relevance + worker candidates ---
+                candidates = relevance_candidates + worker_candidates
+                # Deduplicate by memory ID
+                seen = set()
+                unique_candidates = []
+                for c in candidates:
+                    if c.memory.id not in seen:
+                        seen.add(c.memory.id)
+                        unique_candidates.append(c)
+                candidates = unique_candidates
+                debug(f"[MemorySystem] Total unique candidates: {len(candidates)} (relevance: {len(relevance_candidates)}, workers: {len(worker_candidates)})")
+
+            # --- Step 5: Memory Type Filtering (final pass) ---
+            if memory_type_hint and memory_type_hint != "general":
                 filtered = [
                     c
                     for c in candidates
@@ -443,6 +516,9 @@ class MemorySystem:
 
                 if filtered:
                     candidates = filtered
+                    debug(f"[MemorySystem] Final type filter: {len(candidates)} candidates of type '{memory_type_hint}'")
+                else:
+                    debug(f"[MemorySystem] No candidates of type '{memory_type_hint}', keeping all")
 
             faiss_ms = (
                 time.perf_counter() - t0_retrieval
@@ -543,9 +619,6 @@ class MemorySystem:
             }
 
         else:
-            # ---------- V3 Fallback Path ----------
-            # ... (keep exactly as before)
-            
             
             # ---------- V3 Fallback Path (unchanged) ----------
             # ... (keep the existing fallback code exactly as before) ...

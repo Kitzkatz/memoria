@@ -6,7 +6,8 @@ from cache.config import settings
 
 class MemoryRanker:
 
-    def __init__(self):
+    def __init__(self, tfidf_ranker=None):
+        self.tfidf_ranker = tfidf_ranker
 
         self.rank_feedback = defaultdict(float)
 
@@ -21,7 +22,10 @@ class MemoryRanker:
             "feedback": getattr(settings, "RANKING_FEEDBACK", 0.02),
             "entity": getattr(settings, "RANKING_ENTITY", 0.23),
             "subject": getattr(settings, "RANKING_SUBJECT", 0.20),
-            "attribute": getattr(settings, "RANKING_ATTRIBUTE", 0.15)
+            "attribute": getattr(settings, "RANKING_ATTRIBUTE", 0.15),
+            "graph_distance": getattr(settings, "GRAPH_DISTANCE", 0.10),
+            "tfidf": getattr(settings, "TFIDF", 0.08),
+            
         }
 
     
@@ -140,6 +144,13 @@ class MemoryRanker:
         return 1.0 / (
             1.0 + float(distance)
         )
+    
+
+    def tfidf_score(self, query_tokens, memory_tokens):
+        """Compute TF/IDF score using the precomputed ranker."""
+        if not hasattr(self, 'tfidf_ranker') or not self.tfidf_ranker:
+            return 0.0
+        return self.tfidf_ranker.document_score(query_tokens, memory_tokens)
 
 
     # ---------------------------------
@@ -189,6 +200,26 @@ class MemoryRanker:
             query.entities,
             candidate.memory.entities
         )
+        
+        tfidf = self.tfidf_score(query.tokens, candidate.memory.tokens)
+        candidate.tfidf_score = tfidf
+        candidate.diagnostics["tfidf_score"] = tfidf
+
+        # Inside compute_score(), after other signals like semantic, importance, recency, token, entity, etc.
+
+        # ---- Graph Distance Signal ----
+        graph_dist = 0.0
+        if hasattr(self, 'numpy_graph') and self.numpy_graph:
+            graph_dist = self.graph_distance_score(
+                query.entities,
+                candidate.memory.entities,
+                self.numpy_graph
+            )
+            candidate.graph_distance_score = graph_dist
+            candidate.diagnostics["graph_distance"] = graph_dist
+        else:
+            candidate.graph_distance_score = 0.0
+            candidate.diagnostics["graph_distance"] = 0.0
 
         subject = 0.0
 
@@ -231,6 +262,8 @@ class MemoryRanker:
 
             + attribute * self.weights["attribute"]
 
+            + tfidf * self.weights["tfidf"]
+
         )
 
 
@@ -266,6 +299,31 @@ class MemoryRanker:
 
         return candidate
 
+
+    def graph_distance_score(self, query_entities, memory_entities, numpy_graph):
+        """
+        Score based on shortest path distance between query entities and memory entities.
+        Closer entities (shorter path) get higher scores.
+        """
+        if not query_entities or not memory_entities or not numpy_graph:
+            return 0.0
+
+        best_distance = float('inf')
+        for q in query_entities:
+            for m in memory_entities:
+                dist = numpy_graph.shortest_path(q, m)
+                if dist < best_distance:
+                    best_distance = dist
+                    # Early exit if we find a direct connection (distance = 1)
+                    if best_distance == 1:
+                        break
+            if best_distance == 1:
+                break
+
+        if best_distance == float('inf'):
+            return 0.0
+        # Inverse distance: 1 (distance 1) → 1.0, 2 → 0.5, 3 → 0.33, etc.
+        return 1.0 / best_distance
 
     # ---------------------------------
     # Pipeline entry

@@ -22,7 +22,8 @@ class RankingPipeline:
         self,
         attribute_map,
         db=None,
-        bm25_ranker=None,           # <-- new parameter
+        bm25_ranker=None,
+        tfidf_ranker=None,           # <-- ADD THIS
         ranker=None,
         normalizer=None,
         booster=None,
@@ -30,7 +31,7 @@ class RankingPipeline:
         mmr=None,
         finalizer=None,
     ):
-        self.ranker = ranker or MemoryRanker()
+        self.ranker = ranker or MemoryRanker(tfidf_ranker=tfidf_ranker)  # <-- PASS TO RANKER
         self.normalizer = normalizer or ScoreNormalizer()
         
         if booster is None:
@@ -53,13 +54,11 @@ class RankingPipeline:
         # Use provided ranker if given
         if bm25_ranker is not None:
             self.bm25 = bm25_ranker
-            # Build id_to_idx from the same DB to map scores
             if db:
                 all_memories = db.fetch_all()
                 self.id_to_idx = {m["id"]: idx for idx, m in enumerate(all_memories)}
                 debug(f"Using provided BM25 ranker with {len(self.id_to_idx)} memories")
         elif getattr(settings, "USE_BM25", False) and db is not None:
-            # Fallback: build BM25 from scratch
             all_memories = db.fetch_all()
             if all_memories:
                 corpus_tokens = [m["tokens"] for m in all_memories if m.get("tokens")]
@@ -78,7 +77,6 @@ class RankingPipeline:
     # ----------------------------------------------------
 
     def run(self, query, candidates):
-
         diagnostics = {}
 
         debug("After fetch:", len(candidates))

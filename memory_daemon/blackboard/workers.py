@@ -49,6 +49,11 @@ class BM25Worker(Worker):
         start = time.perf_counter()
         query_tokens = payload.get("tokens", [])
         limit = payload.get("limit", settings.TOP_K)
+        
+        # --- FIX: ensure limit is an int ---
+        if not isinstance(limit, int):
+            limit = int(limit) if limit else settings.TOP_K
+
         if not query_tokens or not self.inverted_index:
             return {"error": "No tokens or inverted index", "source": "bm25", "candidates": []}
 
@@ -57,9 +62,15 @@ class BM25Worker(Worker):
             candidate_ids.update(self.inverted_index.search(token))
         candidate_ids = list(candidate_ids)
 
+        # --- FIX: ensure candidate_ids are ints ---
+        candidate_ids = [int(x) for x in candidate_ids if x is not None]
+
+        if not candidate_ids:
+            return {"error": "No candidates found", "source": "bm25", "candidates": []}
+
         candidates = [
-            (doc_id, self.bm25_ranker.score(doc_id, query_tokens))
-            for doc_id in candidate_ids
+            (doc_id, self.bm25_ranker.score(query_tokens, doc_id))
+            for doc_id in candidate_ids[:limit]
         ]
 
         candidates.sort(key=lambda x: x[1], reverse=True)
@@ -76,26 +87,29 @@ class BM25Worker(Worker):
 
 
 class GraphWorker(Worker):
-    """Worker that performs graph-based retrieval."""
-    def __init__(self, graph_search, entity_store):
-        self.graph_search = graph_search
-        self.entity_store = entity_store
+    """Worker that performs graph-based retrieval using Numpy graph."""
+    def __init__(self, numpy_graph):
+        self.numpy_graph = numpy_graph
 
     def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         start = time.perf_counter()
         entities = payload.get("entities", [])
+        depth = payload.get("depth", 2)
         limit = payload.get("limit", settings.GRAPH_TOP_K)
-        if not entities:
-            return {"error": "No entities provided", "source": "graph", "candidates": []}
+        if not entities or not self.numpy_graph:
+            return {"error": "No entities or graph", "source": "graph", "candidates": []}
 
-        memory_ids = self.graph_search.search(entities, depth=1, limit=limit)
+        memory_ids = self.numpy_graph.multi_hop_search(entities, depth=depth, limit=limit)
+        # Ensure memory_ids are ints
+        memory_ids = [int(x) for x in memory_ids if x is not None]
+        candidates = [(mem_id, 0.0) for mem_id in memory_ids]
         search_time = (time.perf_counter() - start) * 1000
 
-        debug(f"GraphWorker: search={search_time:.2f}ms, count={len(memory_ids)}")
+        debug(f"GraphWorker: search={search_time:.2f}ms, count={len(candidates)}")
         return {
             "source": "graph",
-            "candidates": memory_ids,
-            "count": len(memory_ids)
+            "candidates": candidates,
+            "count": len(candidates)
         }
 
 
