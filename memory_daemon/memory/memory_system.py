@@ -28,6 +28,7 @@ import time
 import numpy as np
 
 # V4 blackboard imports
+from blackboard.consolidator import Consolidator
 from blackboard.core import Blackboard, BlackboardEntry
 from blackboard.scheduler import Scheduler
 from blackboard.workers import (
@@ -103,6 +104,7 @@ class MemorySystem:
         self.use_blackboard = getattr(settings, "USE_BLACKBOARD", False)
         self.bm25_ranker = None
         self.inverted_index = None
+        self.consolidator = Consolidator(self.db, self.vector_store, self.embedding_cache)
 
         if self.use_blackboard:
             self.blackboard = Blackboard()
@@ -621,3 +623,10 @@ class MemorySystem:
         debug(vector[:5])
         self.embedding_cache.add(mem_id, vector)
         self.vector_store.add(mem_id, vector, persist=True)
+
+
+
+    def consolidate(self, threshold: float = None):
+        """Run consolidation manually."""
+        threshold = threshold or getattr(settings, "CONSOLIDATE_THRESHOLD", 0.5)
+        self.consolidator.run(threshold)

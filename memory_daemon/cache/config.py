@@ -79,6 +79,12 @@ class Settings(BaseModel):
     FINALIZER_DIVERSITY: float = 0.05
     FINALIZER_ATTRIBUTE: float = 0.50
 
+
+    CONSOLIDATE_THRESHOLD: float = 0.5
+    CONSOLIDATE_BATCH_SIZE: int = 500
+    CONSOLIDATE_AUTO: bool = True
+    CONSOLIDATE_INTERVAL: int = 3600  # seconds (1 hour)
+
     # Add these to the existing Settings class
     CLI_DEFAULT_LIMIT: int = 3
     CLI_OUTPUT_FORMAT: str = "table"   # options: "table", "json", "raw"
