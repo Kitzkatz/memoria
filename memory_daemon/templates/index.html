@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Memory Daemon — GUI</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+            min-height: 100vh;
+        }
+        h1 { font-size: 2rem; font-weight: 600; margin-bottom: 0.25rem; color: #f0f6fc; }
+        .subtitle { color: #8b949e; margin-bottom: 2rem; font-size: 1rem; }
+        .search-box { display: flex; gap: 0.75rem; margin-bottom: 2rem; flex-wrap: wrap; }
+        .search-box input { flex: 1; padding: 0.75rem 1rem; font-size: 1rem; background: #161b22; border: 1px solid #30363d; border-radius: 8px; color: #c9d1d9; outline: none; min-width: 200px; }
+        .search-box input:focus { border-color: #58a6ff; }
+        .search-box button { padding: 0.75rem 1.5rem; font-size: 1rem; background: #238636; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; transition: background 0.15s; }
+        .search-box button:hover { background: #2ea043; }
+        .search-box button.secondary { background: #21262d; color: #c9d1d9; }
+        .search-box button.secondary:hover { background: #30363d; }
+        .results { margin-top: 1.5rem; }
+        .result-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 0.75rem; transition: border-color 0.15s; }
+        .result-card:hover { border-color: #58a6ff; }
+        .result-rank { font-weight: 600; color: #58a6ff; font-size: 0.85rem; margin-bottom: 0.25rem; }
+        .result-text { font-size: 1rem; line-height: 1.5; color: #f0f6fc; }
+        .result-meta { display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.75rem; color: #8b949e; flex-wrap: wrap; }
+        .result-meta span { background: #21262d; padding: 0.15rem 0.6rem; border-radius: 12px; }
+        .score-bar { height: 4px; background: #30363d; border-radius: 2px; margin-top: 0.5rem; overflow: hidden; }
+        .score-bar-fill { height: 100%; background: #58a6ff; border-radius: 2px; transition: width 0.3s; }
+        .store-section { margin-top: 2rem; padding-top: 2rem; border-top: 1px solid #30363d; }
+        .store-section h2 { font-size: 1.25rem; color: #f0f6fc; margin-bottom: 0.75rem; }
+        .store-box { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+        .store-box input { flex: 1; padding: 0.75rem 1rem; font-size: 1rem; background: #161b22; border: 1px solid #30363d; border-radius: 8px; color: #c9d1d9; outline: none; min-width: 200px; }
+        .store-box input:focus { border-color: #58a6ff; }
+        .store-box button { padding: 0.75rem 1.5rem; font-size: 1rem; background: #1f6feb; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; transition: background 0.15s; }
+        .store-box button:hover { background: #388bfd; }
+        .toast { padding: 0.5rem 1rem; border-radius: 6px; margin-top: 0.5rem; font-size: 0.9rem; display: none; }
+        .toast.success { display: block; background: #23863633; color: #3fb950; border: 1px solid #23863655; }
+        .toast.error { display: block; background: #da363333; color: #f85149; border: 1px solid #da363355; }
+        .loading { color: #8b949e; font-style: italic; margin-top: 1rem; }
+        .stats { display: flex; gap: 2rem; flex-wrap: wrap; margin: 1rem 0 0.5rem 0; font-size: 0.85rem; color: #8b949e; }
+        .stats strong { color: #f0f6fc; }
+
+        /* Chat section */
+        .chat-section { margin-top: 2rem; padding-top: 2rem; border-top: 1px solid #30363d; }
+        .chat-section h2 { font-size: 1.25rem; color: #f0f6fc; margin-bottom: 0.75rem; }
+        .chat-box { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+        .chat-box input { flex: 1; padding: 0.75rem 1rem; font-size: 1rem; background: #161b22; border: 1px solid #30363d; border-radius: 8px; color: #c9d1d9; outline: none; min-width: 200px; }
+        .chat-box input:focus { border-color: #58a6ff; }
+        .chat-box button { padding: 0.75rem 1.5rem; font-size: 1rem; background: #1f6feb; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; transition: background 0.15s; }
+        .chat-box button:hover { background: #388bfd; }
+        .chat-response { margin-top: 0.75rem; padding: 1rem; background: #161b22; border: 1px solid #30363d; border-radius: 8px; color: #f0f6fc; white-space: pre-wrap; min-height: 60px; }
+
+        @media (max-width: 640px) { body { padding: 1rem; } .search-box { flex-direction: column; } .store-box { flex-direction: column; } .chat-box { flex-direction: column; } }
+    </style>
+</head>
+<body>
+    <h1>🧠 Memory Daemon</h1>
+    <p class="subtitle">Local‑first cognitive memory for LLMs</p>
+
+    <!-- Search -->
+    <div class="search-box">
+        <input type="text" id="queryInput" placeholder="Ask a question..." />
+        <button onclick="doQuery()">Search</button>
+        <button class="secondary" onclick="clearResults()">Clear</button>
+    </div>
+
+    <div id="loading" class="loading" style="display:none;">Searching...</div>
+    <div id="stats" class="stats"></div>
+    <div id="results" class="results"></div>
+
+    <!-- Store -->
+    <div class="store-section">
+        <h2>📝 Store a Memory</h2>
+        <div class="store-box">
+            <input type="text" id="storeInput" placeholder="Enter a memory..." />
+            <button onclick="doStore()">Store</button>
+        </div>
+        <div id="storeToast" class="toast"></div>
+    </div>
+
+    <!-- Chat -->
+    <div class="chat-section">
+        <h2>💬 Chat</h2>
+        <div class="chat-box">
+            <input type="text" id="chatInput" placeholder="Ask a question..." />
+            <button onclick="doChat()">Send</button>
+        </div>
+        <div id="chatResponse" class="chat-response"></div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+
+        // --- Query ---
+        async function doQuery() {
+            const input = document.getElementById('queryInput');
+            const query = input.value.trim();
+            if (!query) return;
+
+            const resultsDiv = document.getElementById('results');
+            const loadingDiv = document.getElementById('loading');
+            const statsDiv = document.getElementById('stats');
+
+            loadingDiv.style.display = 'block';
+            resultsDiv.innerHTML = '';
+            statsDiv.innerHTML = '';
+
+            try {
+                const resp = await fetch(`${API_BASE}/query`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query })
+                });
+                const data = await resp.json();
+
+                loadingDiv.style.display = 'none';
+
+                if (data.error) {
+                    resultsDiv.innerHTML = `<div class="result-card" style="border-color:#f85149;">❌ Error: ${data.error}</div>`;
+                    return;
+                }
+
+                const results = data.results || [];
+                const diag = data.diagnostics || {};
+
+                statsDiv.innerHTML = `
+                    <span>Results: <strong>${results.length}</strong></span>
+                    <span>Candidates: <strong>${diag.candidate_count || 0}</strong></span>
+                    <span>Time: <strong>${(diag.total_query_ms || 0).toFixed(1)} ms</strong></span>
+                `;
+
+                if (results.length === 0) {
+                    resultsDiv.innerHTML = `<div class="result-card" style="border-color:#8b949e;">No results found.</div>`;
+                    return;
+                }
+
+                let html = '';
+                for (const r of results) {
+                    const score = r.final_score || 0;
+                    const pct = Math.min(100, Math.round(score * 100));
+                    html += `
+                        <div class="result-card">
+                            <div class="result-rank">${r.rank || '?'}</div>
+                            <div class="result-text">${escapeHtml(r.text || '')}</div>
+                            <div class="result-meta">
+                                <span>${r.memory_type || 'semantic'}</span>
+                                <span>score: ${score.toFixed(4)}</span>
+                                ${r.graph_hit ? '<span>🔗 graph</span>' : ''}
+                            </div>
+                            <div class="score-bar"><div class="score-bar-fill" style="width:${pct}%;"></div></div>
+                        </div>
+                    `;
+                }
+                resultsDiv.innerHTML = html;
+
+            } catch (err) {
+                loadingDiv.style.display = 'none';
+                resultsDiv.innerHTML = `<div class="result-card" style="border-color:#f85149;">❌ Request failed: ${err.message}</div>`;
+            }
+        }
+
+        // --- Store ---
+        async function doStore() {
+            const input = document.getElementById('storeInput');
+            const text = input.value.trim();
+            if (!text) return;
+
+            const toast = document.getElementById('storeToast');
+            toast.className = 'toast';
+            toast.style.display = 'none';
+
+            try {
+                const resp = await fetch(`${API_BASE}/store`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+                const data = await resp.json();
+
+                if (data.error) {
+                    toast.className = 'toast error';
+                    toast.textContent = '❌ ' + data.error;
+                    toast.style.display = 'block';
+                } else {
+                    toast.className = 'toast success';
+                    toast.textContent = '✅ ' + (data.message || 'Stored successfully (ID: ' + data.id + ')');
+                    toast.style.display = 'block';
+                    input.value = '';
+                }
+            } catch (err) {
+                toast.className = 'toast error';
+                toast.textContent = '❌ Request failed: ' + err.message;
+                toast.style.display = 'block';
+            }
+        }
+
+        // --- Chat ---
+        async function doChat() {
+            const input = document.getElementById('chatInput');
+            const prompt = input.value.trim();
+            if (!prompt) return;
+
+            const responseDiv = document.getElementById('chatResponse');
+            responseDiv.innerHTML = '⏳ Thinking...';
+            responseDiv.style.color = '#8b949e';
+
+            try {
+                const resp = await fetch(`${API_BASE}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt })
+                });
+                const data = await resp.json();
+
+                if (data.error) {
+                    responseDiv.innerHTML = `❌ Error: ${data.error}`;
+                    responseDiv.style.color = '#f85149';
+                } else {
+                    responseDiv.innerHTML = `🤖 ${data.response}`;
+                    responseDiv.style.color = '#f0f6fc';
+                }
+            } catch (err) {
+                responseDiv.innerHTML = `❌ Request failed: ${err.message}`;
+                responseDiv.style.color = '#f85149';
+            }
+        }
+
+        // --- Utils ---
+        function clearResults() {
+            document.getElementById('results').innerHTML = '';
+            document.getElementById('stats').innerHTML = '';
+            document.getElementById('queryInput').value = '';
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // --- Enter key handlers ---
+        document.getElementById('queryInput').addEventListener('keydown', e => {
+            if (e.key === 'Enter') doQuery();
+        });
+        document.getElementById('storeInput').addEventListener('keydown', e => {
+            if (e.key === 'Enter') doStore();
+        });
+        document.getElementById('chatInput').addEventListener('keydown', e => {
+            if (e.key === 'Enter') doChat();
+        });
+    </script>
+</body>
+</html>

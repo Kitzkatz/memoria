@@ -80,9 +80,9 @@ class Settings(BaseModel):
     FINALIZER_ATTRIBUTE: float = 0.50
 
 
-    CONSOLIDATE_THRESHOLD: float = 0.5
+    CONSOLIDATE_THRESHOLD: float = 0.85
     CONSOLIDATE_BATCH_SIZE: int = 500
-    CONSOLIDATE_AUTO: bool = True
+    CONSOLIDATE_AUTO: bool = False
     CONSOLIDATE_INTERVAL: int = 3600  # seconds (1 hour)
 
     # Add these to the existing Settings class
