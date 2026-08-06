@@ -225,18 +225,55 @@ class MemoryDB:
 
     def insert(self, record):
 
-        with self.lock:
+    with self.lock:
 
-            cur = self.conn.cursor()
+        cur = self.conn.cursor()
 
-            now = datetime.utcnow().isoformat()
-            normalized_text = record.normalized_text or record.text
-            tokens = record.tokens or normalized_text.split()
-            token_count = record.token_count or len(tokens)
+        now = datetime.utcnow().isoformat()
+        normalized_text = record.normalized_text or record.text
+        tokens = record.tokens or normalized_text.split()
+        token_count = record.token_count or len(tokens)
 
-            # --- Main insert (unchanged) ---
-            cur.execute("""
-                INSERT INTO memories (
+        # --- Main insert ---
+        cur.execute("""
+            INSERT INTO memories (
+                text,
+                normalized_text,
+                tokens,
+                token_count,
+                memory_type,
+                metadata,
+                entities,
+                relationships,
+                importance,
+                created_at,
+                last_accessed
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            record.text,
+            normalized_text,
+            json.dumps(tokens),
+            int(token_count),
+            record.memory_type,
+            json.dumps(record.metadata or {}),
+            json.dumps(record.entities or []),
+            json.dumps(record.relationships or []),
+            float(record.importance or 0.5),
+            now,
+            now
+        ))
+
+        # --- SAVE THE ID BEFORE THE TYPE INSERT ---
+        mem_id = cur.lastrowid   # <-- FIX: save it here
+
+        # --- Insert into type-specific table ---
+        mem_type = record.memory_type or "general"
+        if mem_type != "general":
+            type_table = f"memories_{mem_type}"
+            cur.execute(f"""
+                INSERT INTO {type_table} (
+                    id,
                     text,
                     normalized_text,
                     tokens,
@@ -249,13 +286,14 @@ class MemoryDB:
                     created_at,
                     last_accessed
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
+                mem_id,  # <-- Use the saved ID
                 record.text,
                 normalized_text,
                 json.dumps(tokens),
                 int(token_count),
-                record.memory_type,
+                mem_type,
                 json.dumps(record.metadata or {}),
                 json.dumps(record.entities or []),
                 json.dumps(record.relationships or []),
@@ -264,41 +302,8 @@ class MemoryDB:
                 now
             ))
 
-            # --- NEW: Insert into type-specific table ---
-            mem_type = record.memory_type or "general"
-            if mem_type != "general":
-                type_table = f"memories_{mem_type}"
-                cur.execute(f"""
-                    INSERT INTO {type_table} (
-                        text,
-                        normalized_text,
-                        tokens,
-                        token_count,
-                        memory_type,
-                        metadata,
-                        entities,
-                        relationships,
-                        importance,
-                        created_at,
-                        last_accessed
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    record.text,
-                    normalized_text,
-                    json.dumps(tokens),
-                    int(token_count),
-                    mem_type,
-                    json.dumps(record.metadata or {}),
-                    json.dumps(record.entities or []),
-                    json.dumps(record.relationships or []),
-                    float(record.importance or 0.5),
-                    now,
-                    now
-                ))
-
-            self.conn.commit()
-            return cur.lastrowid
+        self.conn.commit()
+        return mem_id  # <-- Return the saved ID
         # -------------------------
     # BATCH INSERT
     # -------------------------
