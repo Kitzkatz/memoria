@@ -18,6 +18,10 @@ from ranking.models import CandidateRecord
 
 from graph.entity_resolver import EntityResolver
 from graph.relationship_builder import RelationshipBuilder
+
+# ---- Ingestion workers (V4) ----
+from ingestion.code_worker import CodeWorker
+from ingestion.pdf_worker import PDFWorker
 import time
 import numpy as np
 
@@ -56,6 +60,9 @@ class MemorySystem:
             self.embedding_cache,
             self.graph_search
         )
+        # ---- PDF Worker (V4) ----
+        self.pdf_worker = PDFWorker(self)
+        self.code_worker = CodeWorker(self)
 
         # ---- Numpy Graph (V4 - fast, in-memory) ----
         from graph.numpy_graph import NumpyGraph
@@ -682,6 +689,12 @@ class MemorySystem:
                     "total_query_ms": round(total_query_ms, 3)
                 }
             }
+
+    def ingest_pdf(self, filepath: str, max_pages: int = 100):
+        return self.pdf_worker.ingest_pdf(filepath, max_pages)
+
+    def ingest_code(self, directory: str, max_files: int = 1000):
+        self.code_worker.ingest_codebase(directory, max_files)
     # -------------------------------------
     # EMBEDDING REGISTRATION (unchanged)
     # -------------------------------------
