@@ -583,9 +583,10 @@ class MemorySystem:
                 })
 
             # ---- Record query history and feedback ----
-            self.query_history.record(text, response["results"])
-            if response["results"]:
-                top_result = response["results"][0]
+            # ---- Record query history and feedback ----
+            self.query_history.record(text, response)
+            if response:
+                top_result = response[0]
                 self.feedback.record_click(top_result["id"], text)
                 # Optional: track dwell time later
 
