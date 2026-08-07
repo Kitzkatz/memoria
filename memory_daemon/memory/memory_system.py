@@ -15,11 +15,17 @@ from graph.search import GraphSearch
 from graph.edge_store import EdgeStore
 from cache.config import settings
 from ranking.models import CandidateRecord
+from memory.feedback import FeedbackLoop
+from memory.query_history import QueryHistory
+from graph.numpy_graph import NumpyGraph
+from memory.memory_pruner import MemoryPruner
 
 from graph.entity_resolver import EntityResolver
 from graph.relationship_builder import RelationshipBuilder
 
 from retrieval.shard_manager import ShardManager
+
+from ranking.tfidf import TFIDF
 
 # ---- Ingestion workers (V4) ----
 from ingestion.code_worker import CodeWorker
@@ -49,6 +55,18 @@ class MemorySystem:
         self.extractor = MemoryExtractor(llm)
         self.scorer = ImportanceScorer()
         self.embedding_cache = EmbeddingCache()
+        # ---- Memory Pruner (V4) ----
+        self.pruner = MemoryPruner(
+            db=self.db,
+            vector_store=self.vector_store,
+            embedding_cache=self.embedding_cache,
+            threshold=getattr(settings, "PRUNE_THRESHOLD", 0.1),
+            max_age_days=getattr(settings, "PRUNE_MAX_AGE_DAYS", 365),
+            batch_size=getattr(settings, "PRUNE_BATCH_SIZE", 100),
+            interval_seconds=getattr(settings, "PRUNE_INTERVAL_SECONDS", 3600),
+            auto_start=getattr(settings, "PRUNE_AUTO_START", False),
+        )
+        debug(f"MemoryPruner initialized (threshold={self.pruner.threshold}, max_age={self.pruner.max_age_days}d)")
 
         # ---- Core components (needed before blackboard) ----
         self.query_processor = QueryProcessor()
@@ -74,7 +92,7 @@ class MemorySystem:
         )
         debug(f"Shard manager initialized: {self.shard_manager.num_shards} shards (type-based)")        # ---- Numpy Graph (V4 - fast, in-memory) ----
         
-        from graph.numpy_graph import NumpyGraph
+        
         self.numpy_graph = NumpyGraph(db)
         debug(f"Numpy graph built: {len(self.numpy_graph.entities)} entities, {np.count_nonzero(self.numpy_graph.adj_matrix)} edges")
 
@@ -82,8 +100,18 @@ class MemorySystem:
         from memory.relevance_manager import RelevanceManager
         self.relevance_manager = RelevanceManager(db, persist_path="relevance_data.json")
 
+        # ---- Feedback Loop (V4) ----
+
+
+        # In __init__, after self.relevance_manager:
+        self.feedback = FeedbackLoop(self.db, persist_path=getattr(settings, "FEEDBACK_PERSIST_PATH", "feedback_data.json"))
+        self.query_history = QueryHistory(
+            max_history=getattr(settings, "QUERY_HISTORY_MAX", 1000),
+            persist_path=getattr(settings, "QUERY_HISTORY_PERSIST_PATH", "query_history.json")
+        )
+        
         # ---- TF/IDF (V4 - built from type tables) ----
-        from ranking.tfidf import TFIDF
+        
         self.tfidf = TFIDF()
         corpus_tokens = []
         mem_types = ["semantic", "episodic", "procedural", "code", "science"]
@@ -151,6 +179,7 @@ class MemorySystem:
             db=self.db,
             bm25_ranker=self.bm25_ranker,
             tfidf_ranker=self.tfidf,  # <-- pass TF/IDF to pipeline
+            feedback_loop=self.feedback,
             ranker=None,
             normalizer=None,
             booster=None,
@@ -287,8 +316,27 @@ class MemorySystem:
 
             t0_retrieval = time.perf_counter()
             
-            # --- Step 1: Check relevance pool first ---
+            # --- Step 1: Get routing configuration for memory type ---
             memory_type_hint = query.metadata.get("memory_type_hint", "general")
+            
+            # Use the router to get the routing configuration
+            if hasattr(self, 'router') and self.router:
+                route = self.router.route(memory_type_hint)
+                workers_to_use = route.get("workers", ["faiss", "bm25", "graph"])
+                graph_depth = route.get("graph_depth", getattr(settings, "GRAPH_DEPTH", 2))
+                signals = route.get("signals", {})
+                pool = route.get("pool", "memories")
+                fallback_pools = route.get("fallback_pools", [])
+                debug(f"[MemorySystem] Routing: type='{memory_type_hint}', workers={workers_to_use}, depth={graph_depth}")
+            else:
+                # Fallback to default behavior if router isn't initialized
+                workers_to_use = ["faiss", "bm25", "graph", "phrase", "attribute"]
+                graph_depth = getattr(settings, "GRAPH_DEPTH", 2)
+                signals = {}
+                pool = "memories"
+                fallback_pools = []
+
+            # --- Step 2: Check relevance pool first ---
             relevance_candidates = []
             if memory_type_hint != "general" and hasattr(self, 'relevance_manager'):
                 relevance_ids = self.relevance_manager.get_top_relevant_by_type(memory_type_hint, limit=settings.TOP_K)
@@ -308,8 +356,11 @@ class MemorySystem:
                             )
                     debug(f"[MemorySystem] Relevance pool returned {len(relevance_candidates)} candidates")
                 else:
-                    # If no relevance IDs, fetch from type table directly
-                    type_rows = self.db.fetch_many_by_type(memory_type_hint, limit=settings.TOP_K)
+                    # If no relevance IDs, fetch from the routed pool
+                    if pool != "memories":
+                        type_rows = self.db.fetch_many_by_type(memory_type_hint, limit=settings.TOP_K)
+                    else:
+                        type_rows = self.db.fetch_many(list(range(1, settings.TOP_K + 1)))  # fallback
                     for row in type_rows:
                         if row:
                             memory = self.retrieval._build_memory_record(row)
@@ -324,12 +375,12 @@ class MemorySystem:
                             )
                     debug(f"[MemorySystem] Type table fallback returned {len(relevance_candidates)} candidates")
 
-            # --- Step 2: If enough relevance candidates, skip workers ---
+            # --- Step 3: If enough relevance candidates, skip workers ---
             if len(relevance_candidates) >= settings.TOP_K:
                 candidates = relevance_candidates
                 debug("[MemorySystem] Using relevance pool only (skipping workers)")
             else:
-                # --- Step 3: Get shards based on memory type hint ---
+                # --- Step 4: Get shards based on memory type hint ---
                 use_sharding = getattr(settings, "USE_SHARDING", False)
                 if use_sharding and hasattr(self, 'shard_manager'):
                     shards = self.shard_manager.get_shards_for_query(query, memory_type_hint)
@@ -339,25 +390,28 @@ class MemorySystem:
                     shards = [0]
                     num_shards = 1
 
-                # --- Step 4: Submit tasks per shard ---
+                # --- Step 5: Submit tasks per shard based on routing ---
                 task_ids = []
                 top_k_per_shard = getattr(settings, "TOP_K_PER_SHARD", 300)
                 graph_limit_per_shard = settings.GRAPH_TOP_K // num_shards if num_shards > 1 else settings.GRAPH_TOP_K
 
                 for shard_id in shards:
-                    task_ids.append(
-                        self.scheduler.submit(
-                            "faiss",
-                            {
-                                "vector": vec,
-                                "top_k": top_k_per_shard,
-                                "shard_id": shard_id,
-                                "num_shards": num_shards,
-                            }
+                    # FAISS worker (if in routing)
+                    if "faiss" in workers_to_use:
+                        task_ids.append(
+                            self.scheduler.submit(
+                                "faiss",
+                                {
+                                    "vector": vec,
+                                    "top_k": top_k_per_shard,
+                                    "shard_id": shard_id,
+                                    "num_shards": num_shards,
+                                }
+                            )
                         )
-                    )
 
-                    if self.bm25_ranker:
+                    # BM25 worker (if in routing)
+                    if self.bm25_ranker and "bm25" in workers_to_use:
                         task_ids.append(
                             self.scheduler.submit(
                                 "bm25",
@@ -370,7 +424,8 @@ class MemorySystem:
                             )
                         )
 
-                    if query.entities:
+                    # Graph worker (if in routing and entities exist)
+                    if query.entities and "graph" in workers_to_use:
                         task_ids.append(
                             self.scheduler.submit(
                                 "graph",
@@ -379,13 +434,14 @@ class MemorySystem:
                                     "limit": graph_limit_per_shard,
                                     "shard_id": shard_id,
                                     "num_shards": num_shards,
-                                    "depth": getattr(settings, "GRAPH_DEPTH", 2),
+                                    "depth": graph_depth,
                                 }
                             )
                         )
 
+                    # Phrase worker (if in routing)
                     phrases = query.metadata.get("phrases", [])
-                    if phrases and self.inverted_index:
+                    if phrases and self.inverted_index and "phrase" in workers_to_use:
                         task_ids.append(
                             self.scheduler.submit(
                                 "phrase",
@@ -398,9 +454,10 @@ class MemorySystem:
                             )
                         )
 
+                    # Attribute worker (if in routing)
                     subject = query.metadata.get("subject")
                     attribute = query.metadata.get("attribute")
-                    if subject and attribute:
+                    if subject and attribute and "attribute" in workers_to_use:
                         task_ids.append(
                             self.scheduler.submit(
                                 "attribute",
@@ -469,7 +526,7 @@ class MemorySystem:
                         )
                     )
 
-                # --- Step 5: Merge relevance + worker candidates ---
+                # --- Step 6: Merge relevance + worker candidates ---
                 candidates = relevance_candidates + worker_candidates
                 seen = set()
                 unique_candidates = []
@@ -480,7 +537,12 @@ class MemorySystem:
                 candidates = unique_candidates
                 debug(f"[MemorySystem] Total unique candidates: {len(candidates)} (relevance: {len(relevance_candidates)}, workers: {len(worker_candidates)})")
 
-            # --- Step 6: Memory Type Filtering ---
+            # --- Step 7: Pass signals to ranking pipeline via query metadata ---
+            if signals:
+                query.metadata["routing_signals"] = signals
+                query.metadata["routing_pool"] = pool
+
+            # --- Step 8: Memory Type Filtering (ensure only the right type) ---
             if memory_type_hint and memory_type_hint != "general":
                 filtered = [c for c in candidates if c.memory.memory_type == memory_type_hint]
                 if filtered:
@@ -520,6 +582,13 @@ class MemorySystem:
                     "diversity": candidate.diversity_score,
                 })
 
+            # ---- Record query history and feedback ----
+            self.query_history.record(text, response["results"])
+            if response["results"]:
+                top_result = response["results"][0]
+                self.feedback.record_click(top_result["id"], text)
+                # Optional: track dwell time later
+
             formatting_ms = (time.perf_counter() - t_rank) * 1000
             total_query_ms = (time.perf_counter() - overall_start) * 1000
 
@@ -542,6 +611,8 @@ class MemorySystem:
             }
 
         else:
+            # ---------- V3 Fallback Path ----------
+            # ... keep your existing fallback code ...
             
             
             # ---------- V3 Fallback Path (unchanged) ----------
@@ -630,3 +701,10 @@ class MemorySystem:
         """Run consolidation manually."""
         threshold = threshold or getattr(settings, "CONSOLIDATE_THRESHOLD", 0.5)
         self.consolidator.run(threshold)
+
+
+
+
+    def prune(self, dry_run: bool = False) -> dict:
+        """Manually run the pruner."""
+        return self.pruner.prune_now(dry_run=dry_run)

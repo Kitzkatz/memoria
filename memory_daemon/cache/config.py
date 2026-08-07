@@ -34,6 +34,11 @@ class Settings(BaseModel):
     USE_BLACKBOARD: bool = True
     USE_CASE_FOLDING: bool = True
 
+    # ---- Routing ----
+    USE_ROUTING: bool = True
+    ROUTING_MATRIX_OVERRIDE: bool = False  # Set to True to use a custom matrix
+    ROUTING_FALLBACK_ENABLED: bool = True
+
     # Ranking
     CONTEXT_MAX_MEMORIES: int = 50
     CONTEXT_MIN_SCORE: float = 0.15
@@ -62,15 +67,15 @@ class Settings(BaseModel):
     ADAPTIVE_WEIGHT_MIN: float = 0.01
 
     # Ranking Weights
-    RANKING_SEMANTIC: float = 0.2250
-    RANKING_IMPORTANCE: float = 0.0360
-    RANKING_RECENCY: float = 0.0100
-    RANKING_TOKEN: float = 0.1038
-    RANKING_FEEDBACK: float = 0.0100
-    RANKING_ENTITY: float = 0.2144
-    RANKING_SUBJECT: float = 0.1864
-    RANKING_ATTRIBUTE: float = 0.1398
-    RANKING_TFIDF: float = 0.0746
+    RANKING_SEMANTIC: float = 0.2311
+    RANKING_IMPORTANCE: float = 0.0528
+    RANKING_RECENCY: float = 0.0283
+    RANKING_TOKEN: float = 0.0791
+    RANKING_FEEDBACK: float = 0.0283
+    RANKING_ENTITY: float = 0.2023
+    RANKING_SUBJECT: float = 0.1758
+    RANKING_ATTRIBUTE: float = 0.1319
+    RANKING_TFIDF: float = 0.0704
 
     # Finalizer Weights
     FINALIZER_RELEVANCE: float = 0.25
@@ -85,12 +90,28 @@ class Settings(BaseModel):
     CONSOLIDATE_AUTO: bool = False
     CONSOLIDATE_INTERVAL: int = 3600  # seconds (1 hour)
 
+    # ---- Feedback Loop ----
+    FEEDBACK_WEIGHT: float = 0.08
+    FEEDBACK_PERSIST_PATH: str = "feedback_data.json"
+    QUERY_HISTORY_PERSIST_PATH: str = "query_history.json"
+    QUERY_HISTORY_MAX: int = 1000
+
+    # ---- Memory Pruner ----
+    PRUNE_THRESHOLD: float = 0.1          # Importance below this gets pruned
+    PRUNE_MAX_AGE_DAYS: int = 365          # Prune memories older than this
+    PRUNE_BATCH_SIZE: int = 100            # Batch size for pruning
+    PRUNE_INTERVAL_SECONDS: int = 3600     # Run every hour
+    PRUNE_AUTO_START: bool = False         # Start automatically on init
+
     # Add these to the existing Settings class
     CLI_DEFAULT_LIMIT: int = 3
     CLI_OUTPUT_FORMAT: str = "table"   # options: "table", "json", "raw"
     CLI_HISTORY_FILE: str = ".memory_history"
     CLI_SHOW_SCORES: bool = True
     CLI_TABLE_WIDTH: int = 80
+
+
+    
 settings = Settings()
 
 
