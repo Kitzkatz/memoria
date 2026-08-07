@@ -5,7 +5,6 @@ from typing import List, Optional, Set
 from retrieval.case_folding import fold_case
 from ranking.attribute_map import ATTRIBUTE_MAP
 from retrieval.query_models import QueryRecord
-from memory.type_router import TypeRouter   # new import
 
 
 class QueryProcessor:
@@ -33,8 +32,14 @@ class QueryProcessor:
             "should", "may", "might", "must", "shall"
         }
 
-        # Type router instance
-        self.type_router = TypeRouter()
+        # Built-in type routing rules (moved from type_router.py)
+        self.type_rules = {
+            "semantic": ["what is", "define", "means", "called", "fact", "property"],
+            "episodic": ["when", "what happened", "event", "time", "yesterday", "last week", "date"],
+            "procedural": ["how to", "steps", "guide", "procedure", "method", "instructions"],
+            "code": ["def ", "function ", "class ", "import ", "return ", "snippet", "api"],
+            "science": ["formula", "equation", "chemical", "physics", "temperature", "pressure", "mass"]
+        }
 
     # -------------------------
     # Normalization
@@ -165,6 +170,31 @@ class QueryProcessor:
         return phrases
 
     # -------------------------
+    # Determine memory type (moved from type_router.py)
+    # -------------------------
+
+    def _route_type(self, text: str, tokens: List[str]) -> str:
+        """
+        Determine memory type based on query text and tokens.
+        """
+        text_lower = text.lower()
+        scores = {t: 0 for t in self.type_rules}
+        
+        for mem_type, keywords in self.type_rules.items():
+            for kw in keywords:
+                if kw in text_lower:
+                    scores[mem_type] += 1
+
+        # Boost if token matches specific patterns (e.g., code syntax)
+        if any(t in tokens for t in ["def", "class", "import", "return"]):
+            scores["code"] += 2
+
+        best_type = max(scores, key=scores.get)
+        if scores[best_type] == 0:
+            return "general"
+        return best_type
+
+    # -------------------------
     # Process Query
     # -------------------------
 
@@ -203,8 +233,8 @@ class QueryProcessor:
         # Extract quoted phrases
         phrases = self.extract_phrases(text)
 
-        # Determine memory type hint using the router
-        memory_type_hint = self.type_router.route(text, tokens)
+        # Determine memory type hint
+        memory_type_hint = self._route_type(text, tokens)
 
         metadata = {
             "use_llm": use_llm,
