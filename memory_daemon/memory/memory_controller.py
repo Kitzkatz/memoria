@@ -1,6 +1,6 @@
 from core.logger import debug
 from core.bootstrap import bootstrap
-from memory.memory_system import MemorySystem
+from system.memory_system import MemorySystem
 from memory.goal_tracker import GoalTracker
 from graph.entity_store import EntityStore
 from cache.config import settings

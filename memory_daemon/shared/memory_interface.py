@@ -12,6 +12,7 @@ Keeps every subsystem talking to the same contract instead
 of directly to MemoryController.
 """
 
+from core.logger import debug, info
 from memory.memory_controller import MemoryController
 
 
@@ -19,12 +20,13 @@ class MemoryInterface:
 
     def __init__(self):
         self.controller = MemoryController()
+        info("[MemoryInterface] Initialized", category="interface")
 
     # --------------------------------------------------
     # SINGLE MEMORY
     # --------------------------------------------------
 
-    def remember(self, text):
+    def remember(self, text: str) -> int:
         """
         Store one memory.
 
@@ -33,13 +35,14 @@ class MemoryInterface:
         int
             Memory ID.
         """
+        debug(f"[MemoryInterface] remember: {text[:50]}...", category="interface")
         return self.controller.remember(text)
 
     # --------------------------------------------------
     # BATCH STORE
     # --------------------------------------------------
 
-    def remember_many(self, texts):
+    def remember_many(self, texts: list) -> list:
         """
         Store many memories.
 
@@ -52,9 +55,10 @@ class MemoryInterface:
         list[int]
             IDs of stored memories.
         """
+        debug(f"[MemoryInterface] remember_many: {len(texts)} texts", category="interface")
         return self.controller.remember_many(texts)
 
-    def store_many(self, texts):
+    def store_many(self, texts: list) -> list:
         """Alias for remember_many()."""
         return self.remember_many(texts)
 
@@ -62,19 +66,20 @@ class MemoryInterface:
     # SINGLE QUERY
     # --------------------------------------------------
 
-    def recall(self, query):
+    def recall(self, query: str) -> dict:
         """
         Query memory.
 
         Returns ranking output directly.
         """
+        debug(f"[MemoryInterface] recall: {query[:50]}...", category="interface")
         return self.controller.recall(query)
 
     # --------------------------------------------------
     # BATCH QUERY
     # --------------------------------------------------
 
-    def recall_many(self, queries):
+    def recall_many(self, queries: list) -> list:
         """
         Execute multiple queries.
 
@@ -83,13 +88,14 @@ class MemoryInterface:
         list
             One recall result per query.
         """
+        debug(f"[MemoryInterface] recall_many: {len(queries)} queries", category="interface")
         return [self.controller.recall(q) for q in queries]
 
     # --------------------------------------------------
     # GOALS
     # --------------------------------------------------
 
-    def set_goal(self, goal, progress="started"):
+    def set_goal(self, goal: str, progress: str = "started") -> int:
         """
         Set a new goal.
 
@@ -105,9 +111,10 @@ class MemoryInterface:
         int
             Goal ID.
         """
+        debug(f"[MemoryInterface] set_goal: {goal[:50]}...", category="interface")
         return self.controller.set_goal(goal, progress)
 
-    def update_goal(self, goal_id, progress=None, status=None):
+    def update_goal(self, goal_id: int, progress: str = None, status: str = None):
         """
         Update an existing goal.
 
@@ -124,9 +131,10 @@ class MemoryInterface:
         -------
         None
         """
+        debug(f"[MemoryInterface] update_goal: {goal_id}", category="interface")
         return self.controller.update_goal(goal_id, progress, status)
 
-    def list_goals(self, status=None):
+    def list_goals(self, status: str = None) -> list:
         """
         List all goals, optionally filtered by status.
 
@@ -146,12 +154,24 @@ class MemoryInterface:
     # CHAT (LLM)
     # --------------------------------------------------
 
-    def raw_chat(self, prompt: str):
-        return self.controller.llm.chat(prompt)
+    def raw_chat(self, prompt: str) -> str:
+        """
+        Send a raw prompt directly to the LLM (no retrieval).
 
+        Parameters
+        ----------
+        prompt : str
+            User prompt.
 
-    
-    def chat(self, prompt):
+        Returns
+        -------
+        str
+            LLM response.
+        """
+        debug(f"[MemoryInterface] raw_chat: {prompt[:50]}...", category="interface")
+        return self.controller.raw_chat(prompt)
+
+    def chat(self, prompt: str) -> str:
         """
         Chat with the memory system – recalls relevant memories
         and generates a response using the configured LLM.
@@ -166,12 +186,38 @@ class MemoryInterface:
         str
             LLM response.
         """
+        debug(f"[MemoryInterface] chat: {prompt[:50]}...", category="interface")
         return self.controller.chat(prompt)
 
     # --------------------------------------------------
-    # REFLECTION (placeholder for V4)
+    # REFLECTION (V4 feature stub)
     # --------------------------------------------------
 
-    def reflect(self):
-        """Placeholder for reflection (V4)."""
+    def reflect(self) -> dict:
+        """
+        Reflection: analyze the current state of the memory system.
+        V4 feature stub.
+        """
+        debug("[MemoryInterface] reflect called", category="interface")
         return self.controller.reflect()
+
+    # --------------------------------------------------
+    # DIAGNOSTICS
+    # --------------------------------------------------
+
+    def stats(self) -> dict:
+        """Get system statistics."""
+        return self.controller.stats()
+
+    def __repr__(self) -> str:
+        return f"MemoryInterface(controller={self.controller})"
+
+    def __str__(self) -> str:
+        return f"MemoryInterface (connected to {self.controller})"
+
+
+    def ingest_code(self, directory: str, max_files: int = 1000):
+        return self.controller.system.ingest_code(directory, max_files)
+
+    def ingest_pdf(self, filepath: str, max_pages: int = 100):
+        return self.controller.system.ingest_pdf(filepath, max_pages)

@@ -20,6 +20,8 @@ class AttributeBooster:
         self.entity_boost = entity_boost
         self.attribute_map = attribute_map or {}
         self.alias_index = self._build_alias_index()
+        # For faster text scanning, cache lowercased aliases
+        self._aliases_lower = [a.lower() for a in self.alias_index.keys()]
 
     def _build_alias_index(self):
         """Build alias index for fast attribute lookups."""
@@ -36,12 +38,15 @@ class AttributeBooster:
         return index
 
     def _detect_attributes(self, query):
-        """Detect attributes from query text and tokens."""
+        """
+        Detect attributes from query text and tokens.
+        Uses token matching for performance, with text fallback for multi-word.
+        """
         detected = {}
         text = query.normalized_text.lower()
         tokens = [t.lower() for t in query.tokens]
 
-        # Check tokens against alias index
+        # Check tokens against alias index (O(n) where n = token count)
         for token in tokens:
             hit = self.alias_index.get(token)
             if hit:
@@ -50,26 +55,46 @@ class AttributeBooster:
                     hit["boost"]
                 )
 
-        # Check full text for multi-word attributes
-        for alias, meta in self.alias_index.items():
-            if alias in text:
-                detected[meta["field"]] = max(
-                    detected.get(meta["field"], 0.0),
-                    meta["boost"]
-                )
+        # Check full text for multi-word attributes (only if needed)
+        # Only scan if we haven't already found everything
+        if len(detected) < len(self.alias_index):
+            for alias, meta in self.alias_index.items():
+                if alias in text and alias not in tokens:
+                    detected[meta["field"]] = max(
+                        detected.get(meta["field"], 0.0),
+                        meta["boost"]
+                    )
 
         return detected
 
     def _entity_overlap_score(self, query_entities, memory_entities):
         """Calculate entity overlap score."""
         if not query_entities or not memory_entities:
-            return 0.0
+            return 0.0, []
 
-        query_set = {e.lower() for e in query_entities}
-        memory_set = {e.lower() for e in memory_entities}
+        query_set = {e.lower() if isinstance(e, str) else str(e).lower() for e in query_entities}
+        memory_set = {e.lower() if isinstance(e, str) else str(e).lower() for e in memory_entities}
 
         overlap = query_set & memory_set
         return self.entity_boost * len(overlap), list(overlap)
+
+    def _matches_metadata(self, metadata, attr, boost_value):
+        """Check if an attribute matches metadata."""
+        if not metadata:
+            return False
+
+        # Direct key match
+        if attr in metadata:
+            return True
+
+        # Check values (case-insensitive)
+        for key, value in metadata.items():
+            if isinstance(value, str) and attr in value.lower():
+                return True
+            if isinstance(key, str) and attr in key.lower():
+                return True
+
+        return False
 
     def boost(self, query, candidates):
         """
@@ -80,7 +105,7 @@ class AttributeBooster:
             candidates: List of CandidateRecord objects
 
         Returns:
-            List of CandidateRecord objects with attribute_score set
+            List of CandidateRecord objects with attribute_score in diagnostics
         """
         if not candidates:
             return candidates
@@ -103,20 +128,19 @@ class AttributeBooster:
 
             # 2. Attribute boost
             if detected_attributes:
-                # Check if candidate matches any detected attribute
-                # Could check memory_type, metadata, or custom fields
                 memory_type = candidate.memory.memory_type
-                if memory_type in detected_attributes:
+                metadata = candidate.memory.metadata or {}
+
+                # Check memory_type match
+                if memory_type and memory_type in detected_attributes:
                     total_boost += detected_attributes[memory_type]
 
-                # Also check metadata for attribute matches
-                metadata = candidate.memory.metadata or {}
+                # Check metadata match
                 for attr, boost_value in detected_attributes.items():
-                    if attr in metadata or attr in str(metadata.values()):
-                        total_boost += boost_value * 0.5
+                    if self._matches_metadata(metadata, attr, boost_value):
+                        total_boost += boost_value * 0.5  # Half boost for metadata match
 
-            # Set the score
-            candidate.attribute_score = total_boost
+            # Store in diagnostics (instead of as attribute, to avoid Pydantic errors)
             candidate.diagnostics["attribute_boost"] = total_boost
             candidate.diagnostics["attribute_overlap"] = overlap_entities
             candidate.diagnostics["detected_attributes"] = list(detected_attributes.keys())

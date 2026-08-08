@@ -2,13 +2,12 @@
 Canonical attribute vocabulary.
 
 Every canonical attribute contains:
+- aliases: List of words/phrases that indicate this attribute
+- field: Canonical attribute name (matches the key)
+- boost: Score multiplier when matched (0.0 to 1.0)
 
-- aliases
-- memory field
-- boost
-- optional future metadata
-
-This file should contain NO logic.
+This file contains NO logic — it is a pure data definition.
+Used by: AttributeExtractor, AttributeBooster, QueryProcessor
 """
 
 ATTRIBUTE_MAP = {
@@ -215,3 +214,55 @@ ATTRIBUTE_MAP = {
     }
 
 }
+
+
+# -------------------------
+# Helper functions (convenience, still no logic)
+# -------------------------
+
+def get_attribute_boost(attribute: str) -> float:
+    """Get the boost value for a canonical attribute."""
+    config = ATTRIBUTE_MAP.get(attribute, {})
+    return config.get("boost", 0.10)
+
+
+def get_attribute_aliases(attribute: str) -> list:
+    """Get all aliases for a canonical attribute."""
+    config = ATTRIBUTE_MAP.get(attribute, {})
+    return config.get("aliases", [])
+
+
+def get_all_attributes() -> list:
+    """Return all canonical attribute names."""
+    return list(ATTRIBUTE_MAP.keys())
+
+
+def get_all_aliases() -> list:
+    """Return all alias phrases across all attributes."""
+    aliases = []
+    for config in ATTRIBUTE_MAP.values():
+        aliases.extend(config.get("aliases", []))
+    return aliases
+
+
+def get_attribute_for_alias(alias: str) -> str:
+    """
+    Find the canonical attribute for a given alias.
+    Returns None if no match found.
+    """
+    alias_lower = alias.lower()
+    for attr_name, config in ATTRIBUTE_MAP.items():
+        for alias_str in config.get("aliases", []):
+            if alias_str.lower() == alias_lower:
+                return attr_name
+    return None
+
+
+__all__ = [
+    "ATTRIBUTE_MAP",
+    "get_attribute_boost",
+    "get_attribute_aliases",
+    "get_all_attributes",
+    "get_all_aliases",
+    "get_attribute_for_alias",
+]

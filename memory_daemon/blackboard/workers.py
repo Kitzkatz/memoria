@@ -2,11 +2,7 @@ import time
 from typing import Dict, Any, List, Optional
 from cache.config import settings
 
-try:
-    from core.logger import debug
-except ImportError:
-    def debug(*args):
-        print("[DEBUG]", *args)
+from core.logger import debug
 
 
 class Worker:
@@ -63,28 +59,35 @@ class BM25Worker(Worker):
         if not isinstance(limit, int):
             limit = int(limit) if limit else settings.TOP_K
 
-        if not query_tokens or not self.inverted_index:
-            return {"error": "No tokens or inverted index", "source": "bm25", "candidates": []}
+        if not query_tokens:
+            return {"error": "No tokens provided", "source": "bm25", "candidates": []}
 
+        if not self.inverted_index:
+            return {"error": "Inverted index not available", "source": "bm25", "candidates": []}
+
+        # Get candidate IDs from inverted index
         candidate_ids = set()
         for token in query_tokens:
             candidate_ids.update(self.inverted_index.search(token))
-        candidate_ids = list(candidate_ids)
         candidate_ids = [int(x) for x in candidate_ids if x is not None]
 
         if not candidate_ids:
             return {"error": "No candidates found", "source": "bm25", "candidates": []}
 
-        # Filter by shard
-        if num_shards > 1:
-            candidate_ids = [cid for cid in candidate_ids if cid % num_shards == shard_id]
-
+        # Score ALL candidates first
         candidates = [
             (doc_id, self.bm25_ranker.score(query_tokens, doc_id))
-            for doc_id in candidate_ids[:limit * num_shards]
+            for doc_id in candidate_ids
         ]
 
+        # Sort by score
         candidates.sort(key=lambda x: x[1], reverse=True)
+
+        # Then filter by shard
+        if num_shards > 1:
+            candidates = [(mid, score) for mid, score in candidates if mid % num_shards == shard_id]
+
+        # Take top_k
         candidates = candidates[:limit]
 
         build_time = (time.perf_counter() - start) * 1000
@@ -179,6 +182,7 @@ class AttributeWorker(Worker):
         self.db = db
 
     def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        start = time.perf_counter()
         subject = payload.get("subject")
         attribute = payload.get("attribute")
         shard_id = payload.get("shard_id", 0)
@@ -194,6 +198,11 @@ class AttributeWorker(Worker):
         if num_shards > 1:
             candidates = [(mid, score) for mid, score in candidates if mid % num_shards == shard_id]
 
+        # Filter out tombstones just in case
+        candidates = [(mid, score) for mid, score in candidates if mid is not None]
+
+        attr_time = (time.perf_counter() - start) * 1000
+        debug(f"AttributeWorker (shard {shard_id}): attr_time={attr_time:.2f}ms, count={len(candidates)}")
         return {
             "source": "attribute",
             "candidates": candidates,

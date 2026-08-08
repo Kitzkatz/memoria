@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 from shared.memory_interface import MemoryInterface
 from cache.config import settings
+from core.logger import debug, info
 
 
 def format_table(results, limit, show_scores=True, width=80):
@@ -47,7 +48,7 @@ def format_goals(goals):
 
 
 class MemoryShell(cmd.Cmd):
-    intro = f"Memory Daemon TUI v0.3.0. Type 'help' for commands.\n"
+    intro = f"Memory Daemon TUI v4.0. Type 'help' for commands.\n"
     prompt = "Memory> "
     chat_prompt = "Chat> "
 
@@ -59,6 +60,7 @@ class MemoryShell(cmd.Cmd):
         self.table_width = settings.CLI_TABLE_WIDTH
         self.in_chat_mode = False
         self.chat_history = []  # list of {"user": str, "assistant": str}
+        info("[TUI] Initialized", category="tui")
 
     # ---- Chat Mode Management ----
     def enter_chat_mode(self, initial_prompt=None):
@@ -147,7 +149,7 @@ class MemoryShell(cmd.Cmd):
         else:
             print(f"Unknown command: {line}. Type 'help' for available commands.")
 
-    # ---- Existing Commands (unchanged) ----
+    # ---- Existing Commands ----
     def do_store(self, arg):
         if not arg:
             print("Usage: store <text>")
@@ -274,7 +276,7 @@ class MemoryShell(cmd.Cmd):
         try:
             db = self.mem.controller.system.db
             count = db.count()
-            print(f"Memory Daemon v0.3.0")
+            print(f"Memory Daemon v4.0")
             print(f"Database: {settings.DB_PATH}")
             print(f"Total memories: {count}")
             print(f"Embedding model: {settings.EMBEDDING_MODEL}")
@@ -297,7 +299,8 @@ class MemoryShell(cmd.Cmd):
             if not entity:
                 print(f"Entity '{entity_name}' not found.")
                 return
-            neighbors = graph_search.neighbors(entity.id, depth=depth)
+            # neighbors expects entity name, not ID
+            neighbors = graph_search.neighbors(entity_name, depth=depth)
             print(f"Neighbors of '{entity_name}' (depth {depth}):")
             for n in neighbors:
                 print(f"  {n['relation']} → {n['target']} (source: {n['source']})")

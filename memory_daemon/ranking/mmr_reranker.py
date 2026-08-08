@@ -6,7 +6,8 @@ Vector-space Maximal Marginal Relevance
 """
 
 import math
-from typing import Dict
+import numpy as np
+from typing import Dict, List, Optional
 
 
 class MMRReranker:
@@ -15,58 +16,34 @@ class MMRReranker:
         self,
         lambda_param: float = 0.50,
         debug: bool = False,
-        adaptive_lambda=True
+        adaptive_lambda: bool = True
     ):
-
-        # Higher = relevance
-        # Lower = diversity
         self.lambda_param = lambda_param
         self.debug = debug
         self.adaptive_lambda = adaptive_lambda
-
-        # cosine cache
-        self._cache: Dict[tuple, float] = {}
-
         self.last_diagnostics = {}
 
     # ---------------------------------
-    # Cosine Similarity
+    # Cosine Similarity (Vectorized)
     # ---------------------------------
 
-    def _cosine(self, a, b):
-
-        if a is None or b is None:
-            return 0.0
-
-        key = tuple(sorted((id(a), id(b))))
-
-        if key in self._cache:
-            return self._cache[key]
-
-        dot = sum(x * y for x, y in zip(a, b))
-
-        mag_a = math.sqrt(sum(x * x for x in a))
-        mag_b = math.sqrt(sum(x * x for x in b))
-
-        if mag_a == 0 or mag_b == 0:
-            sim = 0.0
-        else:
-            sim = dot / (mag_a * mag_b)
-
-        self._cache[key] = sim
-
-        return sim
+    def _cosine_similarity_matrix(self, embeddings: np.ndarray) -> np.ndarray:
+        """Compute pairwise cosine similarity matrix using numpy."""
+        # Normalize embeddings
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1e-8
+        normalized = embeddings / norms
+        # Cosine similarity = dot product of normalized vectors
+        return np.dot(normalized, normalized.T)
 
     # ---------------------------------
     # Diagnostics
     # ---------------------------------
 
     def _build_diagnostics(self, before_ids, after, lambda_used):
-
         after_ids = [c.memory.id for c in after]
 
         moves = 0
-
         for idx, item in enumerate(after_ids):
             if item in before_ids:
                 old = before_ids.index(item)
@@ -89,135 +66,106 @@ class MMRReranker:
         }
 
     # ---------------------------------
-    # Maximal Marginal Relevance
+    # Maximal Marginal Relevance (Vectorized)
     # ---------------------------------
 
     def rerank(self, candidates, k=20):
-
-        self._cache.clear()
-
         if not candidates:
             return []
 
-        #
-        # Copy candidates so we never mutate
-        # the caller's list.
-        #
-
+        # Copy candidates so we never mutate the caller's list
         working = [c.model_copy() for c in candidates]
-        working.sort(
-            key=lambda c: c.normalized_score,
-            reverse=True
-        )
+        working.sort(key=lambda c: c.normalized_score, reverse=True)
 
-        working = working[:25]
+        # Cap at 50 for MMR efficiency (increased from 25 for better results)
+        working = working[:50]
         before_ids = [c.memory.id for c in working]
 
         k = min(k, len(working))
 
-        selected = []
-        remaining = working.copy()
+        # ---- Extract embeddings ----
+        embeddings = []
+        for c in working:
+            emb = c.embedding
+            if emb is None:
+                emb = np.zeros(384)  # fallback
+            elif not isinstance(emb, np.ndarray):
+                emb = np.array(emb)
+            embeddings.append(emb)
 
-        if self.debug:
-            debug()
-            debug("========== MMR ==========")
-            debug("Candidates:", len(working))
-            debug("Lambda:", self.lambda_param)
-            debug("k:", k)
+        embeddings = np.array(embeddings, dtype=np.float32)
 
-        #
-        # Seed with highest relevance
-        #
+        # ---- Compute similarity matrix once ----
+        # Normalize embeddings for cosine similarity
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1e-8
+        normalized = embeddings / norms
+        sim_matrix = np.dot(normalized, normalized.T)
 
-        
-
-        
-
+        # ---- Adaptive Lambda ----
         current_lambda = self.lambda_param
         if self.adaptive_lambda:
-
             candidate_count = len(working)
-
             if candidate_count <= 10:
                 current_lambda = 0.95
-
             elif candidate_count <= 30:
                 current_lambda = 0.90
-
             elif candidate_count <= 75:
                 current_lambda = 0.85
-
             else:
                 current_lambda = 0.80
 
-        first = max(remaining, key=lambda c: c.normalized_score)
-        first.mmr_score = current_lambda * first.normalized_score
-        first.diversity_score = 0.0
-        selected.append(first)
-        remaining.remove(first)
+        # ---- Seed with highest relevance ----
+        selected_indices = []
+        remaining_indices = list(range(len(working)))
 
-        if self.debug:
-            debug()
-            debug(
-                "Seed:", first.memory.id,
-                "score:", round(first.normalized_score, 4)
-            )
+        # Select first candidate (highest relevance)
+        first_idx = max(remaining_indices, key=lambda i: working[i].normalized_score)
+        selected_indices.append(first_idx)
+        remaining_indices.remove(first_idx)
 
-        #
-        # Greedy MMR Selection
-        #
+        # ---- Greedy MMR Selection ----
+        effective_lambda = min(1.0, current_lambda + 0.10)
 
-        while remaining and len(selected) < k:
-
-            best_candidate = None
+        while remaining_indices and len(selected_indices) < k:
+            best_idx = -1
             best_score = float("-inf")
 
-            for candidate in remaining:
+            # Get similarity to selected set for all remaining
+            sim_to_selected = sim_matrix[remaining_indices][:, selected_indices]
 
-                relevance = candidate.normalized_score
+            # For each remaining candidate, compute max similarity to selected
+            if len(selected_indices) == 1:
+                # If only one selected, max is the similarity to that one
+                max_similarities = sim_to_selected.flatten()
+            else:
+                max_similarities = np.max(sim_to_selected, axis=1)
 
-                similarities = [
-                    self._cosine(candidate.embedding, chosen.embedding)
-                    for chosen in selected
-                ]
+            # Scores: relevance (normalized_score) - diversity (max similarity)
+            for idx_in_batch, remaining_idx in enumerate(remaining_indices):
+                relevance = working[remaining_idx].normalized_score
+                diversity_penalty = max_similarities[idx_in_batch]
 
-                if similarities:
-                    diversity_penalty = max(similarities)
-                    
-                else:
-                    diversity_penalty = 0.0
+                mmr_score = effective_lambda * relevance - (1.0 - effective_lambda) * diversity_penalty
 
-                mmr_score = (
-                    (current_lambda + 0.10) * relevance
-                    - (1.0 - current_lambda) * diversity_penalty
-                )
-
-                candidate.mmr_score = mmr_score
-                candidate.diversity_score = diversity_penalty
+                working[remaining_idx].mmr_score = mmr_score
+                working[remaining_idx].diversity_score = diversity_penalty
 
                 if mmr_score > best_score:
                     best_score = mmr_score
-                    best_candidate = candidate
+                    best_idx = remaining_idx
 
-            selected.append(best_candidate)
-            remaining.remove(best_candidate)
+            if best_idx == -1:
+                break
 
-            if self.debug:
-                debug(
-                    "Select:", best_candidate.memory.id,
-                    "rel=", round(best_candidate.normalized_score, 4),
-                    "div=", round(best_candidate.diversity_score, 4),
-                    "mmr=", round(best_candidate.mmr_score, 4)
-                )
+            selected_indices.append(best_idx)
+            remaining_indices.remove(best_idx)
+
+        # Build result in original order
+        selected = [working[i] for i in selected_indices]
 
         self.last_diagnostics = self._build_diagnostics(
             before_ids, selected, current_lambda
         )
 
-        if self.debug:
-            debug()
-            debug("[MMR DIAGNOSTICS]")
-            debug(self.last_diagnostics)
-
         return selected
-

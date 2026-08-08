@@ -1,8 +1,10 @@
-# memory/clustering.py
 import numpy as np
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import pdist
 from typing import List, Dict, Any, Optional
+
+from core.logger import debug
+
 
 class Clusterer:
     def __init__(self, distance_threshold: float = 0.5, linkage_method: str = "ward"):
@@ -10,50 +12,86 @@ class Clusterer:
         self.linkage_method = linkage_method
         self.clusters = {}
 
-    def build_embeddings(self, memories: List[Dict[str, Any]]) -> np.ndarray:
-        """Build embedding matrix from memory records."""
-        embeddings = []
-        for mem in memories:
-            # Use the embedding stored in FAISS or compute from text
-            # For now, we'll assume embeddings are available
-            # This is a placeholder — you'll need to fetch actual embeddings
-            embedding = mem.get("embedding")
-            if embedding is not None:
-                embeddings.append(embedding)
-        return np.array(embeddings)
-
     def cluster(self, embeddings: np.ndarray, memory_ids: List[int]) -> Dict[int, List[int]]:
-        """Cluster memories based on embeddings."""
+        """
+        Cluster memories based on embeddings.
+        Expects embeddings to already be built/retrieved.
+        """
         if len(embeddings) < 2:
-            return {mid: [mid] for mid in memory_ids}
+            # Return each memory as its own cluster
+            return {i: [mid] for i, mid in enumerate(memory_ids)}
 
-        # Compute distance matrix
-        dist_matrix = pdist(embeddings, metric="cosine")
-        linkage_matrix = linkage(dist_matrix, method=self.linkage_method)
+        # Check if all embeddings are valid
+        if embeddings.shape[0] != len(memory_ids):
+            debug(f"[Clusterer] Mismatch: {embeddings.shape[0]} embeddings, {len(memory_ids)} memory IDs")
+            return {i: [mid] for i, mid in enumerate(memory_ids)}
 
-        # Form flat clusters
-        labels = fcluster(linkage_matrix, t=self.distance_threshold, criterion="distance")
+        # If batch size is large, warn about O(n²)
+        if len(embeddings) > 2000:
+            debug(f"[Clusterer] Large batch ({len(embeddings)} embeddings) — O(n²) clustering may be slow")
 
-        # Group by cluster label
-        clusters = {}
-        for mid, label in zip(memory_ids, labels):
-            if label not in clusters:
-                clusters[label] = []
-            clusters[label].append(mid)
+        try:
+            # Compute distance matrix
+            dist_matrix = pdist(embeddings, metric="cosine")
+            linkage_matrix = linkage(dist_matrix, method=self.linkage_method)
 
-        return clusters
+            # Form flat clusters
+            labels = fcluster(linkage_matrix, t=self.distance_threshold, criterion="distance")
+
+            # Group by cluster label
+            clusters = {}
+            for mid, label in zip(memory_ids, labels):
+                if label not in clusters:
+                    clusters[label] = []
+                clusters[label].append(mid)
+
+            return clusters
+
+        except Exception as e:
+            debug(f"[Clusterer] Clustering failed: {e} — returning singleton clusters")
+            return {i: [mid] for i, mid in enumerate(memory_ids)}
+
+    # ---------------------------------
+    # Deprecated/Unused
+    # ---------------------------------
+
+    def build_embeddings(self, memories: List[Dict[str, Any]]) -> np.ndarray:
+        """
+        DEPRECATED: Use embedding_cache.get() or vector_store.get() directly.
+        This method is kept for backward compatibility but does nothing useful.
+        """
+        debug("[Clusterer] build_embeddings() is deprecated — embeddings should be retrieved via cache/vector store")
+        return np.array([])
 
     def consolidate_cluster(self, cluster_mem_ids: List[int], memories: List[Dict]) -> Dict[str, Any]:
-        """Merge a cluster into a single memory."""
+        """
+        Merge a cluster into a single memory.
+        This is a convenience wrapper around the consolidator's logic.
+        """
         if not cluster_mem_ids:
             return {}
 
         # Find the highest importance memory as base
-        best_mem = max(memories, key=lambda m: m.get("importance", 0.5))
+        best_mem = max(
+            [m for m in memories if m.get("id") in cluster_mem_ids],
+            key=lambda m: m.get("importance", 0.5),
+            default=None
+        )
 
-        # Merge metadata, entities, relationships
+        if best_mem is None:
+            return {}
+
+        # Merge entities using set
         entities = set(best_mem.get("entities", []))
-        relationships = list(best_mem.get("relationships", []))
+
+        # Merge relationships using tuple deduplication
+        relationships_set = set()
+        for rel in best_mem.get("relationships", []):
+            if isinstance(rel, dict):
+                relationships_set.add(tuple(sorted(rel.items())))
+            else:
+                relationships_set.add((rel,))
+
         texts = [best_mem.get("text", "")]
 
         for mem_id in cluster_mem_ids:
@@ -61,19 +99,31 @@ class Clusterer:
                 continue
             mem = next((m for m in memories if m.get("id") == mem_id), None)
             if mem:
-                entities.update(mem.get("entities", []))
+                for ent in mem.get("entities", []):
+                    entities.add(ent)
+
                 for rel in mem.get("relationships", []):
-                    if rel not in relationships:
-                        relationships.append(rel)
+                    if isinstance(rel, dict):
+                        relationships_set.add(tuple(sorted(rel.items())))
+                    else:
+                        relationships_set.add((rel,))
+
                 texts.append(mem.get("text", ""))
 
-        # Create consolidated record
+        # Convert relationships back to original format
+        merged_relationships = []
+        for rel_tuple in relationships_set:
+            if len(rel_tuple) == 1:
+                merged_relationships.append(rel_tuple[0])
+            else:
+                merged_relationships.append(dict(rel_tuple))
+
         return {
             "id": best_mem.get("id"),
             "text": " | ".join(texts),
             "entities": list(entities),
-            "relationships": relationships,
-            "importance": best_mem.get("importance", 0.5),
+            "relationships": merged_relationships,
+            "importance": min(1.0, best_mem.get("importance", 0.5) + 0.1),
             "metadata": best_mem.get("metadata", {}),
             "cluster_size": len(cluster_mem_ids),
             "cluster_members": cluster_mem_ids,

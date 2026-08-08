@@ -4,133 +4,196 @@
 
 Memory Daemon is a modular, local-first long-term memory engine designed for Large Language Models.
 
-Unlike traditional vector stores, Memory Daemon combines structured memories, semantic retrieval, graph relationships, ranking heuristics, benchmarking, and future cognitive orchestration into a unified architecture. The project is designed around transparency, deterministic behavior, and user ownership of data rather than opaque cloud-hosted memory systems.
-
-Current Development Stage:
-
-**Version:** V3 — Engineering Release
-
-Current Status:
-
-* Core architecture complete
-* Retrieval pipeline operational
-* Benchmark framework complete
-* Synthetic world testing complete
-* Graph subsystem operational
-* Documentation in active development
-* Preparing first public release
+Unlike traditional vector stores, Memory Daemon combines structured memories, semantic retrieval, graph relationships, ranking heuristics, feedback learning, and cognitive orchestration into a unified architecture. The project is designed around transparency, deterministic behavior, and user ownership of data.
 
 ---
 
-# Project Health
+## Current Development Stage
 
-| Area                      | Status         |
-| ------------------------- | -------------- |
-| Core Memory Engine        | ✅ Complete     |
-| Database Layer            | ✅ Stable       |
-| Embedding Pipeline        | ✅ Stable       |
-| Vector Search (FAISS)     | ✅ Stable       |
-| Graph Relationships       | ✅ Stable       |
-| Ranking Pipeline          | ✅ Stable       |
-| Benchmark Suite           | ✅ Stable       |
-| Synthetic World Generator | ✅ Stable       |
-| Regression Framework      | ✅ Stable       |
-| Documentation             | 🟡 In Progress |
-| CLI Interface             | 🟡 In Progress |
-| Packaging                 | 🟡 Pending     |
-| Public Release            | 🔵 Planned     |
+**Version:** V4 — Reasoning Infrastructure Release
+
+**Status:** Pre-release, functionally complete, undergoing final review
 
 ---
 
-# Core Systems
+## Version History
 
-## Memory Engine
-
-* Structured Memory
-* Semantic Memory
-* Goal Tracking
-* Memory Controller
-* Memory Manager
-
-## Retrieval
-
-* Query Processing
-* Embedding Cache
-* FAISS Search
-* Database Retrieval
-* Graph Retrieval
-
-## Ranking
-
-* Score Normalization
-* Attribute Boosting
-* MMR Diversification
-* Importance Scoring
-* Final Score Aggregation
-
-## Knowledge Graph
-
-* Entity Resolution
-* Relationship Builder
-* Edge Storage
-* Graph Search
-
-## Benchmarking
-
-* Synthetic World Generator
-* Batch Loader
-* Benchmark Runner
-* Analyzer
-* Regression Suite
+| Version | Status | Focus |
+|---------|--------|-------|
+| V1 | ✅ Archived | Core memory + basic retrieval |
+| V2 | ✅ Archived | Ranking pipeline + feedback |
+| V3 | ✅ Archived | Type routing + BM25 + inverted index |
+| V4 | 🚧 Current | Reasoning infrastructure + goals + blackboard |
+| V5 | 🔬 Research | Hierarchical memory + compression |
 
 ---
 
-# Release Checklist
+## Project Health
 
-## Documentation
-
-* [ ] Master README
-* [ ] Installation Guide
-* [ ] Quick Start
-* [ ] Architecture Documentation
-* [ ] API Documentation
-* [ ] Module Documentation
-* [ ] Contributor Guide
-* [ ] Release Notes
-
-## CLI
-
-* [ ] Interactive CLI
-* [ ] Query Commands
-* [ ] Memory Commands
-* [ ] Maintenance Commands
-* [ ] Diagnostics
-
-## Release
-
-* [ ] Dependency Cleanup
-* [ ] Packaging
-* [ ] Version Tag
-* [ ] GitHub Release
-* [ ] Initial Public Documentation
+| Area | Status | Notes |
+|------|--------|-------|
+| Core Memory Engine | ✅ Complete | MemoryDB, Pruner, RelevanceManager |
+| Database Layer | ✅ Complete | SQLite with WAL, type tables |
+| Embedding Pipeline | ✅ Complete | SentenceTransformer + FAISS |
+| Vector Search (FAISS) | ✅ Complete | CPU-optimized, sharding support |
+| Graph Relationships | ✅ Complete | Numpy graph, EntityStore, EdgeStore |
+| Ranking Pipeline | ✅ Complete | 10 signals, MMR, adaptive weights |
+| Feedback Loop | ✅ Complete | Clicks, dwell time, skips |
+| Blackboard | ✅ Complete | Thread-safe, event-driven |
+| Task Scheduler | ✅ Complete | Parallel execution |
+| Benchmark Suite | ✅ Complete | Accuracy, speed, regression |
+| Synthetic World Generator | ✅ Complete | Test data generation |
+| Documentation | 🟡 In Progress | V4 docs in final review |
+| CLI Interface | ✅ Complete | Full command set |
+| TUI Interface | ✅ Complete | Interactive chat mode |
+| GUI Interface | ✅ Complete | Web-based interface |
+| API (FastAPI) | ✅ Complete | Full REST endpoints |
+| Packaging | 🟡 In Progress | PyPI preparation |
+| Public Release | 🔵 Planned | V4 release candidate |
 
 ---
 
-# Immediate Priorities
+## Core Systems Status
 
-1. Complete documentation
-2. Finish CLI
-3. Package release build
-4. Public engineering release (V3)
+### Memory Engine
+- [x] Structured Memory
+- [x] Semantic Memory
+- [x] Episodic Memory
+- [x] Goal Tracking
+- [x] Memory Controller
+- [x] Memory Pruner
+- [x] Relevance Manager
+- [x] Feedback Loop
+
+### Retrieval
+- [x] Query Processing
+- [x] Embedding Cache
+- [x] FAISS Search
+- [x] BM25 Search
+- [x] Inverted Index
+- [x] Phrase Search
+- [x] Database Retrieval
+- [x] Graph Retrieval
+- [x] Attribute Search
+- [x] Shard Manager
+
+### Ranking
+- [x] Score Normalization
+- [x] Attribute Boosting
+- [x] MMR Diversification
+- [x] Importance Scoring
+- [x] Final Score Aggregation
+- [x] Adaptive Weighter
+- [x] BM25 Ranking
+- [x] TF/IDF Scoring
+
+### Knowledge Graph
+- [x] Entity Resolution
+- [x] Relationship Builder
+- [x] Edge Storage
+- [x] Graph Search
+- [x] Numpy Graph
+
+### Reasoning (V4)
+- [x] Goals
+- [x] Blackboard
+- [x] Task Scheduler
+- [ ] Reasoning Nodes (In Progress)
+- [ ] Computation Graph (In Progress)
+- [ ] Planner (Planned)
+- [ ] Execution Queue (Planned)
+
+### Benchmarking
+- [x] Synthetic World Generator
+- [x] Batch Loader
+- [x] Benchmark Runner
+- [x] Benchmark Analyzer
+- [x] Regression Suite
+- [x] Flight Recorder
 
 ---
 
-# Long-Term Roadmap
+## Release Checklist
 
-Next Milestone
+### Documentation
+- [x] Architecture Overview
+- [x] Data Flow
+- [x] Design Principles
+- [x] Project Manifesto
+- [ ] Master README
+- [ ] Installation Guide
+- [ ] Quick Start Guide
+- [ ] API Documentation
+- [ ] Contributor Guide
+- [ ] Release Notes
 
-→ V4 — Architecture Release
+### Interfaces
+- [x] CLI (full command set)
+- [x] TUI (interactive chat)
+- [x] GUI (web interface)
+- [x] API (FastAPI routes)
 
-Future Milestone
+### Release
+- [x] Code freeze
+- [ ] Dependency audit
+- [ ] Packaging
+- [ ] Version tag
+- [ ] GitHub Release
+- [ ] Initial public documentation
 
-→ V5 — Community Release
+---
+
+## Immediate Priorities
+
+1. ✅ Complete code review (V4)
+2. ✅ Update documentation
+3. 🔄 Performance pass (recover 150ms latency)
+4. 🔄 Final benchmark suite
+5. 🔜 Packaging for PyPI
+6. 🔜 V4 public release
+
+---
+
+## Long-Term Roadmap
+
+### V4 — Reasoning Infrastructure (Current)
+- ✅ Goals and planning
+- ✅ Blackboard architecture
+- ✅ Parallel task execution
+- 🔄 Reasoning nodes
+- 🔄 Computation graphs
+
+### V5 — Cognitive Architecture (Research)
+- Hierarchical memory representation
+- Minimal reconstruction cost
+- Compression as a side effect
+- Active reasoning over memory
+
+### V6 — Agent Operating System (Vision)
+- Complete cognitive architecture
+- Self-improving over time
+- Fully local, fully private
+- Multi-agent coordination
+
+---
+
+## Key Metrics
+
+| Metric | Current | Target |
+|--------|---------|--------|
+| Query Latency | ~150ms | ~150ms |
+| Memory Footprint | ~4GB RAM | ~4GB RAM |
+| CPU | CPU-only | CPU-only |
+| Storage | SQLite + FAISS | SQLite + FAISS |
+| Supported Models | Mistral, Llama, GPT | LLM-agnostic |
+| Languages | Python 3.12+ | Python 3.12+ |
+
+---
+
+## See Also
+
+- `02_project_overview.md` — Project overview
+- `03_system_architecture.md` — System architecture
+- `project_manifesto.md` — Vision and philosophy
+- `06_roadmap.md` — Detailed roadmap
+- `09_release_strategy.md` — Release plan

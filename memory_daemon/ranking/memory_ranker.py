@@ -1,371 +1,254 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import defaultdict
 import math
+import time as time_module
 from cache.config import settings
+from routing.matrix import ROUTING_MATRIX
 
 
 class MemoryRanker:
 
-    def __init__(self, tfidf_ranker=None):
+    def __init__(self, tfidf_ranker=None, feedback_loop=None, numpy_graph=None, enable_diagnostics=None):
         self.tfidf_ranker = tfidf_ranker
+        self.feedback_loop = feedback_loop
+        self.numpy_graph = numpy_graph
 
-        self.rank_feedback = defaultdict(float)
+        if enable_diagnostics is None:
+            self.enable_diagnostics = getattr(settings, "RANKER_DIAGNOSTICS", settings.DEBUG)
+        else:
+            self.enable_diagnostics = enable_diagnostics
 
-        
+        general_config = ROUTING_MATRIX.get("general", {})
+        default_signals = general_config.get("signals", {})
+        self._default_weights = default_signals.copy()
 
-        # In __init__:
-        self.weights = {
-            "semantic": getattr(settings, "RANKING_SEMANTIC", 0.20),
-            "importance": getattr(settings, "RANKING_IMPORTANCE", 0.08),
-            "recency": getattr(settings, "RANKING_RECENCY", 0.05),
-            "token": getattr(settings, "RANKING_TOKEN", 0.07),
-            "feedback": getattr(settings, "RANKING_FEEDBACK", 0.02),
-            "entity": getattr(settings, "RANKING_ENTITY", 0.23),
-            "subject": getattr(settings, "RANKING_SUBJECT", 0.20),
-            "attribute": getattr(settings, "RANKING_ATTRIBUTE", 0.15),
-            "graph_distance": getattr(settings, "GRAPH_DISTANCE", 0.10),
-            "tfidf": getattr(settings, "TFIDF", 0.08),
-            
-        }
-
-    
-
+        self._timing_accumulator = defaultdict(float)
+        self._candidate_count = 0
 
     # ---------------------------------
     # Recency
     # ---------------------------------
 
-    def recency_score(
-        self,
-        created_at,
-        decay_days=30
-    ):
-
+    def recency_score(self, created_at, decay_days=30):
         try:
-
             created = datetime.fromisoformat(created_at)
-
-            age = max(
-                0,
-                (datetime.utcnow() - created).days
-            )
-
-            return math.exp(
-                -age / decay_days
-            )
-
+            now = datetime.now(timezone.utc)
+            age = max(0, (now - created).days)
+            return math.exp(-age / decay_days)
         except Exception:
-
             return 0.5
-
 
     # ---------------------------------
     # Token similarity
     # ---------------------------------
 
-    def token_overlap(
-        self,
-        query_tokens,
-        memory_tokens
-    ):
-
+    def token_overlap(self, query_tokens, memory_tokens):
         if not query_tokens or not memory_tokens:
-
             return 0.0
-
-
         q = set(query_tokens)
-
         m = set(memory_tokens)
-
-
         intersection = len(q & m)
-
         union = len(q | m)
-
-
         return intersection / max(union, 1)
 
-
     def entity_overlap(self, query_entities, memory_entities):
-
         if not query_entities or not memory_entities:
             return 0.0
-
-        q = {e.lower() for e in query_entities}
-        m = {e.lower() for e in memory_entities}
-
+        q = {str(e).lower() for e in query_entities}
+        m = {str(e).lower() for e in memory_entities}
         return len(q & m) / max(len(q), 1)
 
-
-    def subject_score(self, query):
-
-        subject = query.metadata.get("subject")
-
-        if not subject:
-            return 0.0
-
-        mem_subject = (
-            candidate.memory.metadata.get("subject")
-            if candidate.memory.metadata else None
-        )
-
-        if not mem_subject:
-            return 0.0
-
-        return 1.0 if subject.lower() == mem_subject.lower() else 0.0
-
-
-    def attribute_score(self, query):
-
-        attr = query.metadata.get("attribute")
-
-        if not attr:
-            return 0.0
-
-        mem_attr = (
-            candidate.memory.metadata.get("attribute")
-            if candidate.memory.metadata else None
-        )
-
-        if not mem_attr:
-            return 0.0
-
-        return 1.0 if attr == mem_attr else 0.0
     # ---------------------------------
     # Semantic score
     # ---------------------------------
 
-    def semantic_score(
-        self,
-        distance
-    ):
-
-        return 1.0 / (
-            1.0 + float(distance)
-        )
-    
+    def semantic_score(self, distance):
+        return 1.0 / (1.0 + float(distance))
 
     def tfidf_score(self, query_tokens, memory_tokens):
-        """Compute TF/IDF score using the precomputed ranker."""
         if not hasattr(self, 'tfidf_ranker') or not self.tfidf_ranker:
             return 0.0
         return self.tfidf_ranker.document_score(query_tokens, memory_tokens)
 
-
-    # ---------------------------------
-    # Compute one candidate score
-    # ---------------------------------
-
-    def compute_score(
-        self,
-        candidate,
-        query
-    ):
-
-        semantic = self.semantic_score(
-            candidate.distance
-        )
-
-
-        importance = max(
-            0.0,
-            min(
-                float(candidate.memory.importance),
-                1.0
-            )
-        )
-
-
-        recency = self.recency_score(
-            candidate.memory.created_at
-        )
-
-
-        token = self.token_overlap(
-            query.tokens,
-            candidate.memory.tokens
-        )
-
-
-        feedback = max(
-            -1.0,
-            min(
-                self.rank_feedback[candidate.memory.id],
-                1.0
-            )
-        )
-
-        entity = self.entity_overlap(
-            query.entities,
-            candidate.memory.entities
-        )
-        
-        tfidf = self.tfidf_score(query.tokens, candidate.memory.tokens)
-        candidate.tfidf_score = tfidf
-        candidate.diagnostics["tfidf_score"] = tfidf
-
-        # Inside compute_score(), after other signals like semantic, importance, recency, token, entity, etc.
-
-        # ---- Graph Distance Signal ----
-        graph_dist = 0.0
-        if hasattr(self, 'numpy_graph') and self.numpy_graph:
-            graph_dist = self.graph_distance_score(
-                query.entities,
-                candidate.memory.entities,
-                self.numpy_graph
-            )
-            candidate.graph_distance_score = graph_dist
-            candidate.diagnostics["graph_distance"] = graph_dist
-        else:
-            candidate.graph_distance_score = 0.0
-            candidate.diagnostics["graph_distance"] = 0.0
-
-        subject = 0.0
-
-        attribute = 0.0
-
-        if candidate.memory.metadata:
-
-            mem_subject = candidate.memory.metadata.get("subject")
-            mem_attribute = candidate.memory.metadata.get("attribute")
-
-            query_subject = query.metadata.get("subject")
-            query_attribute = query.metadata.get("attribute")
-
-            if mem_subject and query_subject:
-
-                if mem_subject.lower() == query_subject.lower():
-                    subject = 1.0
-
-            if mem_attribute and query_attribute:
-
-                if mem_attribute == query_attribute:
-                    attribute = 1.0
-
-
-        score = (
-
-            semantic * self.weights["semantic"]
-
-            + importance * self.weights["importance"]
-
-            + recency * self.weights["recency"]
-
-            + token * self.weights["token"]
-
-            + feedback * self.weights["feedback"]
-
-            + entity * self.weights["entity"]
-
-            + subject * self.weights["subject"]
-
-            + attribute * self.weights["attribute"]
-
-            + tfidf * self.weights["tfidf"]
-
-        )
-
-
-        
-
-        candidate.semantic_score = semantic
-        candidate.importance_score = importance
-        candidate.recency_score = recency
-        candidate.token_score = token
-        candidate.feedback_score = feedback
-
-        candidate.base_score = score
-
-        candidate.diagnostics["ranker"] = {
-
-            "semantic": semantic,
-
-            "importance": importance,
-
-            "recency": recency,
-
-            "token": token,
-
-            "feedback": feedback,
-
-            "entity": entity,
-
-            "subject": subject,
-
-            "attribute": attribute
-
-        }
-
-        return candidate
-
-
-    def graph_distance_score(self, query_entities, memory_entities, numpy_graph):
-        """
-        Score based on shortest path distance between query entities and memory entities.
-        Closer entities (shorter path) get higher scores.
-        """
-        if not query_entities or not memory_entities or not numpy_graph:
+    def graph_distance_score(self, query_entities, memory_entities):
+        if not query_entities or not memory_entities or not self.numpy_graph:
             return 0.0
 
         best_distance = float('inf')
-        for q in query_entities:
-            for m in memory_entities:
-                dist = numpy_graph.shortest_path(q, m)
-                if dist < best_distance:
+        for q_entity in query_entities:
+            for m_entity in memory_entities:
+                dist = self.numpy_graph.shortest_path(q_entity, m_entity)
+                if dist is not None and dist < best_distance:
                     best_distance = dist
-                    # Early exit if we find a direct connection (distance = 1)
                     if best_distance == 1:
                         break
             if best_distance == 1:
                 break
 
-        if best_distance == float('inf'):
+        if best_distance == float('inf') or best_distance is None:
             return 0.0
-        # Inverse distance: 1 (distance 1) → 1.0, 2 → 0.5, 3 → 0.33, etc.
-        return 1.0 / best_distance
+        return 1.0 / (best_distance + 1e-6)
+
+    def get_weights_for_type(self, query):
+        routing_signals = query.metadata.get("routing_signals")
+        if routing_signals and isinstance(routing_signals, dict):
+            merged = self._default_weights.copy()
+            for key, value in routing_signals.items():
+                if key in merged:
+                    merged[key] = value
+            return merged
+        return self._default_weights
+
+    # ---------------------------------
+    # Compute one candidate score
+    # ---------------------------------
+
+    def compute_score(self, candidate, query):
+        t0 = time_module.perf_counter()
+
+        weights = self.get_weights_for_type(query)
+
+        t_semantic = time_module.perf_counter()
+        semantic = self.semantic_score(candidate.distance)
+        t_importance = time_module.perf_counter()
+        importance = max(0.0, min(float(candidate.memory.importance), 1.0))
+        t_recency = time_module.perf_counter()
+        recency = self.recency_score(candidate.memory.created_at)
+        t_token = time_module.perf_counter()
+        token = self.token_overlap(query.tokens, candidate.memory.tokens)
+        t_entity = time_module.perf_counter()
+        entity = self.entity_overlap(query.entities, candidate.memory.entities)
+        t_tfidf = time_module.perf_counter()
+
+        tfidf = 0.0
+        if weights.get("tfidf", 0.0) > 0:
+            tfidf = self.tfidf_score(query.tokens, candidate.memory.tokens)
+        t_graph = time_module.perf_counter()
+
+        graph_dist = 0.0
+        if weights.get("graph_distance", 0.0) > 0:
+            graph_dist = self.graph_distance_score(query.entities, candidate.memory.entities)
+        t_subject = time_module.perf_counter()
+
+        subject = 0.0
+        attribute = 0.0
+        if candidate.memory.metadata:
+            mem_subject = candidate.memory.metadata.get("subject")
+            mem_attribute = candidate.memory.metadata.get("attribute")
+            query_subject = query.metadata.get("subject")
+            query_attribute = query.metadata.get("attribute")
+
+            if mem_subject and query_subject:
+                if str(mem_subject).lower() == str(query_subject).lower():
+                    subject = 1.0
+            if mem_attribute and query_attribute:
+                if str(mem_attribute) == str(query_attribute):
+                    attribute = 1.0
+        t_feedback = time_module.perf_counter()
+
+        auto_feedback = 0.0
+        if self.feedback_loop and weights.get("feedback", 0.0) > 0:
+            auto_feedback = self.feedback_loop.get_boost(candidate.memory.id)
+        combined_feedback = max(-1.0, min(auto_feedback, 1.0))
+        t_score = time_module.perf_counter()
+
+        score = (
+            semantic * weights.get("semantic", 0.20)
+            + importance * weights.get("importance", 0.08)
+            + recency * weights.get("recency", 0.05)
+            + token * weights.get("token", 0.07)
+            + combined_feedback * weights.get("feedback", 0.02)
+            + entity * weights.get("entity", 0.23)
+            + subject * weights.get("subject", 0.20)
+            + attribute * weights.get("attribute", 0.15)
+            + tfidf * weights.get("tfidf", 0.08)
+            + graph_dist * weights.get("graph_distance", 0.10)
+        )
+        t_end = time_module.perf_counter()
+
+        candidate.semantic_score = semantic
+        candidate.importance_score = importance
+        candidate.recency_score = recency
+        candidate.token_score = token
+        candidate.base_score = score
+
+        # 👈 ACCUMULATE TIMING DATA
+        self._timing_accumulator["semantic"] += (t_importance - t_semantic) * 1000
+        self._timing_accumulator["importance"] += (t_recency - t_importance) * 1000
+        self._timing_accumulator["recency"] += (t_token - t_recency) * 1000
+        self._timing_accumulator["token"] += (t_entity - t_token) * 1000
+        self._timing_accumulator["entity"] += (t_tfidf - t_entity) * 1000
+        self._timing_accumulator["tfidf"] += (t_graph - t_tfidf) * 1000
+        self._timing_accumulator["graph_distance"] += (t_subject - t_graph) * 1000
+        self._timing_accumulator["subject_attribute"] += (t_feedback - t_subject) * 1000
+        self._timing_accumulator["feedback"] += (t_score - t_feedback) * 1000
+        self._timing_accumulator["score_sum"] += (t_end - t_score) * 1000
+        self._timing_accumulator["total"] += (t_end - t0) * 1000
+        self._candidate_count += 1
+
+        # ✅ ALWAYS store ranker signals (needed for benchmark analysis)
+        candidate.diagnostics["ranker"] = {
+            "semantic": semantic,
+            "importance": importance,
+            "recency": recency,
+            "token": token,
+            "feedback": combined_feedback,
+            "entity": entity,
+            "subject": subject,
+            "attribute": attribute,
+            "graph_distance": graph_dist,
+            "tfidf": tfidf,
+            "weights": weights,
+            "score": round(score, 4),
+        }
+
+        # Extra diagnostics if enabled
+        if self.enable_diagnostics:
+            candidate.diagnostics["tfidf_score"] = tfidf
+            candidate.diagnostics["graph_distance"] = graph_dist
+            candidate.diagnostics["feedback_auto"] = auto_feedback
+            candidate.diagnostics["feedback_combined"] = combined_feedback
+
+        return candidate
 
     # ---------------------------------
     # Pipeline entry
     # ---------------------------------
 
     def rank(self, candidates, query):
+        import time as t
+        import os
+
+        # Reset timing accumulator
+        self._timing_accumulator.clear()
+        self._candidate_count = 0
+
+        start_total = t.perf_counter()
 
         updated = []
         for candidate in candidates:
-            updated.append(
-                self.compute_score(candidate, query)
-            )
+            updated.append(self.compute_score(candidate, query))
 
-        updated.sort(
-            key=lambda x: x.base_score,
-            reverse=True
-        )
+        elapsed_total = (t.perf_counter() - start_total) * 1000
+
+        updated.sort(key=lambda x: x.base_score, reverse=True)
+
+        # Write timing breakdown to file
+        if self._candidate_count > 0:
+            timing_file = "/tmp/ranker_timing.txt"
+            try:
+                with open(timing_file, "w") as f:
+                    f.write("=" * 60 + "\n")
+                    f.write("[RANKER TIMING BREAKDOWN]\n")
+                    f.write(f"Candidates: {self._candidate_count}\n")
+                    f.write(f"Total ranking time: {elapsed_total:.3f}ms\n")
+                    f.write("-" * 60 + "\n")
+                    for key, value in sorted(self._timing_accumulator.items(), key=lambda x: x[1], reverse=True):
+                        avg = value / self._candidate_count
+                        total = value
+                        f.write(f"  {key:<20}: {total:>8.3f}ms total, {avg:>6.3f}ms avg\n")
+                    f.write("=" * 60 + "\n")
+            except Exception as e:
+                print(f"[RANKER] Failed to write timing: {e}")
 
         return updated
-    
-
-
-
-    # ---------------------------------
-    # Feedback
-    # ---------------------------------
-
-    def reinforce(
-        self,
-        mem_id,
-        amount=0.05
-    ):
-
-        self.rank_feedback[mem_id] += amount
-
-
-    def punish(
-        self,
-        mem_id,
-        amount=0.05
-    ):
-
-        self.rank_feedback[mem_id] -= amount
-
-

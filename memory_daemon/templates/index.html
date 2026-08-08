@@ -57,6 +57,63 @@
         .chat-box button:hover { background: #388bfd; }
         .chat-response { margin-top: 0.75rem; padding: 1rem; background: #161b22; border: 1px solid #30363d; border-radius: 8px; color: #f0f6fc; white-space: pre-wrap; min-height: 60px; }
 
+        .ingest-section {
+            margin-top: 2rem;
+            padding-top: 2rem;
+            border-top: 1px solid #30363d;
+        }
+        .ingest-section h2 {
+            font-size: 1.25rem;
+            color: #f0f6fc;
+            margin-bottom: 0.75rem;
+        }
+        .ingest-box {
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+        }
+        .ingest-box h3 {
+            font-size: 1rem;
+            color: #f0f6fc;
+            margin-bottom: 0.5rem;
+        }
+        .ingest-box input[type="text"],
+        .ingest-box input[type="number"] {
+            width: 100%;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.9rem;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            outline: none;
+            margin-bottom: 0.5rem;
+        }
+        .ingest-box input:focus {
+            border-color: #58a6ff;
+        }
+        .ingest-box button {
+            padding: 0.5rem 1.5rem;
+            font-size: 0.9rem;
+            background: #1f6feb;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background 0.15s;
+        }
+        .ingest-box button:hover {
+            background: #388bfd;
+        }
+        .ingest-status {
+            margin-top: 0.5rem;
+            font-size: 0.9rem;
+            min-height: 1.5rem;
+        }
+        
         @media (max-width: 640px) { body { padding: 1rem; } .search-box { flex-direction: column; } .store-box { flex-direction: column; } .chat-box { flex-direction: column; } }
     </style>
 </head>
@@ -93,6 +150,26 @@
             <button onclick="doChat()">Send</button>
         </div>
         <div id="chatResponse" class="chat-response"></div>
+    </div>
+    <!-- Ingestion -->
+    <div class="ingest-section">
+        <h2>📂 Ingest Code / PDF</h2>
+        
+        <div class="ingest-box">
+            <h3>Code</h3>
+            <input type="text" id="codePathInput" placeholder="Directory path (e.g., /home/cats/projects/my_code)" />
+            <input type="number" id="codeMaxFiles" placeholder="Max files (default: 1000)" value="1000" />
+            <button onclick="doIngestCode()">Ingest Code</button>
+            <div id="codeStatus" class="ingest-status"></div>
+        </div>
+
+        <div class="ingest-box">
+            <h3>PDF</h3>
+            <input type="text" id="pdfPathInput" placeholder="File path (e.g., /home/cats/documents/research.pdf)" />
+            <input type="number" id="pdfMaxPages" placeholder="Max pages (default: 100)" value="100" />
+            <button onclick="doIngestPDF()">Ingest PDF</button>
+            <div id="pdfStatus" class="ingest-status"></div>
+        </div>
     </div>
 
     <script>
@@ -231,6 +308,74 @@
                 responseDiv.style.color = '#f85149';
             }
         }
+
+        async function doIngestCode() {
+            const pathInput = document.getElementById('codePathInput');
+            const maxFilesInput = document.getElementById('codeMaxFiles');
+            const statusDiv = document.getElementById('codeStatus');
+            
+            const directory = pathInput.value.trim();
+            const max_files = parseInt(maxFilesInput.value) || 1000;
+            if (!directory) return;
+
+            statusDiv.innerHTML = '⏳ Ingesting code...';
+            statusDiv.style.color = '#8b949e';
+
+            try {
+                const resp = await fetch('/ingest_code', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ directory, max_files })
+                });
+                const data = await resp.json();
+
+                if (data.error) {
+                    statusDiv.innerHTML = '❌ ' + data.error;
+                    statusDiv.style.color = '#f85149';
+                } else {
+                    statusDiv.innerHTML = '✅ ' + data.message;
+                    statusDiv.style.color = '#3fb950';
+                }
+            } catch (err) {
+                statusDiv.innerHTML = '❌ Request failed: ' + err.message;
+                statusDiv.style.color = '#f85149';
+            }
+        }
+
+        async function doIngestPDF() {
+            const pathInput = document.getElementById('pdfPathInput');
+            const maxPagesInput = document.getElementById('pdfMaxPages');
+            const statusDiv = document.getElementById('pdfStatus');
+            
+            const filepath = pathInput.value.trim();
+            const max_pages = parseInt(maxPagesInput.value) || 100;
+            if (!filepath) return;
+
+            statusDiv.innerHTML = '⏳ Ingesting PDF...';
+            statusDiv.style.color = '#8b949e';
+
+            try {
+                const resp = await fetch('/ingest_pdf', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filepath, max_pages })
+                });
+                const data = await resp.json();
+
+                if (data.error) {
+                    statusDiv.innerHTML = '❌ ' + data.error;
+                    statusDiv.style.color = '#f85149';
+                } else {
+                    statusDiv.innerHTML = '✅ ' + data.message;
+                    statusDiv.style.color = '#3fb950';
+                }
+            } catch (err) {
+                statusDiv.innerHTML = '❌ Request failed: ' + err.message;
+                statusDiv.style.color = '#f85149';
+            }
+        }
+
+        
 
         // --- Utils ---
         function clearResults() {

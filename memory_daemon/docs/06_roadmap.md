@@ -2,277 +2,305 @@
 
 ## V3 — Engineering Release
 
-Goal
+**Goal:** Release a documented, benchmarked local memory engine suitable for engineering review.
 
-Release a documented, benchmarked local memory engine suitable for engineering review.
+**Status:** ✅ Complete
 
-Checklist
+### Checklist
 
-- [x] Memory extraction
-- [x] Embeddings
-- [x] Vector search
-- [x] Graph relationships
-- [x] Ranking pipeline
-- [x] Benchmarks
-- [x] Synthetic World
-- [x] Regression suite
-- [ ] CLI
-- [ ] README
-- [ ] API examples
-- [ ] Installation guide
-- [ ] Release package
+| Item | Status |
+|------|--------|
+| Memory extraction | ✅ Complete |
+| Embeddings | ✅ Complete |
+| Vector search | ✅ Complete |
+| Graph relationships | ✅ Complete |
+| Ranking pipeline | ✅ Complete |
+| Benchmarks | ✅ Complete |
+| Synthetic World | ✅ Complete |
+| Regression suite | ✅ Complete |
+| CLI | ✅ Complete |
+| README | ✅ Complete |
+| API examples | ✅ Complete |
+| Installation guide | ✅ Complete |
+| Release package | ✅ Complete |
 
-Status
-
-~90%
-
-
-# V4 — Architecture Release
-
-## Objective
-
-Transform Memory Daemon from a memory engine into a cognitive architecture capable of coordinating multiple reasoning systems while preserving modularity and deterministic behavior.
-
-The focus of V4 is architectural intelligence rather than additional retrieval features.
+**V3 is archived.** The codebase now lives as V4.
 
 ---
 
-# Major Goals
+## V4 — Architecture Release
 
-## Blackboard Architecture
+**Goal:** Transform Memory Daemon from a memory engine into a cognitive architecture capable of coordinating multiple reasoning systems while preserving modularity and deterministic behavior.
 
+**Status:** 🚧 In Progress (~90%)
+
+**Release Date:** TBD (Current)
+
+---
+
+### Major Goals
+
+#### Blackboard Architecture
 Create a central reasoning workspace where independent modules collaborate without being tightly coupled.
 
-Purpose:
+**Purpose:**
+- Shared reasoning state
+- Decoupled components
+- Cooperative processing
+- Easier future expansion
 
-* Shared reasoning state
-* Decoupled components
-* Cooperative processing
-* Easier future expansion
+**Status:** ✅ Complete
 
 ---
 
-## Scheduler
-
+#### Scheduler
 Introduce intelligent task scheduling.
 
-Responsibilities:
+**Responsibilities:**
+- Background memory maintenance
+- Deferred processing
+- Memory aging
+- Consolidation timing
+- Pipeline orchestration
 
-* Background memory maintenance
-* Deferred processing
-* Memory aging
-* Consolidation timing
-* Pipeline orchestration
+**Status:** ✅ Complete
 
 ---
 
-## Computation Graph
-
+#### Computation Graph
 Replace linear execution with graph-based execution.
 
-Allows:
+**Allows:**
+- Dynamic execution paths
+- Parallel processing
+- Conditional routing
+- Future optimization
 
-* Dynamic execution paths
-* Parallel processing
-* Conditional routing
-* Future optimization
+**Status:** 🔄 In Progress
 
 ---
 
-## Memory Interaction
-
+#### Memory Interaction
 Expand interaction between memory types.
 
-Examples:
+**Examples:**
+- Semantic ↔ Episodic
+- Goals ↔ Memories
+- Structured ↔ Graph
+- Graph ↔ Retrieval
 
-* Semantic ↔ Episodic
-* Goals ↔ Memories
-* Structured ↔ Graph
-* Graph ↔ Retrieval
+**Status:** ✅ Complete
 
 ---
 
-## Memory Consolidation
-
+#### Memory Consolidation
 Allow memories to evolve over time.
 
-Features:
+**Features:**
+- Merge duplicates
+- Reinforce important memories
+- Create summaries
+- Build higher-order concepts
 
-* Merge duplicates
-* Reinforce important memories
-* Create summaries
-* Build higher-order concepts
+**Status:** ✅ Complete
 
 ---
 
-## Memory Aging
-
+#### Memory Aging
 Introduce lifecycle management.
 
-Stages:
+**Stages:**
+- Fresh
+- Active
+- Stable
+- Dormant
+- Archived
 
-* Fresh
-* Active
-* Stable
-* Dormant
-* Archived
+**Status:** ✅ Complete (via Pruner)
 
 ---
 
-## Relationship Intelligence
-
+#### Relationship Intelligence
 Replace placeholder relationships with richer extraction.
 
-Targets:
+**Targets:**
+- Better entity resolution
+- Typed relationships
+- Confidence scores
+- Graph enrichment
 
-* Better entity resolution
-* Typed relationships
-* Confidence scores
-* Graph enrichment
+**Status:** ✅ Complete
 
 ---
 
-## Planner
-
+#### Planner
 Introduce a planning layer capable of coordinating reasoning modules and future autonomous workflows.
 
+**Status:** 🔜 Planned
+
 ---
 
-## Local Tool System
-
+#### Local Tool System
 Provide a standardized interface for local tools.
 
-Examples:
+**Examples:**
+- File access
+- Search
+- Diagnostics
+- External plugins
 
-* File access
-* Search
-* Diagnostics
-* External plugins
+**Status:** 🔜 Planned
 
 ---
 
-## Success Criteria
+### Success Criteria
 
 V4 is complete when Memory Daemon is no longer simply storing memories but coordinating multiple subsystems through a unified reasoning architecture.
 
-
-
-
-# V5 — Community Release
-
-## Objective
-
-Deliver Memory Daemon as a stable, documented, extensible platform suitable for public adoption and long-term maintenance.
-
-V5 represents the transition from engineering project to software ecosystem.
+**Progress:** ~90%
 
 ---
 
-# Platform Goals
+## V5 — Community Release
 
-## Stable API
+**Goal:** Deliver Memory Daemon as a stable, documented, extensible platform suitable for public adoption and long-term maintenance.
 
+**Status:** 🔬 Research / Planning
+
+**Release Date:** TBD
+
+---
+
+### Platform Goals
+
+#### Stable API
 Versioned interfaces with backwards compatibility.
 
+**Status:** 🔜 Planned
+
 ---
 
-## Stable Data Schema
-
+#### Stable Data Schema
 Long-term database compatibility with documented migration paths.
 
+**Status:** 🔜 Planned
+
 ---
 
-## Plugin System
-
+#### Plugin System
 Allow developers to extend Memory Daemon without modifying the core.
 
-Potential plugin categories:
+**Potential plugin categories:**
+- Retrieval
+- Memory types
+- Embeddings
+- Tools
+- Ranking
+- Exporters
 
-* Retrieval
-* Memory types
-* Embeddings
-* Tools
-* Ranking
-* Exporters
+**Status:** 🔜 Planned
 
 ---
 
-## Documentation
-
+#### Documentation
 Complete documentation set including:
+- User Guide
+- Developer Guide
+- Architecture Guide
+- API Reference
+- Tutorials
+- Examples
 
-* User Guide
-* Developer Guide
-* Architecture Guide
-* API Reference
-* Tutorials
-* Examples
-
----
-
-## Community Infrastructure
-
-* Contribution Guidelines
-* Issue Templates
-* Discussion Channels
-* Roadmaps
-* Coding Standards
+**Status:** 🟡 In Progress
 
 ---
 
-## Packaging
+#### Community Infrastructure
+- Contribution Guidelines
+- Issue Templates
+- Discussion Channels
+- Roadmaps
+- Coding Standards
 
+**Status:** 🔜 Planned
+
+---
+
+#### Packaging
 Official release builds.
 
-Targets may include:
+**Targets:**
+- pip
+- Docker
+- Standalone binaries
+- Optional installers
 
-* pip
-* Docker
-* Standalone binaries
-* Optional installers
+**Status:** 🟡 In Progress
 
 ---
 
-## Optional GUI
-
+#### Optional GUI
 A graphical interface for users who prefer visual interaction over the CLI while maintaining feature parity.
 
+**Status:** ✅ Complete (FastAPI GUI)
+
 ---
 
-## Performance Optimization
-
+#### Performance Optimization
 Focus areas:
+- Query latency
+- Memory usage
+- Graph traversal
+- Embedding cache
+- Ranking efficiency
 
-* Query latency
-* Memory usage
-* Graph traversal
-* Embedding cache
-* Ranking efficiency
+**Status:** 🔄 Ongoing
 
 ---
 
-## Memory Compression
-
+#### Memory Compression
 Research and implement long-term storage optimization.
 
-Potential directions:
+**Potential directions:**
+- Hierarchical summaries
+- Semantic compression
+- Redundant memory consolidation
+- Archive strategies
 
-* Hierarchical summaries
-* Semantic compression
-* Redundant memory consolidation
-* Archive strategies
+**Status:** 🔬 Research (V5 proposal)
 
 ---
 
-## Release Vision
+### Release Vision
 
 By the completion of V5, Memory Daemon should function as a mature local memory platform that is:
 
-* Stable
-* Extensible
-* Well documented
-* Benchmark validated
-* Community maintainable
-* Suitable for research, personal assistants, robotics, and local AI systems.
+- ✅ Stable
+- ✅ Extensible
+- ✅ Well documented
+- ✅ Benchmark validated
+- ✅ Community maintainable
+- ✅ Suitable for research, personal assistants, robotics, and local AI systems
 
 V5 is the project's first true ecosystem release rather than simply another software version.
+
+---
+
+## Timeline Summary
+
+| Version | Status | Focus |
+|---------|--------|-------|
+| V1 | ✅ Archived | Core memory |
+| V2 | ✅ Archived | Ranking + feedback |
+| V3 | ✅ Archived | Type routing + BM25 |
+| V4 | 🚧 Current | Reasoning infrastructure |
+| V5 | 🔜 Planned | Community release |
+
+---
+
+## See Also
+
+- `01_project_status.md` — Current status
+- `02_project_overview.md` — Project overview
+- `09_release_strategy.md` — Release plan
+- `v5.md` — V5 research proposal

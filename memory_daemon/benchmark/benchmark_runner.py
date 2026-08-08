@@ -11,301 +11,181 @@ Writes flight recorder output.
 import json
 import time
 import argparse
-
+import sys
 from pathlib import Path
 
 from benchmark.benchmark_writer import BenchmarkWriter
 from shared.memory_interface import MemoryInterface
+from core.logger import debug, info, error
 
-
-QUESTION_FILE = (
-    "benchmark_output/"
-    "benchmark_questions.json"
-)
-
-
-# -----------------------------------------
-# SETTINGS
-# -----------------------------------------
-
+# Default paths
+DEFAULT_QUESTION_FILE = "benchmark_output/benchmark_questions.json"
 PROGRESS_INTERVAL = 5
 
 
-# -----------------------------------------
-# RUNNER
-# -----------------------------------------
-
 class BenchmarkRunner:
 
+    def __init__(self, question_file: str = None):
+        """
+        Initialize benchmark runner.
 
-    def __init__(self):
-
+        Args:
+            question_file: Path to questions JSON file
+        """
         self.memory = MemoryInterface()
-
         self.writer = BenchmarkWriter()
+        self.question_file = question_file or DEFAULT_QUESTION_FILE
 
+        info(f"[Benchmark] Using questions from: {self.question_file}", category="benchmark")
 
     # -------------------------------------
     # LOAD QUESTIONS
     # -------------------------------------
 
     def load_questions(self):
-
-        with open(
-            QUESTION_FILE,
-            "r",
-            encoding="utf8"
-        ) as f:
-
-            return json.load(f)
-
-
+        """Load benchmark questions from JSON file."""
+        try:
+            with open(self.question_file, "r", encoding="utf8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            error(f"[Benchmark] Question file not found: {self.question_file}", category="benchmark")
+            return []
+        except json.JSONDecodeError as e:
+            error(f"[Benchmark] Invalid JSON in question file: {e}", category="benchmark")
+            return []
 
     # -------------------------------------
     # FIND EXPECTED
     # -------------------------------------
 
-    def find_expected_rank(
-        self,
-        results,
-        expected
-    ):
+    def find_expected_rank(self, results, expected):
+        """
+        Find the rank of the expected memory in results.
 
+        Args:
+            results: List of result dicts
+            expected: Expected text string
+
+        Returns:
+            int: Rank (1-indexed) or None if not found
+        """
         expected = str(expected).lower()
 
-
         for result in results:
-
             text = (
-
-                result.get(
-                    "normalized_text"
-                )
-
-                or result.get(
-                    "text",
-                    ""
-                )
-
+                result.get("normalized_text")
+                or result.get("text", "")
             ).lower()
 
-
             if expected in text:
-
-                return result.get(
-                    "rank"
-                )
-
+                return result.get("rank")
 
         return None
-
-
 
     # -------------------------------------
     # RUN
     # -------------------------------------
 
     def run(self, limit=None):
+        """
+        Run the benchmark.
 
+        Args:
+            limit: Optional limit on number of questions to run
+
+        Returns:
+            str: Path to output file
+        """
         print()
         print("=" * 60)
         print("[BENCHMARK START]")
         print("=" * 60)
 
-
         questions = self.load_questions()
+        if not questions:
+            error("[Benchmark] No questions loaded, exiting", category="benchmark")
+            return None
+
         if limit:
             questions = questions[:limit]
 
-
         total = len(questions)
-
-
-        print(
-            "[QUESTIONS]",
-            total
-        )
-
+        info(f"[Benchmark] {total} questions loaded", category="benchmark")
 
         start = time.perf_counter()
-
-
         next_progress = PROGRESS_INTERVAL
 
-
-
-        for index, item in enumerate(
-            questions,
-            start=1
-        ):
-
-            query = item.get(
-                "query"
-            )
-
-            expected = item.get(
-                "expected"
-            )
-
+        for index, item in enumerate(questions, start=1):
+            query = item.get("query")
+            expected = item.get("expected")
 
             if not query or not expected:
-
+                debug(f"[Benchmark] Skipping item {index}: missing query or expected", category="benchmark")
                 continue
-
-
 
             query_start = time.perf_counter()
 
-
-            response = self.memory.recall(
-                query
-            )
-
-
-            query_time = (
-
-                time.perf_counter()
-
-                -
-
-                query_start
-
-            ) * 1000
-
-
-
-            #
-            # Allow diagnostics from system
-            #
-
-            if isinstance(
-                response,
-                dict
-            ):
-
-                results = response.get(
-                    "results",
-                    []
+            try:
+                response = self.memory.recall(query)
+            except Exception as e:
+                error(f"[Benchmark] Query failed: {e}", category="benchmark")
+                # Record failure
+                self.writer.record(
+                    query=query,
+                    expected=expected,
+                    expected_rank=None,
+                    retrieved=False,
+                    candidates=[],
+                    runtime_ms=0.0,
+                    diagnostics={"error": str(e)}
                 )
+                continue
 
-                diagnostics = response.get(
-                    "diagnostics",
-                    {}
-                )
+            query_time = (time.perf_counter() - query_start) * 1000
 
+            # Extract results and diagnostics
+            if isinstance(response, dict):
+                results = response.get("results", [])
+                diagnostics = response.get("diagnostics", {})
             else:
-
                 results = response
-
                 diagnostics = {}
 
+            expected_rank = self.find_expected_rank(results, expected)
 
-
-            expected_rank = (
-                self.find_expected_rank(
-                    results,
-                    expected
-                )
-            )
-##            print("\n===== BENCH DIAGNOSTICS =====")
-##            print(diagnostics)
-##            print("=============================\n")
-##
-
-            
-
-            candidates=results
-
+            # Record result
             self.writer.record(
-                query = query,
-                expected = expected,
-                expected_rank = expected_rank,
-                retrieved = (expected_rank is not None),
-                candidates = results,
-                runtime_ms = query_time,
-                diagnostics = diagnostics
-
-                )
-
-            
-
-
-
-            percent = int(
-                index /
-                total *
-                100
+                query=query,
+                expected=expected,
+                expected_rank=expected_rank,
+                retrieved=(expected_rank is not None),
+                candidates=results,
+                runtime_ms=query_time,
+                diagnostics=diagnostics
             )
 
-
+            # Progress reporting
+            percent = int(index / total * 100)
             if percent >= next_progress:
+                elapsed = time.perf_counter() - start
+                rate = index / max(elapsed, 0.001)
+                eta = (total - index) / rate
 
-
-                elapsed = (
-                    time.perf_counter()
-                    -
-                    start
+                info(
+                    f"[Benchmark] {percent}% {index}/{total} "
+                    f"ETA {eta:.1f}s",
+                    category="benchmark"
                 )
 
+                next_progress += PROGRESS_INTERVAL
 
-                rate = (
-                    index /
-                    max(
-                        elapsed,
-                        0.001
-                    )
-                )
-
-
-                eta = (
-
-                    total-index
-
-                ) / rate
-
-
-
-                print(
-
-                    f"[PROGRESS] "
-                    f"{percent}% "
-                    f"{index}/{total} "
-                    f"ETA {eta:.1f}s"
-
-                )
-
-
-                next_progress += (
-                    PROGRESS_INTERVAL
-                )
-
-
-
-        runtime = (
-
-            time.perf_counter()
-
-            -
-
-            start
-
-        )
-
+        runtime = time.perf_counter() - start
+        info(f"[Benchmark] Total runtime: {runtime:.2f}s", category="benchmark")
 
         outfile = self.writer.write()
-
-
-        print()
-
-        print(
-            "[TOTAL RUNTIME]",
-            round(runtime,2),
-            "seconds"
-        )
-
+        info(f"[Benchmark] Results written to: {outfile}", category="benchmark")
 
         return outfile
-
 
 
 # -----------------------------------------
@@ -313,20 +193,28 @@ class BenchmarkRunner:
 # -----------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-
+    parser = argparse.ArgumentParser(
+        description="Run benchmark against the memory system"
+    )
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
         help="Only run first N benchmark questions"
-
-        )
+    )
+    parser.add_argument(
+        "--questions",
+        type=str,
+        default=None,
+        help="Path to questions JSON file (default: benchmark_output/benchmark_questions.json)"
+    )
     args = parser.parse_args()
 
-    runner = BenchmarkRunner()
+    runner = BenchmarkRunner(question_file=args.questions)
+    outfile = runner.run(limit=args.limit)
 
-    runner.run(
-        limit=args.limit
-
-        )
+    if outfile:
+        print(f"\n[OK] Results: {outfile}")
+    else:
+        print("\n[FAIL] Benchmark failed to complete")
+        sys.exit(1)

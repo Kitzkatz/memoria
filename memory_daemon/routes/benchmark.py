@@ -1,8 +1,10 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import time
+from typing import List, Optional
 
 from memory.memory_controller import MemoryController
+from core.logger import debug, info, error
 
 router = APIRouter(
     prefix="/benchmark",
@@ -21,78 +23,73 @@ class BenchmarkItem(BaseModel):
     expected: str
 
 
+class SpeedBenchmarkPayload(BaseModel):
+    queries: List[str]
+
+
+class StoreBenchmarkPayload(BaseModel):
+    texts: List[str]
+
+
 # ----------------------------------------------------
 # Accuracy Benchmark
 # ----------------------------------------------------
 
 @router.post("/run")
-def benchmark(payload: list[BenchmarkItem]):
+def benchmark(payload: List[BenchmarkItem]):
+    """Run accuracy benchmark with expected results."""
+    try:
+        start = time.perf_counter()
 
-    start = time.perf_counter()
+        total = len(payload)
+        if total == 0:
+            return {
+                "accuracy": 0,
+                "correct": 0,
+                "total": 0,
+                "failed": 0,
+                "runtime": 0.0,
+                "sample_failures": []
+            }
 
-    total = len(payload)
+        correct = 0
+        failures = []
 
-    if total == 0:
+        for item in payload:
+            results = mc.recall(item.query)
+            results_list = results.get("results", [])
+
+            joined = " ".join(
+                r.get("text", "")
+                for r in results_list
+            ).lower()
+
+            if item.expected.lower() in joined:
+                correct += 1
+            else:
+                failures.append({
+                    "query": item.query,
+                    "expected": item.expected,
+                    "returned": [
+                        r.get("text", "")
+                        for r in results_list[:3]
+                    ]
+                })
+
+        elapsed = time.perf_counter() - start
+
         return {
-            "accuracy": 0,
-            "correct": 0,
-            "total": 0,
-            "failed": 0,
-            "runtime": 0.0,
-            "sample_failures": []
+            "accuracy": round((correct / total) * 100, 2),
+            "correct": correct,
+            "total": total,
+            "failed": len(failures),
+            "runtime": round(elapsed, 3),
+            "sample_failures": failures[:20]
         }
 
-    correct = 0
-    failures = []
-
-    for item in payload:
-
-        results = mc.recall(item.query)
-
-        joined = " ".join(
-            r.get("text", "")
-            for r in results
-        ).lower()
-
-        if item.expected.lower() in joined:
-
-            correct += 1
-
-        else:
-
-            failures.append({
-
-                "query": item.query,
-
-                "expected": item.expected,
-
-                "returned": [
-
-                    r.get("text", "")
-
-                    for r in results[:3]
-
-                ]
-
-            })
-
-    elapsed = time.perf_counter() - start
-
-    return {
-
-        "accuracy": round((correct / total) * 100, 2),
-
-        "correct": correct,
-
-        "total": total,
-
-        "failed": len(failures),
-
-        "runtime": round(elapsed, 3),
-
-        "sample_failures": failures[:20]
-
-    }
+    except Exception as e:
+        error(f"[BENCHMARK] Run error: {e}", category="benchmark")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ----------------------------------------------------
@@ -100,31 +97,35 @@ def benchmark(payload: list[BenchmarkItem]):
 # ----------------------------------------------------
 
 @router.post("/speed")
-def query_speed(payload: list[str]):
+def query_speed(payload: SpeedBenchmarkPayload):
+    """Benchmark query speed."""
+    try:
+        queries = payload.queries
+        if not queries:
+            return {
+                "queries": 0,
+                "seconds": 0.0,
+                "qps": 0.0
+            }
 
-    start = time.perf_counter()
+        start = time.perf_counter()
 
-    for query in payload:
+        for query in queries:
+            mc.recall(query)
 
-        mc.recall(query)
+        elapsed = time.perf_counter() - start
 
-    elapsed = time.perf_counter() - start
+        qps = round(len(queries) / elapsed, 2) if elapsed > 0 else 0.0
 
-    qps = 0
+        return {
+            "queries": len(queries),
+            "seconds": round(elapsed, 3),
+            "qps": qps
+        }
 
-    if elapsed > 0:
-
-        qps = round(len(payload) / elapsed, 2)
-
-    return {
-
-        "queries": len(payload),
-
-        "seconds": round(elapsed, 3),
-
-        "qps": qps
-
-    }
+    except Exception as e:
+        error(f"[BENCHMARK] Speed error: {e}", category="benchmark")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ----------------------------------------------------
@@ -132,209 +133,111 @@ def query_speed(payload: list[str]):
 # ----------------------------------------------------
 
 @router.post("/store_speed")
-def store_speed(payload: list[str]):
+def store_speed(payload: StoreBenchmarkPayload):
+    """Benchmark store speed."""
+    try:
+        texts = payload.texts
+        if not texts:
+            return {
+                "stored": 0,
+                "seconds": 0.0,
+                "stores_per_second": 0.0,
+                "db_rows": 0,
+                "vector_rows": 0,
+                "synced": True
+            }
 
-    start = time.perf_counter()
+        start = time.perf_counter()
 
-    stored = 0
+        # Use batch storage for efficiency
+        ids = mc.remember_many(texts)
 
-    for memory in payload:
+        # Force save
+        mc.system.vector_store.save()
 
-        mc.remember(memory)
+        elapsed = time.perf_counter() - start
 
-        stored += 1
+        db = mc.system.db
+        vector = mc.system.vector_store
 
-    mc.manager.vector_store.save()
+        stores_per_second = round(len(texts) / elapsed, 2) if elapsed > 0 else 0.0
 
-    elapsed = time.perf_counter() - start
+        return {
+            "stored": len(ids),
+            "seconds": round(elapsed, 3),
+            "stores_per_second": stores_per_second,
+            "db_rows": db.count(),
+            "vector_rows": vector.count(),
+            "synced": db.count() == vector.count()
+        }
 
-    stores_per_second = 0
-
-    if elapsed > 0:
-
-        stores_per_second = round(stored / elapsed, 2)
-
-    return {
-
-        "stored": stored,
-
-        "seconds": round(elapsed, 3),
-
-        "stores_per_second": stores_per_second,
-
-        "db_rows": mc.manager.db.count(),
-
-        "vector_rows": mc.manager.vector_store.count(),
-
-        "synced": mc.manager.db.count() == mc.manager.vector_store.count()
-
-    }
+    except Exception as e:
+        error(f"[BENCHMARK] Store speed error: {e}", category="benchmark")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
+# ----------------------------------------------------
+# Full Benchmark Suite
+# ----------------------------------------------------
 
-##from fastapi import APIRouter
-##from pydantic import BaseModel
-##import time
-##
-##from memory.memory_controller import MemoryController
-##
-##router = APIRouter(
-##
-##    prefix="/benchmark",
-##
-##    tags=["Benchmark"]
-##
-##)
-##
-##mc = MemoryController()
-##
-##
-##class BenchmarkItem(BaseModel):
-##
-##    query:str
-##
-##    expected:str
-##
-##
-### ---------------------------------------
-### Accuracy
-### ---------------------------------------
-##
-##@router.post("/run")
-##def benchmark(payload:list[BenchmarkItem]):
-##
-##    start=time.perf_counter()
-##
-##    total=len(payload)
-##
-##    correct=0
-##
-##    failures=[]
-##
-##    for item in payload:
-##
-##        results=mc.recall(item.query)
-##
-##        joined=" ".join(
-##
-##            r["text"]
-##
-##            for r in results
-##
-##        ).lower()
-##
-##        if item.expected.lower() in joined:
-##
-##            correct+=1
-##
-##        else:
-##
-##            failures.append({
-##
-##                "query":item.query,
-##
-##                "expected":item.expected,
-##
-##                "returned":[
-##
-##                    r["text"]
-##
-##                    for r in results[:3]
-##
-##                ]
-##
-##            })
-##
-##    elapsed=time.perf_counter()-start
-##
-##    return{
-##
-##        "accuracy":
-##
-##            round(
-##
-##                correct/total*100,
-##
-##                2
-##
-##            ),
-##
-##        "correct":correct,
-##
-##        "total":total,
-##
-##        "failed":len(failures),
-##
-##        "runtime":round(elapsed,3),
-##
-##        "sample_failures":failures[:20]
-##
-##    }
-##
-##
-### ---------------------------------------
-### Query Speed
-### ---------------------------------------
-##
-##@router.post("/speed")
-##def query_speed(payload:list[str]):
-##
-##    start=time.perf_counter()
-##
-##    for q in payload:
-##
-##        mc.recall(q)
-##
-##    elapsed=time.perf_counter()-start
-##
-##    return{
-##
-##        "queries":len(payload),
-##
-##        "seconds":round(elapsed,3),
-##
-##        "qps":round(
-##
-##            len(payload)/elapsed,
-##
-##            2
-##
-##        )
-##
-##    }
-##
-##
-### ---------------------------------------
-### Store Speed
-### ---------------------------------------
-##
-##@router.post("/store_speed")
-##def store_speed(payload:list[str]):
-##
-##    start=time.perf_counter()
-##
-##    for memory in payload:
-##
-##        mc.remember(memory)
-##
-##    mc.manager.vector_store.save()
-##
-##    elapsed=time.perf_counter()-start
-##
-##    return{
-##
-##        "stored":len(payload),
-##
-##        "seconds":round(elapsed,3),
-##
-##        "stores_per_second":
-##
-##            round(
-##
-##                len(payload)/elapsed,
-##
-##                2
-##
-##            )
-##
-##    }
+@router.post("/full")
+def full_benchmark(
+    accuracy_payload: Optional[List[BenchmarkItem]] = None,
+    speed_payload: Optional[SpeedBenchmarkPayload] = None,
+    store_payload: Optional[StoreBenchmarkPayload] = None
+):
+    """Run all benchmarks in one call."""
+    try:
+        results = {}
+
+        # Accuracy
+        if accuracy_payload:
+            results["accuracy"] = benchmark(accuracy_payload)
+
+        # Speed
+        if speed_payload:
+            results["speed"] = query_speed(speed_payload)
+
+        # Store speed
+        if store_payload:
+            results["store_speed"] = store_speed(store_payload)
+
+        return results
+
+    except Exception as e:
+        error(f"[BENCHMARK] Full error: {e}", category="benchmark")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ----------------------------------------------------
+# Quick Benchmark (minimal)
+# ----------------------------------------------------
+
+@router.post("/quick")
+def quick_benchmark():
+    """Quick benchmark with a small set of queries."""
+    try:
+        # Small test set
+        test_queries = [
+            "what is the meaning of life",
+            "who is the president",
+            "what is 2+2",
+        ]
+
+        start = time.perf_counter()
+
+        for query in test_queries:
+            mc.recall(query)
+
+        elapsed = time.perf_counter() - start
+
+        return {
+            "queries": len(test_queries),
+            "seconds": round(elapsed, 3),
+            "qps": round(len(test_queries) / elapsed, 2) if elapsed > 0 else 0.0,
+            "note": "Quick benchmark with 3 sample queries"
+        }
+
+    except Exception as e:
+        error(f"[BENCHMARK] Quick error: {e}", category="benchmark")
+        raise HTTPException(status_code=500, detail=str(e))

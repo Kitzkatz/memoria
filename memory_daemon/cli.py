@@ -11,6 +11,7 @@ from datetime import datetime
 
 from shared.memory_interface import MemoryInterface
 from cache.config import settings
+from core.logger import debug, info
 
 # Optional dependencies
 try:
@@ -64,7 +65,7 @@ def main():
         description="Memory Daemon CLI – local memory engine for LLMs",
         usage="memory <command> [options]"
     )
-    parser.add_argument("--version", action="version", version="Memory Daemon v0.3.0")
+    parser.add_argument("--version", action="version", version="Memory Daemon v4.0")
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommand")
 
@@ -183,11 +184,36 @@ def main():
             goals = interface.list_goals(status=args.status)
             print_goals(goals)
 
-        
+        # ---- Chat ----
+        elif args.command == "chat":
+            if args.prompt:
+                # One-shot chat
+                response = interface.chat(args.prompt)
+                print(response)
+            else:
+                # Interactive chat mode
+                print("Entering interactive chat mode. Type 'exit' to quit.")
+                print("-" * 50)
+                while True:
+                    try:
+                        user_input = input("You: ")
+                        if user_input.lower() in ("exit", "quit", "q"):
+                            print("Goodbye.")
+                            break
+                        if user_input.strip():
+                            response = interface.chat(user_input)
+                            print(f"Assistant: {response}")
+                            print("-" * 50)
+                    except KeyboardInterrupt:
+                        print("\nGoodbye.")
+                        break
+                    except Exception as e:
+                        print(f"Error: {e}")
+
         elif args.command == "info":
             db = interface.controller.system.db
             count = db.count()
-            print(f"Memory Daemon v0.3.0")
+            print(f"Memory Daemon v4.0")
             print(f"Database: {settings.DB_PATH}")
             print(f"Total memories: {count}")
             print(f"Embedding model: {settings.EMBEDDING_MODEL}")
@@ -202,7 +228,8 @@ def main():
             if not entity:
                 print(f"Entity '{args.entity}' not found.")
                 return
-            neighbors = graph_search.neighbors(entity.id, depth=args.depth)
+            # neighbors expects entity name (string), not ID
+            neighbors = graph_search.neighbors(args.entity, depth=args.depth)
             print(f"Neighbors of '{args.entity}' (depth {args.depth}):")
             for n in neighbors:
                 print(f"  {n['relation']} → {n['target']} (source: {n['source']})")
@@ -210,17 +237,24 @@ def main():
         elif args.command == "doctor":
             db = interface.controller.system.db
             print("Running integrity checks...")
-            result = db.integrity_check()
-            print(f"Integrity check: {result}")
-            sanity = db.sanity_check()
-            print(f"DB count: {sanity['db_count']}")
-            print(f"Columns: {sanity['columns']}")
+            try:
+                result = db.integrity_check()
+                print(f"Integrity check: {result}")
+            except Exception as e:
+                print(f"Integrity check error: {e}")
+            try:
+                sanity = db.sanity_check()
+                print(f"DB count: {sanity['db_count']}")
+                print(f"Columns: {sanity['columns']}")
+            except Exception as e:
+                print(f"Sanity check error: {e}")
 
         elif args.command == "serve":
             if not HAS_UVICORN:
                 print("Error: uvicorn is not installed. Install with 'pip install uvicorn[standard]'")
                 return
             os.environ.setdefault("MEMORY_DAEMON_CONFIG", os.path.abspath("."))
+            info("[CLI] Starting server on {args.host}:{args.port}", category="cli")
             uvicorn.run("app:app", host=args.host, port=args.port, reload=args.reload)
 
         elif args.command == "benchmark":

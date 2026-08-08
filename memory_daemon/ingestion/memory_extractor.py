@@ -14,6 +14,11 @@ class MemoryExtractor:
         self.attribute_extractor = AttributeExtractor()
         self.llm = llm
 
+        # Pre-compiled regex patterns for performance
+        self._url_pattern = re.compile(r"https?://|www\.")
+        self._email_pattern = re.compile(r"\S+@\S+")
+        self._code_pattern = re.compile(r"[{};]|def\s+|class\s+|return\s+|import\s+")
+        self._number_pattern = re.compile(r"\d")
 
     # ---------------------------------
     # Preprocessing Helpers
@@ -27,14 +32,13 @@ class MemoryExtractor:
         Remove duplicate whitespace
         Strip leading/trailing whitespace
         """
-
+        if not text:
+            return ""
         text = fold_case(text)
         text = re.sub(r"\s+", " ", text)
-
         return text.strip()
 
-
-    def tokenize(self, normalized_text: str):
+    def tokenize(self, normalized_text: str) -> list:
         """
         Simple tokenizer.
 
@@ -46,66 +50,58 @@ class MemoryExtractor:
 
         Keeping it intentionally simple for V1.
         """
-
+        if not normalized_text:
+            return []
         return normalized_text.split()
-
 
     # ---------------------------------
     # Base Extract
     # ---------------------------------
 
-    def base_extract(self, text: str):
+    def base_extract(self, text: str) -> MemoryRecord:
+        if not text:
+            return MemoryRecord(
+                text="",
+                memory_type="general",
+                metadata={},
+                entities=[],
+                relationships=[],
+                importance=0.0,
+                normalized_text="",
+                tokens=[],
+                token_count=0
+            )
 
         normalized = self.normalize_text(text)
-
         tokens = self.tokenize(normalized)
+        entities = self.extract_entities(text)
+        metadata = self.extract_metadata(text)
 
-        entities=self.extract_entities(text)
-
-        metadata=self.extract_metadata(text)
         memory_type, attribute_metadata, typed_relationships = (
             self.attribute_extractor.extract(text)
         )
-
         metadata.update(attribute_metadata)
 
-        relationships = self.extract_relationships(
-            text,
-            entities
-        )
-
+        relationships = self.extract_relationships(text, entities)
         relationships.extend(typed_relationships)
 
         return MemoryRecord(
-
             text=text,
-
             memory_type=memory_type,
-
-            metadata= metadata,
-
+            metadata=metadata,
             entities=entities,
-
             relationships=relationships,
-
             importance=0.5,
-
             normalized_text=normalized,
-
             tokens=tokens,
-
-            
-
             token_count=len(tokens)
         )
-
 
     # ---------------------------------
     # LLM Enrichment
     # ---------------------------------
 
-    def llm_extract(self, text: str):
-
+    def llm_extract(self, text: str) -> dict:
         prompt = f"""
             Extract structured memory JSON.
 
@@ -149,146 +145,207 @@ class MemoryExtractor:
             {text}
             """
 
-        out = self.llm.chat(prompt)
+        try:
+            out = self.llm.chat(prompt)
 
-        data = json.loads(out)
+            # Clean response — try to find JSON
+            cleaned = out.strip()
+            # Remove markdown code blocks if present
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
 
-        record = self.base_extract(text)
-
-        if isinstance(data, dict):
-
-            if "memory_type" in data:
-                record.memory_type = data["memory_type"]
-
-            if "metadata" in data and isinstance(data["metadata"], dict):
-
-                record.metadata = data["metadata"]
-
-
-            if "entities" in data and isinstance(data["entities"], list):
-
-                record.entities = data["entities"]
-
-
-            if "relationships" in data and isinstance(data["relationships"], list):
-
-                record.relationships = data["relationships"]
-
-
-            if "importance" in data:
-
-                record.importance = float(data["importance"])
-
-        return record
-
+            data = json.loads(cleaned)
+            if isinstance(data, dict):
+                return data
+            else:
+                debug("[LLM] Response was not a dict")
+                return {}
+        except json.JSONDecodeError as e:
+            debug(f"[LLM] JSON decode error: {e}")
+            return {}
+        except Exception as e:
+            debug(f"[LLM] Extraction error: {e}")
+            return {}
 
     # ---------------------------------
     # Public Entry
     # ---------------------------------
 
-    def extract(self, text: str):
+    def extract(self, text: str) -> MemoryRecord:
         record = self.base_extract(text)
-        
+
         if self.llm:
             try:
-                llm_record = self.llm_extract(text)
-                
-                # Only override if LLM actually returned something
-                if llm_record.entities:
-                    record.entities = llm_record.entities
-                if llm_record.relationships:
-                    record.relationships = llm_record.relationships
-                record.metadata.update(llm_record.metadata)
-                if llm_record.memory_type:
-                    record.memory_type = llm_record.memory_type
-                    
+                data = self.llm_extract(text)
+                if data:
+                    if data.get("entities"):
+                        record.entities = data["entities"]
+                    if data.get("relationships"):
+                        record.relationships = data["relationships"]
+                    if data.get("metadata"):
+                        record.metadata.update(data["metadata"])
+                    if data.get("memory_type"):
+                        record.memory_type = data["memory_type"]
+                    if data.get("importance"):
+                        record.importance = float(data["importance"])
             except Exception as e:
-                debug("[Extractor LLM fallback]", e)
-        
+                debug(f"[Extractor] LLM fallback: {e}")
+
         return record
 
+    # ---------------------------------
+    # Entity Extraction
+    # ---------------------------------
 
+    def extract_entities(self, text: str) -> list:
+        """
+        Extract named entities using rule-based heuristics.
 
-    def extract_entities(self, text):
+        Handles:
+        - Single capitalized words (Kevin, Seattle)
+        - Multi-word capitalized phrases (New York, San Francisco)
+        - Acronyms (NASA, AI)
+        """
+        if not text:
+            return []
 
         entities = []
         current = []
 
-        for word in text.split():
+        # Split on whitespace, preserve punctuation for later
+        words = text.split()
 
-            word = word.strip(".,!?()[]{}\"'")
+        for word in words:
+            # Strip surrounding punctuation but keep internal
+            stripped = word.strip(".,!?()[]{}\"'")
+            if not stripped:
+                continue
 
-            if word and word[0].isupper():
-                current.append(word)
+            is_acronym = stripped.isupper() and len(stripped) >= 2
+            is_capitalized = stripped[0].isupper() and not stripped.isupper()
+
+            if is_capitalized or is_acronym:
+                current.append(stripped)
             else:
                 if current:
-                    entities.append(" ".join(current))
+                    entity = " ".join(current)
+                    if len(entity) > 1:
+                        entities.append(entity)
                     current = []
 
         if current:
-            entities.append(" ".join(current))
+            entity = " ".join(current)
+            if len(entity) > 1:
+                entities.append(entity)
 
-        return sorted(set(entities))
+        # Deduplicate preserving order
+        seen = set()
+        result = []
+        for e in entities:
+            if e not in seen:
+                seen.add(e)
+                result.append(e)
 
+        return result
 
-    def extract_metadata(self, text):
+    # ---------------------------------
+    # Metadata Extraction
+    # ---------------------------------
+
+    def extract_metadata(self, text: str) -> dict:
+        """Extract metadata from text using pre-compiled patterns."""
+        if not text:
+            return {}
 
         normalized = self.normalize_text(text)
 
-        metadata = {}
+        return {
+            "length": len(text),
+            "word_count": len(normalized.split()),
+            "contains_number": bool(self._number_pattern.search(text)),
+            "contains_url": bool(self._url_pattern.search(text)),
+            "contains_email": bool(self._email_pattern.search(text)),
+            "contains_question": "?" in text,
+            "contains_code": bool(self._code_pattern.search(text)),
+        }
 
-        metadata["length"] = len(text)
+    # ---------------------------------
+    # Relationship Extraction
+    # ---------------------------------
 
-        metadata["word_count"] = len(normalized.split())
+    def extract_relationships(self, text: str, entities: list) -> list:
+        """
+        Extract relationships between entities.
 
-        metadata["contains_number"] = bool(
-            re.search(r"\d", text)
-        )
+        Current implementation:
+        - Connects consecutive entities with "related_to"
+        - Looks for explicit relationship cues (likes, works_at, etc.)
 
-        metadata["contains_url"] = bool(
-            re.search(r"https?://|www\.", text)
-        )
-
-        metadata["contains_email"] = bool(
-            re.search(r"\S+@\S+", text)
-        )
-
-        metadata["contains_question"] = "?" in text
-
-        metadata["contains_code"] = any(
-            token in text
-            for token in (
-                "{", "}", ";",
-                "def ", "class ",
-                "return ", "import "
-            )
-        )
-
-        return metadata
-
-
-    def extract_relationships(self, text, entities):
-
+        Future improvements:
+        - Dependency parsing
+        - LLM-based extraction
+        """
         relationships = []
 
         if len(entities) < 2:
             return relationships
 
-        #
-        # Placeholder:
-        # connect consecutive entities
-        #
+        # Check for explicit relationship cues
+        relation_cues = {
+            "likes": "likes",
+            "loves": "likes",
+            "hates": "dislikes",
+            "dislikes": "dislikes",
+            "works at": "works_at",
+            "works for": "works_for",
+            "lives in": "lives_in",
+            "born in": "born_in",
+            "created": "created",
+            "developed": "developed",
+            "built": "built",
+            "wrote": "wrote",
+            "says": "said",
+        }
 
-        for i in range(len(entities) - 1):
+        text_lower = text.lower()
 
-            relationships.append({
+        # Try to find explicit relationships
+        for cue, relation in relation_cues.items():
+            if cue in text_lower:
+                # Find source and target around the cue
+                # Simple heuristic: entities before and after the cue
+                for i, entity in enumerate(entities):
+                    entity_lower = entity.lower()
+                    if entity_lower in text_lower:
+                        pos = text_lower.find(entity_lower)
+                        cue_pos = text_lower.find(cue)
+                        if cue_pos > pos:
+                            # Entity before cue -> source
+                            source = entity
+                            # Find target (next entity after cue)
+                            for j in range(i + 1, len(entities)):
+                                if entities[j].lower() in text_lower and text_lower.find(entities[j].lower()) > cue_pos:
+                                    relationships.append({
+                                        "source": source,
+                                        "relation": relation,
+                                        "target": entities[j]
+                                    })
+                                    break
 
-                "source": entities[i],
-
-                "relation": "related_to",
-
-                "target": entities[i + 1]
-
-            })
+        # If no explicit relationships found, connect consecutive entities
+        if not relationships and len(entities) >= 2:
+            for i in range(len(entities) - 1):
+                relationships.append({
+                    "source": entities[i],
+                    "relation": "related_to",
+                    "target": entities[i + 1]
+                })
 
         return relationships
+
+    # ---------------------------------
+    # Debug
+    # ---------------------------------
+
+    def __repr__(self) -> str:
+        return f"MemoryExtractor(llm={'available' if self.llm else 'None'})"
