@@ -158,7 +158,7 @@ class RetrievalEngine:
     # -------------------------------------
 
     def retrieve(self, query, ids, distances):
-        import time
+        
 
         t0_global = time.perf_counter()
 
@@ -172,13 +172,6 @@ class RetrievalEngine:
         debug(f"[TIMING] vector_candidates: {vector_ms:.2f}ms - {len(candidates)} candidates")
 
         existing_ids = {c.memory.id for c in candidates}
-
-        # Early exit if we have enough candidates
-        top_k = getattr(settings, "TOP_K", 10)
-        if len(candidates) >= top_k * 3:  # 3x top_k before spending more time
-            total_ms = (time.perf_counter() - t0_global) * 1000
-            debug(f"[TIMING] Early exit: {total_ms:.2f}ms - {len(candidates)} candidates")
-            return candidates
 
         # -----------------------------
         # Attribute candidates
@@ -195,6 +188,28 @@ class RetrievalEngine:
             candidates.extend(attr_candidates)
             debug(f"[TIMING] attribute_candidates: {attr_ms:.2f}ms - {len(attr_candidates)} candidates")
 
+        # -----------------------------
+        # Graph candidates
+        # -----------------------------
+
+        t0 = time.perf_counter()
+        graph_depth = getattr(settings, "GRAPH_SEARCH_DEPTH", 1)
+        graph_candidates = self.graph_candidates(
+            query.entities,
+            existing_ids,
+            depth=graph_depth
+        )
+        graph_ms = (time.perf_counter() - t0) * 1000
+
+        graph_limit = getattr(settings, "GRAPH_TOP_K", 50)
+        if graph_candidates:
+            candidates.extend(graph_candidates[:graph_limit])
+            debug(f"[TIMING] graph_candidates: {graph_ms:.2f}ms - {len(graph_candidates)} candidates")
+
+        total_ms = (time.perf_counter() - t0_global) * 1000
+        debug(f"[TIMING] TOTAL retrieve: {total_ms:.2f}ms - {len(candidates)} total candidates")
+
+        return candidates
         # -----------------------------
         # Graph candidates
         # -----------------------------

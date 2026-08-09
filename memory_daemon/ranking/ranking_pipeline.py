@@ -51,7 +51,11 @@ class RankingPipeline:
             self.booster = booster
 
         self.context_builder = context_builder or ContextBuilder()
-        self.mmr = mmr or MMRReranker(lambda_param=0.5)
+        # In ranking_pipeline.py, when creating MMR:
+        self.mmr = mmr or MMRReranker(
+            lambda_param=0.5,
+            enabled=getattr(settings, "MMR_ENABLED", True)  # ← Toggle from config
+        )
         self.finalizer = finalizer or ScoreFinalizer()
 
         # --- BM25 Setup ---

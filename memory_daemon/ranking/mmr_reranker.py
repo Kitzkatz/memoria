@@ -8,6 +8,7 @@ Vector-space Maximal Marginal Relevance
 import math
 import numpy as np
 from typing import Dict, List, Optional
+from cache.config import settings
 
 
 class MMRReranker:
@@ -16,11 +17,19 @@ class MMRReranker:
         self,
         lambda_param: float = 0.50,
         debug: bool = False,
-        adaptive_lambda: bool = True
+        adaptive_lambda: bool = True,
+        enabled: Optional[bool] = None
     ):
         self.lambda_param = lambda_param
         self.debug = debug
         self.adaptive_lambda = adaptive_lambda
+
+        # Toggle MMR on/off via config or parameter
+        if enabled is None:
+            self.enabled = getattr(settings, "MMR_ENABLED", True)
+        else:
+            self.enabled = enabled
+
         self.last_diagnostics = {}
 
     # ---------------------------------
@@ -29,11 +38,9 @@ class MMRReranker:
 
     def _cosine_similarity_matrix(self, embeddings: np.ndarray) -> np.ndarray:
         """Compute pairwise cosine similarity matrix using numpy."""
-        # Normalize embeddings
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms[norms == 0] = 1e-8
         normalized = embeddings / norms
-        # Cosine similarity = dot product of normalized vectors
         return np.dot(normalized, normalized.T)
 
     # ---------------------------------
@@ -63,6 +70,7 @@ class MMRReranker:
                 sum(c.diversity_score for c in after) / max(len(after), 1),
                 4
             ),
+            "enabled": self.enabled,
         }
 
     # ---------------------------------
@@ -70,6 +78,35 @@ class MMRReranker:
     # ---------------------------------
 
     def rerank(self, candidates, k=20):
+        # --- If MMR is disabled, just return top k by normalized_score ---
+        if not self.enabled:
+            sorted_candidates = sorted(candidates, key=lambda c: c.normalized_score, reverse=True)
+            result = sorted_candidates[:k]
+
+            # Set consistency fields
+            for c in result:
+                c.mmr_score = c.normalized_score
+                c.diversity_score = 0.0
+
+            self.last_diagnostics = {
+                "candidate_count": len(candidates),
+                "returned_count": len(result),
+                "reordered": False,
+                "total_moves": 0,
+                "lambda": 0.0,
+                "avg_mmr_score": round(
+                    sum(c.mmr_score for c in result) / max(len(result), 1),
+                    4
+                ),
+                "avg_diversity": 0.0,
+                "enabled": False,
+            }
+
+            if self.debug:
+                debug("[MMR] Disabled — returning top k by score")
+
+            return result
+
         if not candidates:
             return []
 
@@ -77,7 +114,7 @@ class MMRReranker:
         working = [c.model_copy() for c in candidates]
         working.sort(key=lambda c: c.normalized_score, reverse=True)
 
-        # Cap at 50 for MMR efficiency (increased from 25 for better results)
+        # Cap at 50 for MMR efficiency
         working = working[:50]
         before_ids = [c.memory.id for c in working]
 
@@ -96,7 +133,6 @@ class MMRReranker:
         embeddings = np.array(embeddings, dtype=np.float32)
 
         # ---- Compute similarity matrix once ----
-        # Normalize embeddings for cosine similarity
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms[norms == 0] = 1e-8
         normalized = embeddings / norms
@@ -119,7 +155,6 @@ class MMRReranker:
         selected_indices = []
         remaining_indices = list(range(len(working)))
 
-        # Select first candidate (highest relevance)
         first_idx = max(remaining_indices, key=lambda i: working[i].normalized_score)
         selected_indices.append(first_idx)
         remaining_indices.remove(first_idx)
@@ -131,17 +166,13 @@ class MMRReranker:
             best_idx = -1
             best_score = float("-inf")
 
-            # Get similarity to selected set for all remaining
             sim_to_selected = sim_matrix[remaining_indices][:, selected_indices]
 
-            # For each remaining candidate, compute max similarity to selected
             if len(selected_indices) == 1:
-                # If only one selected, max is the similarity to that one
                 max_similarities = sim_to_selected.flatten()
             else:
                 max_similarities = np.max(sim_to_selected, axis=1)
 
-            # Scores: relevance (normalized_score) - diversity (max similarity)
             for idx_in_batch, remaining_idx in enumerate(remaining_indices):
                 relevance = working[remaining_idx].normalized_score
                 diversity_penalty = max_similarities[idx_in_batch]
@@ -161,11 +192,17 @@ class MMRReranker:
             selected_indices.append(best_idx)
             remaining_indices.remove(best_idx)
 
-        # Build result in original order
+        # Build result
         selected = [working[i] for i in selected_indices]
+
+        # --- IMPORTANT: Sort by mmr_score so the best MMR candidates come first ---
+        selected.sort(key=lambda c: c.mmr_score, reverse=True)
 
         self.last_diagnostics = self._build_diagnostics(
             before_ids, selected, current_lambda
         )
+
+        if self.debug:
+            debug(f"[MMR] Enabled — selected {len(selected)} candidates, lambda={current_lambda:.2f}")
 
         return selected

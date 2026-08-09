@@ -53,6 +53,8 @@ class Settings(BaseModel):
     USE_INVERTED_INDEX: bool = True
     USE_PHRASE_SEARCH: bool = True
     USE_BM25: bool = True
+    # ---- MMR ----
+    MMR_ENABLED: bool = False  # Set to False to disable MMR entirely
     USE_BLACKBOARD: bool = True
     USE_CASE_FOLDING: bool = True
 
