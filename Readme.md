@@ -17,7 +17,7 @@ Memory Daemon is a fully local memory system for LLMs. It stores memories, retri
 ## Quick Start (5 Minutes)
 
 ```bash
-git clone https://github.com/Kitzkatz/memory_daemon.git
+git clone https://github.com/YOUR_USERNAME/memory_daemon.git
 cd memory_daemon
 python3 -m venv venv
 source venv/bin/activate
