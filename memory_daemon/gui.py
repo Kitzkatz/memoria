@@ -25,7 +25,14 @@ app = FastAPI(
 )
 
 # Direct interface
-memory = MemoryInterface()
+
+memory = None
+
+@app.on_event("startup")
+async def startup():
+    global memory
+    memory = MemoryInterface()
+    info("[GUI] Memory interface initialized", category="gui")
 
 
 # --------------------------------------------------

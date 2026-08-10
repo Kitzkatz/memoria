@@ -254,7 +254,7 @@ def main():
                 print("Error: uvicorn is not installed. Install with 'pip install uvicorn[standard]'")
                 return
             os.environ.setdefault("MEMORY_DAEMON_CONFIG", os.path.abspath("."))
-            info("[CLI] Starting server on {args.host}:{args.port}", category="cli")
+            info(f"[CLI] Starting server on {args.host}:{args.port}", category="cli")
             uvicorn.run("app:app", host=args.host, port=args.port, reload=args.reload)
 
         elif args.command == "benchmark":
