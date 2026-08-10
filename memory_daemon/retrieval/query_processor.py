@@ -20,7 +20,7 @@ class QueryProcessor:
     - Entity extraction (single + multi-word)
     - Optional LLM-based entity extraction
     - Phrase extraction (quoted text)
-    - Memory type routing
+    - Feature extraction (no routing!)
     """
 
     def __init__(self, llm=None):
@@ -37,20 +37,9 @@ class QueryProcessor:
             "should", "may", "might", "must", "shall"
         }
 
-        # Built-in type routing rules
-        self.type_rules = {
-            "semantic": ["what is", "define", "means", "called", "fact", "property"],
-            "episodic": ["when", "what happened", "event", "time", "yesterday", "last week", "date"],
-            "procedural": ["how to", "steps", "guide", "procedure", "method", "instructions"],
-            "code": ["def ", "function ", "class ", "import ", "return ", "snippet", "api"],
-            "science": ["formula", "equation", "chemical", "physics", "temperature", "pressure", "mass"]
-        }
-
-        # Compile regex patterns for type routing (performance)
-        self._type_patterns = {
-            mem_type: [re.compile(rf'\b{kw}\b', re.IGNORECASE) for kw in keywords]
-            for mem_type, keywords in self.type_rules.items()
-        }
+        # NOTE: type_rules have been REMOVED.
+        # Routing is now handled exclusively by the Router using routing/matrix.py.
+        # QueryProcessor only extracts features — it does NOT decide memory type.
 
     # -------------------------
     # Attribute Index
@@ -219,48 +208,15 @@ class QueryProcessor:
         return phrases
 
     # -------------------------
-    # Determine memory type
-    # -------------------------
-
-    def _route_type(self, text: str, tokens: List[str]) -> str:
-        """
-        Determine memory type based on query text and tokens.
-        Uses pre-compiled regex patterns for performance.
-        """
-        if not text:
-            return "general"
-
-        text_lower = text.lower()
-        scores = {t: 0 for t in self.type_rules}
-
-        # Check patterns
-        for mem_type, patterns in self._type_patterns.items():
-            for pattern in patterns:
-                if pattern.search(text_lower):
-                    scores[mem_type] += 1
-
-        # Boost for code patterns in tokens
-        code_keywords = {"def", "class", "import", "return", "function", "lambda", "async", "await"}
-        if any(t in code_keywords for t in tokens):
-            scores["code"] += 2
-
-        # Boost for science patterns
-        science_keywords = {"formula", "equation", "chemical", "physics", "temperature", "pressure", "mass"}
-        if any(t in science_keywords for t in tokens):
-            scores["science"] += 1
-
-        best_type = max(scores, key=scores.get)
-        if scores[best_type] == 0:
-            return "general"
-        return best_type
-
-    # -------------------------
-    # Process Query
+    # Query Processing (No Routing!)
     # -------------------------
 
     def process(self, text: str, use_llm: bool = False) -> QueryRecord:
         """
         Process query text into QueryRecord.
+
+        This method extracts features but does NOT determine memory type.
+        Routing is handled by the Router using routing/matrix.py.
 
         Args:
             text: Raw query string
@@ -303,8 +259,9 @@ class QueryProcessor:
         # Extract quoted phrases
         phrases = self.extract_phrases(text)
 
-        # Determine memory type hint
-        memory_type_hint = self._route_type(text, tokens)
+        # NOTE: memory_type_hint is NO LONGER set here.
+        # The Router will determine the type based on features.
+        # This prevents duplicate routing logic.
 
         metadata = {
             "use_llm": use_llm,
@@ -312,7 +269,7 @@ class QueryProcessor:
             "subject": subject,
             "attribute": attribute,
             "phrases": phrases,
-            "memory_type_hint": memory_type_hint,
+            # "memory_type_hint" is REMOVED — router handles this
         }
 
         debug(f"\n[QUERY PROCESSOR DEBUG]")
@@ -320,7 +277,6 @@ class QueryProcessor:
         debug(f"  use_llm: {use_llm}")
         debug(f"  Entities extracted: {entities}")
         debug(f"  Phrases extracted: {phrases}")
-        debug(f"  Memory type hint: {memory_type_hint}")
         debug(f"  Normalized: {normalized[:100]}{'...' if len(normalized) > 100 else ''}")
         debug(f"  Tokens: {tokens[:10]}{'...' if len(tokens) > 10 else ''}")
         debug(f"  Keywords: {keywords[:10]}{'...' if len(keywords) > 10 else ''}")

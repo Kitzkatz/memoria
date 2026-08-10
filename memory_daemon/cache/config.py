@@ -40,7 +40,7 @@ class Settings(BaseModel):
     # -------------------------
 
     TOP_K: int = 500
-    TOP_N: int = 3
+    TOP_N: int = 25
     GRAPH_TOP_K: int = 50
     GRAPH_SEARCH_LIMIT: int = 200
     GRAPH_DEPTH: int = 3
@@ -66,6 +66,11 @@ class Settings(BaseModel):
     ROUTING_MATRIX_OVERRIDE: bool = False
     ROUTING_FALLBACK_ENABLED: bool = True
 
+
+    RETRIEVAL_MIN_CANDIDATES: int = 100
+    MIN_RETRIEVAL_SOURCES: int = 2
+    RETRIEVAL_DEADLINE: float = 0.050
+
     # -------------------------
     # Ranking
     # -------------------------
@@ -89,6 +94,19 @@ class Settings(BaseModel):
     NUM_SHARDS: int = 5
     USE_SHARDING: bool = False
     TOP_K_PER_SHARD: int = 150
+
+    # -------------------------
+    # Finalizer
+    # -------------------------
+
+    FINALIZER_USE_SIGMOID: bool = False  # Toggle sigmoid on/off
+    FINALIZER_SIGMOID_SCALE: float = 1.0  # Scale for sigmoid compression
+
+    # -------------------------
+    # Embedding Cache
+    # -------------------------
+
+    EMBEDDING_CACHE_MAX_SIZE: int = 100000  # Max entries before LRU eviction
 
     # -------------------------
     # Debug
@@ -124,16 +142,16 @@ class Settings(BaseModel):
     # -------------------------
 
 
-    RANKING_SEMANTIC: float = 0.2100
-    RANKING_IMPORTANCE: float = 0.0480
+    RANKING_SEMANTIC: float = 0.1800   # Down from 0.1900
+    RANKING_IMPORTANCE: float = 0.0300
     RANKING_RECENCY: float = 0.0260
-    RANKING_TOKEN: float = 0.0720
+    RANKING_TOKEN: float = 0.1700       # Slightly down from 0.1800
     RANKING_FEEDBACK: float = 0.0260
-    RANKING_ENTITY: float = 0.1840
+    RANKING_ENTITY: float = 0.1800      # Down from 0.1840
     RANKING_SUBJECT: float = 0.1600
-    RANKING_ATTRIBUTE: float = 0.1200
+    RANKING_ATTRIBUTE: float = 0.0900
     RANKING_TFIDF: float = 0.0640
-    RANKING_BM25: float = 0.0900
+    RANKING_BM25: float = 0.0740        # Down from 0.0900
     # Total: 1.0000
 
     # -------------------------

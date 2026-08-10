@@ -5,6 +5,7 @@ Query history tracking for personalization and context.
 import json
 import time
 import threading
+from collections import Counter
 from typing import List, Dict, Optional
 
 from core.logger import debug
@@ -15,15 +16,16 @@ class QueryHistory:
         self.max_history = max_history
         self.persist_path = persist_path
         self.history: List[Dict] = []
-        
+        self._query_counter: Counter = Counter()  # ← NEW: Running counter for frequent queries
+
         # Thread safety
         self._lock = threading.RLock()
-        
+
         # Debounce saving
         self._dirty = False
         self._last_save = time.time()
         self._save_threshold = 5.0
-        
+
         self._load()
 
     def record(self, query: str, results: List[Dict]):
@@ -40,8 +42,20 @@ class QueryHistory:
                 ]
             }
             self.history.append(entry)
+
+            # ← NEW: Update running counter
+            self._query_counter[query] += 1
+
             if len(self.history) > self.max_history:
+                # Remove oldest entry and decrement counter
+                oldest = self.history[0]
+                old_query = oldest.get("query")
+                if old_query:
+                    self._query_counter[old_query] -= 1
+                    if self._query_counter[old_query] <= 0:
+                        del self._query_counter[old_query]
                 self.history = self.history[-self.max_history:]
+
             self._dirty = True
             self._maybe_save()
 
@@ -52,10 +66,8 @@ class QueryHistory:
 
     def get_frequent(self, n: int = 10) -> List[str]:
         """Return the most frequent queries."""
-        from collections import Counter
         with self._lock:
-            queries = [h["query"] for h in self.history]
-            return [q for q, _ in Counter(queries).most_common(n)]
+            return [q for q, _ in self._query_counter.most_common(n)]
 
     def get_context(self) -> List[str]:
         """Return the last few queries for context."""
@@ -84,19 +96,30 @@ class QueryHistory:
     def _save(self):
         try:
             with self._lock:
-                # Keep only max_history entries before saving
                 if len(self.history) > self.max_history:
                     self.history = self.history[-self.max_history:]
-                
+
+                data = {
+                    "history": self.history,
+                    "query_counter": dict(self._query_counter),
+                }
                 with open(self.persist_path, "w") as f:
-                    json.dump(self.history, f, indent=2, default=str)
+                    json.dump(data, f, indent=2, default=str)
         except Exception as e:
             debug(f"[QueryHistory] Save error: {e}")
 
     def _load(self):
         try:
             with open(self.persist_path, "r") as f:
-                self.history = json.load(f)
+                data = json.load(f)
+            with self._lock:
+                # Handle old format (list only)
+                if isinstance(data, list):
+                    self.history = data
+                    self._query_counter = Counter(q["query"] for q in data)
+                else:
+                    self.history = data.get("history", [])
+                    self._query_counter = Counter(data.get("query_counter", {}))
         except FileNotFoundError:
             pass
         except Exception as e:

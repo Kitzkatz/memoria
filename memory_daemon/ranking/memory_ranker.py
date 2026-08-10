@@ -172,7 +172,7 @@ class MemoryRanker:
         candidate.token_score = token
         candidate.base_score = score
 
-        # 👈 ACCUMULATE TIMING DATA
+        # Timing accumulation (in memory only, no file I/O)
         self._timing_accumulator["semantic"] += (t_importance - t_semantic) * 1000
         self._timing_accumulator["importance"] += (t_recency - t_importance) * 1000
         self._timing_accumulator["recency"] += (t_token - t_recency) * 1000
@@ -216,39 +216,43 @@ class MemoryRanker:
     # ---------------------------------
 
     def rank(self, candidates, query):
-        import time as t
-        import os
-
         # Reset timing accumulator
         self._timing_accumulator.clear()
         self._candidate_count = 0
 
-        start_total = t.perf_counter()
+        start_total = time_module.perf_counter()
 
         updated = []
         for candidate in candidates:
             updated.append(self.compute_score(candidate, query))
 
-        elapsed_total = (t.perf_counter() - start_total) * 1000
+        elapsed_total = (time_module.perf_counter() - start_total) * 1000
 
         updated.sort(key=lambda x: x.base_score, reverse=True)
 
-        # Write timing breakdown to file
-        if self._candidate_count > 0:
-            timing_file = "/tmp/ranker_timing.txt"
-            try:
-                with open(timing_file, "w") as f:
-                    f.write("=" * 60 + "\n")
-                    f.write("[RANKER TIMING BREAKDOWN]\n")
-                    f.write(f"Candidates: {self._candidate_count}\n")
-                    f.write(f"Total ranking time: {elapsed_total:.3f}ms\n")
-                    f.write("-" * 60 + "\n")
-                    for key, value in sorted(self._timing_accumulator.items(), key=lambda x: x[1], reverse=True):
-                        avg = value / self._candidate_count
-                        total = value
-                        f.write(f"  {key:<20}: {total:>8.3f}ms total, {avg:>6.3f}ms avg\n")
-                    f.write("=" * 60 + "\n")
-            except Exception as e:
-                print(f"[RANKER] Failed to write timing: {e}")
+        # ✅ Timing breakdown is kept in memory (no file I/O)
+        # Access via self._timing_accumulator if needed for diagnostics
+        if self._candidate_count > 0 and self.enable_diagnostics:
+            debug(f"[Ranker] {self._candidate_count} candidates in {elapsed_total:.2f}ms", category="ranking")
 
         return updated
+
+    # ---------------------------------
+    # Get timing breakdown (for diagnostics)
+    # ---------------------------------
+
+    def get_timing_breakdown(self) -> dict:
+        """Return the timing breakdown for the last rank operation."""
+        if self._candidate_count == 0:
+            return {}
+
+        return {
+            "candidate_count": self._candidate_count,
+            "breakdown": {
+                key: {
+                    "total_ms": round(value, 3),
+                    "avg_ms": round(value / self._candidate_count, 3)
+                }
+                for key, value in self._timing_accumulator.items()
+            }
+        }

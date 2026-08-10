@@ -2,6 +2,8 @@ from core.logger import debug
 from memory.models import MemoryRecord
 from ranking.models import CandidateRecord
 from cache.config import settings
+import time
+from typing import List, Dict, Optional, Set
 
 
 class RetrievalEngine:
@@ -33,7 +35,7 @@ class RetrievalEngine:
         )
 
     # -------------------------------------
-    # Helper: get embedding with cache fallback
+    # Helper: get embedding with cache fallback (single)
     # -------------------------------------
 
     def _get_embedding(self, mem_id):
@@ -46,6 +48,36 @@ class RetrievalEngine:
         return embedding
 
     # -------------------------------------
+    # Helper: get embeddings in batch (MASSIVE SPEEDUP)
+    # -------------------------------------
+
+    def _get_embeddings_batch(self, mem_ids: List[int]) -> Dict[int, List[float]]:
+        """
+        Get embeddings for multiple memory IDs in batch.
+        This is much faster than calling _get_embedding() for each ID.
+        """
+        result = {}
+        missing_ids = []
+
+        # Check cache first
+        for mem_id in mem_ids:
+            emb = self.embedding_cache.get(mem_id)
+            if emb is not None:
+                result[mem_id] = emb
+            else:
+                missing_ids.append(mem_id)
+
+        # Batch fetch missing from vector store
+        if missing_ids:
+            vectors = self.vector_store.get_many(missing_ids)
+            for mem_id, vector in vectors.items():
+                if vector is not None:
+                    self.embedding_cache.add(mem_id, vector)
+                    result[mem_id] = vector
+
+        return result
+
+    # -------------------------------------
     # FAISS candidates
     # -------------------------------------
 
@@ -53,13 +85,17 @@ class RetrievalEngine:
         rows = self.db.fetch_many(ids)
         candidates = []
 
+        # Collect all mem_ids for batch embedding
+        mem_ids = [mem_id for mem_id in ids if rows.get(mem_id) is not None]
+        embeddings = self._get_embeddings_batch(mem_ids)
+
         for mem_id, dist in zip(ids, distances):
             row = rows.get(mem_id)
             if row is None:
                 continue
 
             memory = self._build_memory_record(row)
-            embedding = self._get_embedding(mem_id)
+            embedding = embeddings.get(mem_id)
 
             candidates.append(
                 CandidateRecord(
@@ -84,20 +120,21 @@ class RetrievalEngine:
         graph_memory_ids = self.graph_search.search(
             entities,
             depth=depth,
-            limit=graph_limit * 2  # Fetch extra to account for filtering
+            limit=graph_limit * 2
         )
 
-        # Filter out existing IDs and duplicates
         new_ids = [mem_id for mem_id in graph_memory_ids if mem_id not in existing_ids]
 
         if not new_ids:
             return []
 
-        # Limit after filtering
         new_ids = new_ids[:graph_limit]
 
-        # Batch fetch
         rows = self.db.fetch_many(new_ids)
+
+        # Batch get embeddings
+        valid_mem_ids = [mem_id for mem_id in new_ids if rows.get(mem_id) is not None]
+        embeddings = self._get_embeddings_batch(valid_mem_ids)
 
         candidates = []
         for mem_id in new_ids:
@@ -106,7 +143,7 @@ class RetrievalEngine:
                 continue
 
             memory = self._build_memory_record(row)
-            embedding = self._get_embedding(mem_id)
+            embedding = embeddings.get(mem_id)
 
             candidates.append(
                 CandidateRecord(
@@ -117,6 +154,8 @@ class RetrievalEngine:
                 )
             )
 
+            existing_ids.add(mem_id)
+
         return candidates
 
     # -------------------------------------
@@ -124,7 +163,6 @@ class RetrievalEngine:
     # -------------------------------------
 
     def attribute_candidates(self, subject, attribute, existing_ids):
-        """Get candidates via attribute search."""
         if not subject or not attribute:
             return []
 
@@ -132,14 +170,28 @@ class RetrievalEngine:
         if not rows:
             return []
 
+        # Collect mem_ids for batch embedding
+        mem_ids = []
         candidates = []
+
+        for row in rows:
+            mem_id = row["id"]
+            if mem_id in existing_ids:
+                continue
+            mem_ids.append(mem_id)
+
+        if not mem_ids:
+            return []
+
+        embeddings = self._get_embeddings_batch(mem_ids)
+
         for row in rows:
             mem_id = row["id"]
             if mem_id in existing_ids:
                 continue
 
             memory = self._build_memory_record(row)
-            embedding = self._get_embedding(mem_id)
+            embedding = embeddings.get(mem_id)
 
             candidates.append(
                 CandidateRecord(
@@ -158,8 +210,6 @@ class RetrievalEngine:
     # -------------------------------------
 
     def retrieve(self, query, ids, distances):
-        
-
         t0_global = time.perf_counter()
 
         # -----------------------------
@@ -188,28 +238,6 @@ class RetrievalEngine:
             candidates.extend(attr_candidates)
             debug(f"[TIMING] attribute_candidates: {attr_ms:.2f}ms - {len(attr_candidates)} candidates")
 
-        # -----------------------------
-        # Graph candidates
-        # -----------------------------
-
-        t0 = time.perf_counter()
-        graph_depth = getattr(settings, "GRAPH_SEARCH_DEPTH", 1)
-        graph_candidates = self.graph_candidates(
-            query.entities,
-            existing_ids,
-            depth=graph_depth
-        )
-        graph_ms = (time.perf_counter() - t0) * 1000
-
-        graph_limit = getattr(settings, "GRAPH_TOP_K", 50)
-        if graph_candidates:
-            candidates.extend(graph_candidates[:graph_limit])
-            debug(f"[TIMING] graph_candidates: {graph_ms:.2f}ms - {len(graph_candidates)} candidates")
-
-        total_ms = (time.perf_counter() - t0_global) * 1000
-        debug(f"[TIMING] TOTAL retrieve: {total_ms:.2f}ms - {len(candidates)} total candidates")
-
-        return candidates
         # -----------------------------
         # Graph candidates
         # -----------------------------

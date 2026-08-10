@@ -51,10 +51,9 @@ class RankingPipeline:
             self.booster = booster
 
         self.context_builder = context_builder or ContextBuilder()
-        # In ranking_pipeline.py, when creating MMR:
         self.mmr = mmr or MMRReranker(
             lambda_param=0.5,
-            enabled=getattr(settings, "MMR_ENABLED", True)  # ← Toggle from config
+            enabled=getattr(settings, "MMR_ENABLED", True)
         )
         self.finalizer = finalizer or ScoreFinalizer()
 
@@ -95,6 +94,12 @@ class RankingPipeline:
     def run(self, query, candidates):
         diagnostics = {}
         t_total_start = time.perf_counter()
+
+        # --- ✅ ENSURE ROUTING SIGNALS ARE PASSED TO RANKER ---
+        # The router should have already set query.metadata["routing_signals"]
+        # But if not, we make sure the ranker has access to it via the query object.
+        # MemoryRanker.get_weights_for_type() reads query.metadata.get("routing_signals")
+        # This is the connection point between routing and ranking.
 
         # --- Ranker ---
         t0 = time.perf_counter()

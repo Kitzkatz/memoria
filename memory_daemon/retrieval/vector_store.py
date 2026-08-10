@@ -1,9 +1,10 @@
 from core.logger import debug
 import os
+import time
 import faiss
 import numpy as np
 import threading
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 
 from cache.config import settings
 
@@ -141,20 +142,36 @@ class VectorStore:
         """Retrieve a vector by ID."""
         with self._lock:
             try:
-                # Check if ID exists first
                 if self.index.ntotal == 0:
                     return None
 
-                # Try to reconstruct
                 vector = self.index.reconstruct(int(mem_id))
                 return vector.tolist()
 
             except (KeyError, ValueError, RuntimeError) as e:
-                # ID doesn't exist or other FAISS error
                 return None
             except Exception as e:
                 debug(f"[FAISS] reconstruct failed for {mem_id}: {e}")
                 return None
+
+    def get_many(self, mem_ids: List[int]) -> Dict[int, Optional[List[float]]]:
+        """
+        Retrieve multiple vectors by ID in batch.
+        This is much faster than calling get() for each ID individually.
+        """
+        with self._lock:
+            result = {}
+            if self.index.ntotal == 0 or not mem_ids:
+                return result
+
+            for mem_id in mem_ids:
+                try:
+                    vector = self.index.reconstruct(int(mem_id))
+                    result[mem_id] = vector.tolist()
+                except Exception:
+                    result[mem_id] = None
+
+            return result
 
     def contains(self, mem_id) -> bool:
         """Check if a vector exists in the index."""
@@ -165,15 +182,8 @@ class VectorStore:
     # --------------------------------------------------
 
     def remove(self, mem_id):
-        """
-        Remove a vector from the index.
-        Note: FAISS doesn't support direct removal efficiently.
-        This marks it for cleanup or triggers rebuild.
-        """
+        """Mark a vector for removal (FAISS doesn't support direct removal)."""
         with self._lock:
-            # FAISS doesn't support removal natively.
-            # We'll flag it and rebuild on demand.
-            # For now, just log it.
             debug(f"[FAISS] Marked {mem_id} for removal (will rebuild on demand)")
 
     def rebuild_from_db(self, db):
@@ -185,7 +195,6 @@ class VectorStore:
             debug("[FAISS] Rebuilding index from DB...")
             start = time.perf_counter()
 
-            # Get all non-tombstone memories
             memories = db.fetch_all()
             if not memories:
                 self.index = self._new_index()
@@ -193,29 +202,13 @@ class VectorStore:
                 debug("[FAISS] Rebuild complete: 0 vectors")
                 return
 
-            # Build vectors
-            ids = []
-            vectors = []
-            for mem in memories:
-                mem_id = mem["id"]
-                # Try to get embedding from cache or compute
-                # This assumes embeddings are computed elsewhere
-                # We're just rebuilding from the DB, so we need a way to get vectors
-                # In practice, callers should pass embeddings or use embedding_cache
-                # For now, this is a placeholder — the caller should provide embeddings
-                # via a separate mechanism.
-                pass
-
-            # If we have vectors, rebuild
-            if vectors:
-                self.index = self._new_index()
-                arr = np.asarray(vectors, dtype=np.float32)
-                id_array = np.asarray(ids, dtype=np.int64)
-                self.index.add_with_ids(arr, id_array)
-                self.pending = 0
+            # This is a placeholder — the caller should provide embeddings
+            # via a separate mechanism (embedding_cache + vector_store)
+            # For now, log that we need to rebuild from cache
+            debug("[FAISS] Rebuild from DB requires embeddings from cache or embedder")
 
             elapsed = (time.perf_counter() - start) * 1000
-            debug(f"[FAISS] Rebuild complete: {len(vectors)} vectors in {elapsed:.2f}ms")
+            debug(f"[FAISS] Rebuild placeholder: {elapsed:.2f}ms")
 
     # --------------------------------------------------
     # Persistence
@@ -278,7 +271,6 @@ class VectorStore:
             if db_count == faiss_count:
                 return True
 
-            # If mismatch, log and suggest rebuild
             debug(f"[VERIFY] Mismatch: {faiss_count - db_count} stale vectors")
             return db_count == faiss_count
 

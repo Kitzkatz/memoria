@@ -5,6 +5,13 @@ from cache.config import settings
 from core.logger import debug
 
 
+def _shard_filter(items, key_fn, shard_id, num_shards):
+    """Filter a list of items to only those belonging to this shard."""
+    if num_shards <= 1:
+        return items
+    return [item for item in items if key_fn(item) % num_shards == shard_id]
+
+
 class Worker:
     """Base class for all workers."""
     def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -29,10 +36,8 @@ class FAISSWorker(Worker):
         ids, distances = self.vector_store.search(query_vec, k=top_k * num_shards)
         candidates = list(zip(ids, distances))
 
-        # Filter by shard (simple modulo)
-        if num_shards > 1:
-            candidates = [(mid, dist) for mid, dist in candidates if mid % num_shards == shard_id]
-            candidates = candidates[:top_k]
+        candidates = _shard_filter(candidates, lambda c: c[0], shard_id, num_shards)
+        candidates = candidates[:top_k]
 
         search_time = (time.perf_counter() - start) * 1000
         debug(f"FAISSWorker (shard {shard_id}): search={search_time:.2f}ms, count={len(candidates)}")
@@ -65,7 +70,6 @@ class BM25Worker(Worker):
         if not self.inverted_index:
             return {"error": "Inverted index not available", "source": "bm25", "candidates": []}
 
-        # Get candidate IDs from inverted index
         candidate_ids = set()
         for token in query_tokens:
             candidate_ids.update(self.inverted_index.search(token))
@@ -74,20 +78,16 @@ class BM25Worker(Worker):
         if not candidate_ids:
             return {"error": "No candidates found", "source": "bm25", "candidates": []}
 
-        # Score ALL candidates first
+        # Filter by shard BEFORE scoring — don't spend time scoring
+        # candidates this shard is going to throw away anyway.
+        candidate_ids = _shard_filter(candidate_ids, lambda cid: cid, shard_id, num_shards)
+
         candidates = [
             (doc_id, self.bm25_ranker.score(query_tokens, doc_id))
             for doc_id in candidate_ids
         ]
 
-        # Sort by score
         candidates.sort(key=lambda x: x[1], reverse=True)
-
-        # Then filter by shard
-        if num_shards > 1:
-            candidates = [(mid, score) for mid, score in candidates if mid % num_shards == shard_id]
-
-        # Take top_k
         candidates = candidates[:limit]
 
         build_time = (time.perf_counter() - start) * 1000
@@ -118,10 +118,8 @@ class GraphWorker(Worker):
         memory_ids = self.numpy_graph.multi_hop_search(entities, depth=depth, limit=limit * num_shards)
         memory_ids = [int(x) for x in memory_ids if x is not None]
 
-        # Filter by shard
-        if num_shards > 1:
-            memory_ids = [mid for mid in memory_ids if mid % num_shards == shard_id]
-            memory_ids = memory_ids[:limit]
+        memory_ids = _shard_filter(memory_ids, lambda mid: mid, shard_id, num_shards)
+        memory_ids = memory_ids[:limit]
 
         candidates = [(mem_id, 0.0) for mem_id in memory_ids]
         search_time = (time.perf_counter() - start) * 1000
@@ -162,9 +160,7 @@ class PhraseWorker(Worker):
         candidates = list(unique.items())
         candidates.sort(key=lambda x: x[1], reverse=True)
 
-        # Filter by shard
-        if num_shards > 1:
-            candidates = [(mid, score) for mid, score in candidates if mid % num_shards == shard_id]
+        candidates = _shard_filter(candidates, lambda c: c[0], shard_id, num_shards)
         candidates = candidates[:100]
 
         phrase_time = (time.perf_counter() - start) * 1000
@@ -192,14 +188,9 @@ class AttributeWorker(Worker):
             return {"error": "No subject or attribute", "source": "attribute", "candidates": []}
 
         rows = self.db.search_attribute(subject, attribute)
-        candidates = [(row["id"], 0.0) for row in rows]
+        candidates = [(row["id"], 0.0) for row in rows if row["id"] is not None]
 
-        # Filter by shard
-        if num_shards > 1:
-            candidates = [(mid, score) for mid, score in candidates if mid % num_shards == shard_id]
-
-        # Filter out tombstones just in case
-        candidates = [(mid, score) for mid, score in candidates if mid is not None]
+        candidates = _shard_filter(candidates, lambda c: c[0], shard_id, num_shards)
 
         attr_time = (time.perf_counter() - start) * 1000
         debug(f"AttributeWorker (shard {shard_id}): attr_time={attr_time:.2f}ms, count={len(candidates)}")

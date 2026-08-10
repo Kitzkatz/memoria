@@ -1,85 +1,55 @@
 """
-benchmark_analyzer.py
+V4 benchmark result analyzer.
 
-Reads benchmark flight recorder files.
-
-Does not run queries.
-Does not touch memory system.
-
-Only analyzes results.
+Reads benchmark JSON files only.
+Does not execute queries or touch the memory system.
 """
 
 import json
 import sys
 from pathlib import Path
 from collections import Counter, defaultdict
-from typing import Optional, Dict, Any, List
 
-from core.logger import debug, info, error
-
-
-# -----------------------------------------
-# SETTINGS
-# -----------------------------------------
+from core.logger import info, error
 
 DEFAULT_RESULTS_DIR = "benchmark_output/results"
 MMR_DISPLAY_LIMIT = 10
 
 
-# -----------------------------------------
-# ANALYZER
-# -----------------------------------------
-
 class BenchmarkAnalyzer:
-
     def __init__(self, filepath: str):
         self.filepath = Path(filepath)
         self.data = None
 
-    # -------------------------------------
-    # LOAD
-    # -------------------------------------
-
     def load(self) -> bool:
-        """Load benchmark data from file."""
         try:
             with open(self.filepath, "r", encoding="utf8") as f:
                 self.data = json.load(f)
-            info(f"[Analyzer] Loaded {len(self.records())} records from {self.filepath}", category="benchmark")
+
+            info(
+                f"[Analyzer] Loaded {len(self.records())} records from {self.filepath}",
+                category="benchmark",
+            )
             return True
+
         except FileNotFoundError:
             error(f"[Analyzer] File not found: {self.filepath}", category="benchmark")
-            return False
         except json.JSONDecodeError as e:
             error(f"[Analyzer] Invalid JSON: {e}", category="benchmark")
-            return False
+
+        return False
 
     def records(self) -> list:
-        """Return list of records from data."""
         return self.data.get("records", []) if self.data else []
 
-    # -------------------------------------
-    # ANALYZE
-    # -------------------------------------
-
     def analyze(self, show_mmr_details: bool = False) -> dict:
-        """
-        Analyze benchmark results and print summary.
-
-        Args:
-            show_mmr_details: If True, show detailed MMR changes per query
-
-        Returns:
-            dict: Analysis results
-        """
         records = self.records()
         total = len(records)
 
-        if total == 0:
+        if not total:
             info("[Analyzer] No records to analyze", category="benchmark")
             return {"total": 0}
 
-        # Initialize metrics
         metrics = {
             "total": total,
             "retrieved": 0,
@@ -96,64 +66,28 @@ class BenchmarkAnalyzer:
             "mmr_changed": 0,
             "mmr_total": 0,
             "mmr_moves": [],
+            "policy_names": Counter(),
+            "finish_reasons": Counter(),
+            "submitted_sources": Counter(),
+            "completed_sources": Counter(),
+            "pending_sources": Counter(),
+            "failed_sources": Counter(),
+            "source_combinations": Counter(),
+            "retrieval_wait_times": [],
+            "retrieval_times": [],
+            "never_retrieved_records": [],
         }
 
+        timing_keys = (
+            "query_process_ms", "embedding_ms", "retrieval_ms",
+            "faiss_ms", "database_ms", "ranking_ms",
+            "response_ms", "feedback_ms", "formatting_ms",
+            "total_query_ms", "retrieval_wait_ms",
+        )
+
         for record in records:
-            rank = record.get("expected_rank")
-            if rank:
-                metrics["retrieved"] += 1
-                metrics["rank_distribution"][rank] += 1
-                if rank == 1:
-                    metrics["top1"] += 1
-                if rank <= 3:
-                    metrics["top3"] += 1
-                for k in metrics["recall_counts"]:
-                    if rank <= k:
-                        metrics["recall_counts"][k] += 1
+            self._analyze_record(record, metrics, timing_keys, show_mmr_details)
 
-            # Diagnostics
-            diagnostics = record.get("diagnostics", {})
-
-            # Runtime
-            runtime_ms = record.get("runtime_ms")
-            if runtime_ms:
-                metrics["runtime"].append(runtime_ms)
-
-            # Component timings
-            for key in ("embedding_ms", "faiss_ms", "database_ms", "ranking_ms",
-                        "formatting_ms", "total_query_ms"):
-                value = diagnostics.get(key)
-                if value is not None:
-                    metrics["component_totals"][key].append(value)
-
-            # Candidate counts
-            candidates = record.get("candidates", [])
-            metrics["candidate_counts"].append(record.get("candidate_count", len(candidates)))
-
-            # Scores
-            if candidates:
-                best = candidates[0]
-                final_score = best.get("final_score", 0)
-                metrics["final_scores"].append(final_score)
-                score = best.get("score", 0)
-                if rank and rank <= 3:
-                    metrics["top3_scores"].append(score)
-                else:
-                    metrics["not_top3_scores"].append(score)
-
-            # MMR tracking
-            before_mmr = diagnostics.get("before_mmr", [])
-            after_mmr = diagnostics.get("after_mmr", [])
-            if before_mmr and after_mmr:
-                metrics["mmr_total"] += 1
-                if diagnostics.get("mmr_changed", False):
-                    metrics["mmr_changed"] += 1
-                metrics["mmr_moves"].append(diagnostics.get("mmr_moves", 0))
-
-                if show_mmr_details:
-                    self._print_mmr_details(record, before_mmr, after_mmr)
-
-        # Print results
         self._print_analysis(metrics)
 
         return {
@@ -161,53 +95,141 @@ class BenchmarkAnalyzer:
             "summary": self._build_summary(metrics),
         }
 
-    # -------------------------------------
-    # PRINT ANALYSIS
-    # -------------------------------------
+    def _analyze_record(self, record, metrics, timing_keys, show_mmr_details):
+        rank = record.get("expected_rank")
 
-    def _print_analysis(self, metrics: dict):
-        """Print formatted analysis results."""
+        if rank:
+            metrics["retrieved"] += 1
+            metrics["rank_distribution"][rank] += 1
+
+            if rank == 1:
+                metrics["top1"] += 1
+            if rank <= 3:
+                metrics["top3"] += 1
+
+            for k in metrics["recall_counts"]:
+                if rank <= k:
+                    metrics["recall_counts"][k] += 1
+        else:
+            metrics["never_retrieved_records"].append(record)
+
+        diagnostics = record.get("diagnostics", {})
+
+        runtime = record.get("runtime_ms")
+        if runtime is not None:
+            metrics["runtime"].append(runtime)
+
+        for key in timing_keys:
+            value = diagnostics.get(key)
+            if value is not None:
+                metrics["component_totals"][key].append(float(value))
+
+        retrieval = diagnostics.get("retrieval_ms")
+        if retrieval is not None:
+            metrics["retrieval_times"].append(float(retrieval))
+
+        wait = diagnostics.get("retrieval_wait_ms")
+        if wait is not None:
+            metrics["retrieval_wait_times"].append(float(wait))
+
+        policy = diagnostics.get("retrieval_policy")
+        if policy:
+            metrics["policy_names"][policy] += 1
+
+        reason = diagnostics.get("retrieval_finish_reason")
+        if reason:
+            metrics["finish_reasons"][reason] += 1
+
+        sources = {
+            "submitted_sources": diagnostics.get("retrieval_submitted_sources", []),
+            "completed_sources": diagnostics.get("retrieval_completed_sources", []),
+            "pending_sources": diagnostics.get("retrieval_pending_sources", []),
+            "failed_sources": diagnostics.get("retrieval_failed_sources", []),
+        }
+
+        for key, values in sources.items():
+            for source in values:
+                metrics[key][source] += 1
+
+        submitted = sources["submitted_sources"]
+        if submitted:
+            metrics["source_combinations"][tuple(sorted(submitted))] += 1
+
+        candidates = record.get("candidates", [])
+        metrics["candidate_counts"].append(
+            record.get("candidate_count", len(candidates))
+        )
+
+        if candidates:
+            best = candidates[0]
+            metrics["final_scores"].append(best.get("final_score", 0))
+
+            score = best.get("score", 0)
+            if rank and rank <= 3:
+                metrics["top3_scores"].append(score)
+            else:
+                metrics["not_top3_scores"].append(score)
+
+        before = diagnostics.get("before_mmr", [])
+        after = diagnostics.get("after_mmr", [])
+
+        if before and after:
+            metrics["mmr_total"] += 1
+
+            if diagnostics.get("mmr_changed", False):
+                metrics["mmr_changed"] += 1
+
+            metrics["mmr_moves"].append(diagnostics.get("mmr_moves", 0))
+
+            if show_mmr_details:
+                self._print_mmr_details(record, before, after)
+
+    @staticmethod
+    def _avg(metrics, key):
+        values = metrics["component_totals"].get(key, [])
+        return sum(values) / len(values) if values else None
+
+    @staticmethod
+    def _pct(value, total):
+        return value / max(total, 1) * 100
+
+    def _print_analysis(self, metrics):
         total = metrics["total"]
         retrieved = metrics["retrieved"]
-        rank_distribution = metrics["rank_distribution"]
 
-        print()
-        print("=" * 60)
+        print("\n" + "=" * 60)
         print("[BENCHMARK ANALYSIS]")
         print("=" * 60)
 
-        print()
-        print(f"Questions: {total}")
+        print(f"\nQuestions: {total}")
         print(f"Failed:    {total - retrieved}")
-
-        print()
-        print(f"Retrieved: {retrieved} ({retrieved/max(total,1)*100:.2f}%)")
-        print(f"Top 1:     {metrics['top1']} ({metrics['top1']/max(total,1)*100:.2f}%)")
-        print(f"Top 3:     {metrics['top3']} ({metrics['top3']/max(total,1)*100:.2f}%)")
+        print(f"\nRetrieved: {retrieved} ({self._pct(retrieved, total):.2f}%)")
+        print(f"Top 1:     {metrics['top1']} ({self._pct(metrics['top1'], total):.2f}%)")
+        print(f"Top 3:     {metrics['top3']} ({self._pct(metrics['top3'], total):.2f}%)")
 
         if metrics["top3_scores"]:
-            avg = sum(metrics["top3_scores"]) / len(metrics["top3_scores"])
-            print(f"Top3 avg final score: {avg:.4f}")
+            print(
+                f"Top3 avg final score: "
+                f"{sum(metrics['top3_scores']) / len(metrics['top3_scores']):.4f}"
+            )
 
-        print()
-        print("[FINAL SCORE]")
-        if metrics["final_scores"]:
-            scores = metrics["final_scores"]
-            print(f"Average: {sum(scores)/len(scores):.4f}")
+        print("\n[FINAL SCORE]")
+        scores = metrics["final_scores"]
+        if scores:
+            print(f"Average: {sum(scores) / len(scores):.4f}")
             print(f"Max:     {max(scores):.4f}")
             print(f"Min:     {min(scores):.4f}")
         else:
             print("Average: N/A")
 
-        print()
-        print("[RANK DISTRIBUTION]")
-        for rank, count in sorted(rank_distribution.items()):
+        print("\n[RANK DISTRIBUTION]")
+        for rank, count in sorted(metrics["rank_distribution"].items()):
             print(f"Rank {rank}: {count}")
 
-        print()
-        print("[RANK BUCKETS]")
+        print("\n[RANK BUCKETS]")
         buckets = {"1": 0, "2-3": 0, "4-5": 0, "6-10": 0, "11+": 0}
-        for rank, count in rank_distribution.items():
+
+        for rank, count in metrics["rank_distribution"].items():
             if rank == 1:
                 buckets["1"] += count
             elif rank <= 3:
@@ -218,88 +240,209 @@ class BenchmarkAnalyzer:
                 buckets["6-10"] += count
             else:
                 buckets["11+"] += count
-        for name, count in buckets.items():
-            pct = count / max(retrieved, 1) * 100 if retrieved > 0 else 0
-            print(f"{name}: {count} ({pct:.2f}%)")
 
-        print()
-        print("[SCORE ANALYSIS]")
-        avg_candidates = sum(metrics["candidate_counts"]) / max(len(metrics["candidate_counts"]), 1)
+        for name, count in buckets.items():
+            print(f"{name}: {count} ({self._pct(count, retrieved):.2f}%)")
+
+        print("\n[SCORE ANALYSIS]")
+        candidates = metrics["candidate_counts"]
+        avg_candidates = sum(candidates) / max(len(candidates), 1)
         print(f"Average Candidates Returned: {avg_candidates:.2f}")
 
         if metrics["top3_scores"]:
-            avg = sum(metrics["top3_scores"]) / len(metrics["top3_scores"])
-            print(f"Successful avg score: {avg:.4f}")
+            scores = metrics["top3_scores"]
+            print(f"Successful avg score: {sum(scores) / len(scores):.4f}")
+
         if metrics["not_top3_scores"]:
-            avg = sum(metrics["not_top3_scores"]) / len(metrics["not_top3_scores"])
-            print(f"Failure avg score: {avg:.4f}")
+            scores = metrics["not_top3_scores"]
+            print(f"Non-top3 avg score: {sum(scores) / len(scores):.4f}")
 
-        print()
-        print("[TIMING]")
-        for key, values in metrics["component_totals"].items():
-            if values:
-                print(f"{key}: {sum(values)/len(values):.3f} ms")
+        print("\n[TIMING]")
+        timing_order = (
+            "query_process_ms", "embedding_ms", "retrieval_ms",
+            "retrieval_wait_ms", "database_ms", "ranking_ms",
+            "response_ms", "feedback_ms", "formatting_ms",
+            "faiss_ms", "total_query_ms",
+        )
 
-        print()
-        print("[MMR ANALYSIS]")
+        for key in timing_order:
+            value = self._avg(metrics, key)
+            if value is not None:
+                print(f"{key}: {value:.3f} ms")
+
+        self._print_timing_accounting(metrics)
+        self._print_retrieval_diagnostics(metrics)
+
+        print("\n[MMR ANALYSIS]")
         mmr_total = metrics["mmr_total"]
         mmr_changed = metrics["mmr_changed"]
         print(f"MMR tracked: {mmr_total}")
-        print(f"MMR reordered: {mmr_changed} ({mmr_changed/max(mmr_total,1)*100:.2f}%)")
+        print(f"MMR reordered: {mmr_changed} ({self._pct(mmr_changed, mmr_total):.2f}%)")
+
         if metrics["mmr_moves"]:
-            avg_moves = sum(metrics["mmr_moves"]) / len(metrics["mmr_moves"])
-            print(f"Average MMR moves: {avg_moves:.2f}")
+            moves = metrics["mmr_moves"]
+            print(f"Average MMR moves: {sum(moves) / len(moves):.2f}")
 
-        print()
-        print("[RECALL@K]")
+        print("\n[RECALL@K]")
         for k, count in metrics["recall_counts"].items():
-            print(f"Recall@{k}: {count} ({count/max(total,1)*100:.2f}%)")
+            print(f"Recall@{k}: {count} ({self._pct(count, total):.2f}%)")
 
-        print()
-        print("=" * 60)
+        print("\n" + "=" * 60)
 
-    def _print_mmr_details(self, record, before_mmr, after_mmr):
-        """Print MMR details for a single record."""
-        print()
-        print(f"Query: {record.get('query', '')[:80]}")
+    def _print_timing_accounting(self, metrics):
+        total = self._avg(metrics, "total_query_ms")
+        if total is None:
+            return
+
+        keys = (
+            "query_process_ms",
+            "embedding_ms",
+            "retrieval_ms",
+            "ranking_ms",
+            "response_ms",
+            "feedback_ms",
+        )
+
+        values = {key: self._avg(metrics, key) or 0.0 for key in keys}
+        accounted = sum(values.values())
+        unaccounted = total - accounted
+
+        print("\n[TIMING ACCOUNTING]")
+        labels = {
+            "query_process_ms": "Query processing",
+            "embedding_ms": "Embedding",
+            "retrieval_ms": "Retrieval",
+            "ranking_ms": "Ranking",
+            "response_ms": "Response",
+            "feedback_ms": "Feedback",
+        }
+
+        for key in keys:
+            print(f"{labels[key] + ':':18} {values[key]:.3f} ms")
+
+        print(f"{'Accounted:':18} {accounted:.3f} ms")
+        print(f"{'Total:':18} {total:.3f} ms")
+        print(f"{'Unaccounted:':18} {unaccounted:.3f} ms")
+        print(f"{'Unaccounted %:':18} {unaccounted / total * 100:.2f}%")
+
+    def _print_retrieval_diagnostics(self, metrics):
+        print("\n[V4 RETRIEVAL POLICY]")
+
+        if metrics["policy_names"]:
+            print("Policies:")
+            for name, count in metrics["policy_names"].most_common():
+                print(f"  {name}: {count}")
+
+        if metrics["finish_reasons"]:
+            print("\nFinish reasons:")
+            for reason, count in metrics["finish_reasons"].most_common():
+                print(f"  {reason}: {count}")
+
+        print("\n[RETRIEVAL SOURCES]")
+
+        labels = (
+            ("submitted_sources", "Submitted"),
+            ("completed_sources", "Completed"),
+            ("pending_sources", "Pending"),
+            ("failed_sources", "Failed"),
+        )
+
+        for key, label in labels:
+            if metrics[key]:
+                print(f"{label}:")
+                for source, count in metrics[key].most_common():
+                    print(f"  {source}: {count}")
+
+        if metrics["source_combinations"]:
+            print("\nSubmitted source combinations:")
+            for sources, count in metrics["source_combinations"].most_common():
+                print(f"  {'+'.join(sources)}: {count}")
+
+        waits = metrics["retrieval_wait_times"]
+        if waits:
+            print("\n[SCHEDULER WAIT]")
+            print(f"Average: {sum(waits) / len(waits):.3f} ms")
+            print(f"Max:     {max(waits):.3f} ms")
+            print(f"Min:     {min(waits):.3f} ms")
+
+    def _print_mmr_details(self, record, before, after):
+        print(f"\nQuery: {record.get('query', '')[:80]}")
         print("[MMR BEFORE]")
-        for mem_id in before_mmr[:MMR_DISPLAY_LIMIT]:
+        for mem_id in before[:MMR_DISPLAY_LIMIT]:
             print(f"  {mem_id}")
+
         print("[MMR AFTER]")
-        for mem_id in after_mmr[:MMR_DISPLAY_LIMIT]:
+        for mem_id in after[:MMR_DISPLAY_LIMIT]:
             print(f"  {mem_id}")
+
         print("-" * 40)
 
-    # -------------------------------------
-    # BUILD SUMMARY
-    # -------------------------------------
-
-    def _build_summary(self, metrics: dict) -> dict:
-        """Build a summary dictionary from metrics."""
+    def _build_summary(self, metrics):
         total = metrics["total"]
         retrieved = metrics["retrieved"]
+
+        timing = {
+            key: self._avg(metrics, key)
+            for key in (
+                "query_process_ms",
+                "embedding_ms",
+                "retrieval_ms",
+                "ranking_ms",
+                "response_ms",
+                "feedback_ms",
+                "total_query_ms",
+            )
+        }
+
+        accounted = None
+        unaccounted = None
+
+        if timing["total_query_ms"] is not None:
+            accounted = sum(
+                timing[key] or 0.0
+                for key in (
+                    "query_process_ms",
+                    "embedding_ms",
+                    "retrieval_ms",
+                    "ranking_ms",
+                    "response_ms",
+                    "feedback_ms",
+                )
+            )
+            unaccounted = timing["total_query_ms"] - accounted
+
+        def rounded(value):
+            return round(value, 3) if value is not None else None
+
+        scores = metrics["final_scores"]
+        candidates = metrics["candidate_counts"]
 
         return {
             "total_questions": total,
             "retrieved": retrieved,
-            "accuracy": round(retrieved / max(total, 1) * 100, 2),
-            "top1_accuracy": round(metrics["top1"] / max(total, 1) * 100, 2),
-            "top3_accuracy": round(metrics["top3"] / max(total, 1) * 100, 2),
-            "avg_final_score": round(sum(metrics["final_scores"]) / max(len(metrics["final_scores"]), 1), 4),
-            "avg_candidates": round(sum(metrics["candidate_counts"]) / max(len(metrics["candidate_counts"]), 1), 2),
-            "mmr_reordered_pct": round(metrics["mmr_changed"] / max(metrics["mmr_total"], 1) * 100, 2),
-            "recall@1": round(metrics["recall_counts"][1] / max(total, 1) * 100, 2),
-            "recall@3": round(metrics["recall_counts"][3] / max(total, 1) * 100, 2),
-            "recall@5": round(metrics["recall_counts"][5] / max(total, 1) * 100, 2),
-            "recall@10": round(metrics["recall_counts"][10] / max(total, 1) * 100, 2),
+            "accuracy": round(self._pct(retrieved, total), 2),
+            "top1_accuracy": round(self._pct(metrics["top1"], total), 2),
+            "top3_accuracy": round(self._pct(metrics["top3"], total), 2),
+            "avg_final_score": round(sum(scores) / max(len(scores), 1), 4),
+            "avg_candidates": round(sum(candidates) / max(len(candidates), 1), 2),
+            "mmr_reordered_pct": round(
+                self._pct(metrics["mmr_changed"], metrics["mmr_total"]), 2
+            ),
+            "recall@1": round(self._pct(metrics["recall_counts"][1], total), 2),
+            "recall@3": round(self._pct(metrics["recall_counts"][3], total), 2),
+            "recall@5": round(self._pct(metrics["recall_counts"][5], total), 2),
+            "recall@10": round(self._pct(metrics["recall_counts"][10], total), 2),
+            **{key: rounded(value) for key, value in timing.items()},
+            "unaccounted_ms": rounded(unaccounted),
+            "retrieval_policies": dict(metrics["policy_names"]),
+            "retrieval_finish_reasons": dict(metrics["finish_reasons"]),
+            "submitted_sources": dict(metrics["submitted_sources"]),
+            "completed_sources": dict(metrics["completed_sources"]),
+            "pending_sources": dict(metrics["pending_sources"]),
+            "failed_sources": dict(metrics["failed_sources"]),
         }
 
-    # -------------------------------------
-    # EXPLAIN FAILURES
-    # -------------------------------------
-
-    def explain_failures(self, limit: int = 20):
-        """Explain failed queries in detail."""
+    def explain_failures(self, limit=20):
         records = self.records()
         shown = 0
         never_found = 0
@@ -312,31 +455,29 @@ class BenchmarkAnalyzer:
             if rank and rank <= 3:
                 continue
 
-            if not candidates:
-                continue
-
-            top = candidates[0]
-
-            if rank is None:
+            if not candidates or rank is None:
                 never_found += 1
+
                 if shown < limit:
-                    self._print_never_found(record, top)
+                    self._print_never_found(record, candidates[0] if candidates else None)
                     shown += 1
+
                 continue
 
             expected_idx = rank - 1
             if expected_idx >= len(candidates):
                 continue
 
-            expected_candidate = candidates[expected_idx]
-            near_misses.append((record, top, expected_candidate))
+            expected = candidates[expected_idx]
+            top = candidates[0]
+
+            near_misses.append((record, top, expected))
 
             if shown < limit:
-                self._print_near_miss(record, top, expected_candidate, rank)
+                self._print_near_miss(record, top, expected, rank)
                 shown += 1
 
-        print()
-        print("=" * 60)
+        print("\n" + "=" * 60)
         print("[FAILURE SUMMARY]")
         print(f"Never retrieved at all: {never_found}")
         print(f"Retrieved but outranked (near misses): {len(near_misses)}")
@@ -345,144 +486,124 @@ class BenchmarkAnalyzer:
         if near_misses:
             self._signal_diff_summary(near_misses)
 
-    def _print_never_found(self, record, top):
-        """Print details for a never-found failure."""
-        print()
-        print("-" * 60)
+    def _print_never_found(self, record, top=None):
+        print("\n" + "-" * 60)
         print(f"Query: {record.get('query')}")
         print(f"Expected: {record.get('expected')}")
         print("Result: NEVER RETURNED (not in candidate pool)")
-        print(f"Top pick instead: {top.get('text', '')[:80]}")
-        print(f"  final_score={round(top.get('final_score', 0), 4)}")
+
+        if top:
+            print(f"Top pick instead: {top.get('text', '')[:80]}")
+            print(f"  final_score={top.get('final_score', 0):.4f}")
+
+        d = record.get("diagnostics", {})
+        print(f"\nPolicy: {d.get('retrieval_policy')}")
+        print(f"Finish reason: {d.get('retrieval_finish_reason')}")
+        print(f"Submitted: {d.get('retrieval_submitted_sources', [])}")
+        print(f"Completed: {d.get('retrieval_completed_sources', [])}")
+        print(f"Pending: {d.get('retrieval_pending_sources', [])}")
+        print(f"Failed: {d.get('retrieval_failed_sources', [])}")
 
     def _print_near_miss(self, record, top, expected, rank):
-        """Print details for a near-miss failure."""
-        print()
-        print("-" * 60)
+        print("\n" + "-" * 60)
         print(f"Query: {record.get('query')}")
         print(f"Expected: {record.get('expected')}")
-        print(f"Expected landed at rank: {rank}")
-        print()
+        print(f"Expected landed at rank: {rank}\n")
         self._print_signal_comparison(top, expected)
 
-    # -------------------------------------
-    # SIGNAL COMPARISON
-    # -------------------------------------
+    def _ranker_signals(self, candidate):
+        return candidate.get("diagnostics", {}).get("ranker", {})
 
-    def _print_signal_comparison(self, winner: dict, expected: dict):
-        """Print signal comparison between winner and expected."""
-        w_ranker = winner.get("diagnostics", {}).get("ranker", {})
-        e_ranker = expected.get("diagnostics", {}).get("ranker", {})
-
-        fields = ["semantic", "importance", "recency", "token", "feedback"]
+    def _print_signal_comparison(self, winner, expected):
+        fields = ("semantic", "importance", "recency", "token", "feedback")
 
         print(f"{'signal':<18}{'winner':>10}{'expected':>10}{'delta':>10}")
 
         for field in fields:
-            w = w_ranker.get(field, 0.0)
-            e = e_ranker.get(field, 0.0)
-            print(f"{field:<18}{w:>10.4f}{e:>10.4f}{(w - e):>10.4f}")
+            w = self._ranker_signals(winner).get(field, 0.0)
+            e = self._ranker_signals(expected).get(field, 0.0)
+            print(f"{field:<18}{w:>10.4f}{e:>10.4f}{w - e:>10.4f}")
 
-        w_attr = winner.get("diagnostics", {}).get("attribute_boost", 0.0)
-        e_attr = expected.get("diagnostics", {}).get("attribute_boost", 0.0)
-        print(f"{'attribute_boost':<18}{w_attr:>10.4f}{e_attr:>10.4f}{(w_attr - e_attr):>10.4f}")
+        for field in ("attribute_boost", "score", "final_score", "mmr_score"):
+            w = winner.get(field, winner.get("diagnostics", {}).get(field, 0.0))
+            e = expected.get(field, expected.get("diagnostics", {}).get(field, 0.0))
+            print(f"{field:<18}{w:>10.4f}{e:>10.4f}{w - e:>10.4f}")
 
-        w_score = winner.get("score", 0)
-        e_score = expected.get("score", 0)
-        print(f"{'score(norm)':<18}{w_score:>10.4f}{e_score:>10.4f}{(w_score - e_score):>10.4f}")
-
-        w_final = winner.get("final_score", 0)
-        e_final = expected.get("final_score", 0)
-        print(f"{'final_score':<18}{w_final:>10.4f}{e_final:>10.4f}{(w_final - e_final):>10.4f}")
-
-        w_mmr = winner.get("mmr_score", 0)
-        e_mmr = expected.get("mmr_score", 0)
-        print(f"{'mmr_score':<18}{w_mmr:>10.4f}{e_mmr:>10.4f}{(w_mmr - e_mmr):>10.4f}")
-
-    # -------------------------------------
-    # SIGNAL DIFF SUMMARY
-    # -------------------------------------
-
-    def _signal_diff_summary(self, near_misses: list):
-        """Print aggregate signal difference summary."""
-        fields = ["semantic", "importance", "recency", "token", "feedback"]
-
-        totals = {f: 0.0 for f in fields}
-        counts = {f: 0 for f in fields}
-
+    def _signal_diff_summary(self, near_misses):
+        fields = ("semantic", "importance", "recency", "token", "feedback")
+        totals = Counter()
+        counts = Counter()
         attr_total = 0.0
         attr_count = 0
 
         for _, winner, expected in near_misses:
-            w_ranker = winner.get("diagnostics", {}).get("ranker", {})
-            e_ranker = expected.get("diagnostics", {}).get("ranker", {})
+            w_ranker = self._ranker_signals(winner)
+            e_ranker = self._ranker_signals(expected)
 
-            for f in fields:
-                if f in w_ranker and f in e_ranker:
-                    totals[f] += w_ranker[f] - e_ranker[f]
-                    counts[f] += 1
+            for field in fields:
+                if field in w_ranker and field in e_ranker:
+                    totals[field] += w_ranker[field] - e_ranker[field]
+                    counts[field] += 1
 
             w_attr = winner.get("diagnostics", {}).get("attribute_boost")
             e_attr = expected.get("diagnostics", {}).get("attribute_boost")
+
             if w_attr is not None and e_attr is not None:
                 attr_total += w_attr - e_attr
                 attr_count += 1
 
-        print()
-        print("[AVG SIGNAL ADVANTAGE — winner minus expected, across all near misses]")
+        print("\n[AVG SIGNAL ADVANTAGE — winner minus expected]")
 
-        for f in fields:
-            if counts[f]:
-                avg = totals[f] / counts[f]
-                print(f"{f:<18}{avg:>10.4f}")
+        for field in fields:
+            if counts[field]:
+                print(f"{field:<18}{totals[field] / counts[field]:>10.4f}")
 
         if attr_count:
-            print(f"{'attribute_boost':<18}{attr_total/attr_count:>10.4f}")
+            print(f"{'attribute_boost':<18}{attr_total / attr_count:>10.4f}")
 
-    # -------------------------------------
-    # EXPORT SUMMARY
-    # -------------------------------------
-
-    def export_summary(self, output_path: str):
-        """Export analysis summary to JSON."""
+    def export_summary(self, output_path):
         analysis = self.analyze()
-        summary = analysis.get("summary", {})
 
         with open(output_path, "w", encoding="utf8") as f:
-            json.dump({
-                "file": str(self.filepath),
-                "summary": summary,
-                "metrics": analysis.get("metrics", {})
-            }, f, indent=2, default=str)
+            json.dump(
+                {
+                    "file": str(self.filepath),
+                    "summary": analysis.get("summary", {}),
+                    "metrics": analysis.get("metrics", {}),
+                },
+                f,
+                indent=2,
+                default=str,
+            )
 
-        info(f"[Analyzer] Summary exported to {output_path}", category="benchmark")
+        info(
+            f"[Analyzer] Summary exported to {output_path}",
+            category="benchmark",
+        )
 
 
-# -----------------------------------------
-# ANALYZE ALL FILES IN DIRECTORY
-# -----------------------------------------
-
-def analyze_all(results_dir: str = DEFAULT_RESULTS_DIR) -> dict:
-    """Analyze all benchmark files in a directory."""
+def analyze_all(results_dir=DEFAULT_RESULTS_DIR):
     dir_path = Path(results_dir)
+
     if not dir_path.exists():
         error(f"[Analyzer] Directory not found: {dir_path}", category="benchmark")
         return {}
 
     results = {}
+
     for filepath in sorted(dir_path.glob("*.json")):
-        info(f"[Analyzer] Analyzing: {filepath.name}", category="benchmark")
+        info(
+            f"[Analyzer] Analyzing: {filepath.name}",
+            category="benchmark",
+        )
+
         analyzer = BenchmarkAnalyzer(str(filepath))
+
         if analyzer.load():
-            analysis = analyzer.analyze()
-            results[filepath.name] = analysis.get("summary", {})
+            results[filepath.name] = analyzer.analyze().get("summary", {})
 
     return results
 
-
-# -----------------------------------------
-# MAIN
-# -----------------------------------------
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -491,13 +612,13 @@ if __name__ == "__main__":
         print("  python benchmark_analyzer.py --all [--export summary.json]")
         sys.exit(1)
 
-    # --all flag
     if sys.argv[1] == "--all":
         results = analyze_all()
         print(json.dumps(results, indent=2))
         sys.exit(0)
 
     analyzer = BenchmarkAnalyzer(sys.argv[1])
+
     if not analyzer.load():
         sys.exit(1)
 
@@ -506,7 +627,7 @@ if __name__ == "__main__":
     if "--explain" in sys.argv:
         idx = sys.argv.index("--explain")
         limit = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 20
-        analyzer.explain_failures(limit=limit)
+        analyzer.explain_failures(limit)
 
     if "--export" in sys.argv:
         idx = sys.argv.index("--export")

@@ -1,6 +1,18 @@
 """
 Query handling for MemorySystem.
-EXACT COPY of the original query method logic, extracted for decomposition.
+
+V4 uses the scheduler's completion-policy system rather than a fixed
+polling/quiet-period wait.
+
+Retrieval policy:
+
+- Prefer FAISS as the mandatory primary source when submitted.
+- Require at least two distinct retrieval sources when available.
+- If only one source is actually submitted, accept that source.
+- Stop as soon as the policy is satisfied.
+- Apply a hard retrieval deadline as a safety ceiling.
+- Workers still running after the policy finishes are not included in
+  this query's result set.
 """
 
 import time
@@ -9,162 +21,618 @@ from cache.config import settings
 from core.logger import debug
 
 from ranking.models import CandidateRecord
-from system._response_builder import build_response, build_diagnostics_v3
+from system._response_builder import (
+    build_response,
+    build_diagnostics_v3,
+)
+
+from blackboard.scheduler import SourceCoveragePolicy
 
 
-# How many candidates to keep before expensive ranking
+# How many candidates to keep before expensive ranking.
 RANKING_CANDIDATE_LIMIT = 300
 
 
+# ---------------------------------------------------------------------------
+# V4 retrieval completion policy
+# ---------------------------------------------------------------------------
+
+def _build_retrieval_policy(submitted_sources):
+    """
+    Build the completion policy for one retrieval pass.
+
+    The scheduler only knows about generic task/source completion.
+    This function translates MemorySystem's retrieval requirements into
+    that generic scheduler policy.
+
+    Policy:
+
+        1. FAISS is the primary semantic retrieval source when submitted.
+        2. Require two distinct sources when at least two are available.
+        3. If only one source was actually submitted, that source is enough.
+        4. Do not wait for every worker simply because one is slow.
+
+    IMPORTANT:
+        submitted_sources represents sources that were actually submitted
+        for this query, not merely sources configured by the router.
+    """
+
+    available_sources = set(submitted_sources)
+
+    if not available_sources:
+        return SourceCoveragePolicy(
+            required_sources=set(),
+            min_sources=1,
+        )
+
+    required_sources = set()
+
+    # FAISS remains the primary semantic source whenever it was actually
+    # submitted for this query.
+    if "faiss" in available_sources:
+        required_sources.add("faiss")
+
+    # Require diversity when multiple retrieval modalities actually exist.
+    min_sources = min(2, len(available_sources))
+
+    return SourceCoveragePolicy(
+        required_sources=required_sources,
+        min_sources=min_sources,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Query entry point
+# ---------------------------------------------------------------------------
+
 def handle_query(system, text):
     """
-    Handle a query using V4 blackboard path or V3 fallback.
-    Mirrors the original MemorySystem.query() method exactly.
+    Handle a query using the V4 blackboard path or V3 fallback.
     """
+
     overall_start = time.perf_counter()
+
+    # ------------------------------------------------------------------
+    # Query processing
+    # ------------------------------------------------------------------
+
+    t_query_process = time.perf_counter()
+
     query = system.query_processor.process(text)
 
+    query_process_ms = (
+        time.perf_counter() - t_query_process
+    ) * 1000
+
+    # ------------------------------------------------------------------
     # Embedding
+    # ------------------------------------------------------------------
+
     t0_embed = time.perf_counter()
-    vec = system.embedder.embed(query.normalized_text)
-    embedding_ms = (time.perf_counter() - t0_embed) * 1000
+
+    vec = system.embedder.embed(
+        query.normalized_text
+    )
+
+    embedding_ms = (
+        time.perf_counter() - t0_embed
+    ) * 1000
+
+    # ------------------------------------------------------------------
+    # Query path selection
+    # ------------------------------------------------------------------
 
     if system.use_blackboard and system.scheduler:
-        return _handle_query_blackboard(system, query, vec, embedding_ms, overall_start, text)
-    else:
-        return _handle_query_v3_fallback(system, query, vec, embedding_ms, overall_start)
+        return _handle_query_blackboard(
+            system,
+            query,
+            vec,
+            embedding_ms,
+            overall_start,
+            text,
+            query_process_ms,
+        )
+
+    return _handle_query_v3_fallback(
+        system,
+        query,
+        vec,
+        embedding_ms,
+        overall_start,
+        text,
+        query_process_ms,
+    )
 
 
-def _handle_query_blackboard(system, query, vec, embedding_ms, overall_start, text):
-    """V4 query path using blackboard workers. EXACT COPY."""
+# ---------------------------------------------------------------------------
+# V4 blackboard query path
+# ---------------------------------------------------------------------------
+
+def _handle_query_blackboard(
+    system,
+    query,
+    vec,
+    embedding_ms,
+    overall_start,
+    text,
+    query_process_ms,
+):
+    """
+    V4 query path using blackboard workers and scheduler completion policy.
+    """
+
+    # ------------------------------------------------------------------
+    # Retrieval diagnostics initialized up front.
+    #
+    # This guarantees that the diagnostic contract remains valid even
+    # when the relevance pool satisfies the query and workers are skipped.
+    # ------------------------------------------------------------------
+
+    execution = None
+    scheduler_wait_ms = 0.0
+
+    submitted_sources = set()
+    completed_sources = set()
+    pending_sources = set()
+    failed_sources = set()
+
+    task_source_map = {}
+
+    # ------------------------------------------------------------------
+    # Retrieval boundary
+    #
+    # Everything from routing through candidate construction/type
+    # filtering belongs to the V4 retrieval section.
+    # ------------------------------------------------------------------
+
     t0_retrieval = time.perf_counter()
 
-    # --- Step 1: Get routing configuration for memory type ---
-    memory_type_hint = query.metadata.get("memory_type_hint", "general")
+    # ------------------------------------------------------------------
+    # Step 1: Routing
+    # ------------------------------------------------------------------
 
-    if hasattr(system, 'router') and system.router:
-        route = system.router.route(memory_type_hint)
-        workers_to_use = route.get("workers", ["faiss", "bm25", "graph"])
-        graph_depth = route.get("graph_depth", getattr(settings, "GRAPH_DEPTH", 2))
-        signals = route.get("signals", {})
-        pool = route.get("pool", "memories")
-        fallback_pools = route.get("fallback_pools", [])
-        debug(f"[MemorySystem] Routing: type='{memory_type_hint}', workers={workers_to_use}, depth={graph_depth}")
+    memory_type_hint = query.metadata.get(
+        "memory_type_hint",
+        "general",
+    )
+
+    if hasattr(system, "router") and system.router:
+        route = system.router.route(
+            memory_type_hint
+        )
+
+        workers_to_use = route.get(
+            "workers",
+            ["faiss", "bm25", "graph"],
+        )
+
+        graph_depth = route.get(
+            "graph_depth",
+            getattr(
+                settings,
+                "GRAPH_DEPTH",
+                2,
+            ),
+        )
+
+        signals = route.get(
+            "signals",
+            {},
+        )
+
+        pool = route.get(
+            "pool",
+            "memories",
+        )
+
+        fallback_pools = route.get(
+            "fallback_pools",
+            [],
+        )
+
+        debug(
+            f"[MemorySystem] Routing: "
+            f"type='{memory_type_hint}', "
+            f"workers={workers_to_use}, "
+            f"depth={graph_depth}"
+        )
+
     else:
-        workers_to_use = ["faiss", "bm25", "graph", "phrase", "attribute"]
-        graph_depth = getattr(settings, "GRAPH_DEPTH", 2)
+        workers_to_use = [
+            "faiss",
+            "bm25",
+            "graph",
+            "phrase",
+            "attribute",
+        ]
+
+        graph_depth = getattr(
+            settings,
+            "GRAPH_DEPTH",
+            2,
+        )
+
         signals = {}
         pool = "memories"
         fallback_pools = []
 
-    # --- Step 2: Check relevance pool first ---
+    # Keep this available for future routing diagnostics without changing
+    # current behavior.
+    _ = fallback_pools
+
+    # ------------------------------------------------------------------
+    # Step 2: Relevance pool
+    # ------------------------------------------------------------------
+
     relevance_candidates = []
-    if memory_type_hint != "general" and hasattr(system, 'relevance_manager'):
-        relevance_ids = system.relevance_manager.get_top_relevant_by_type(memory_type_hint, limit=settings.TOP_K)
+
+    if (
+        memory_type_hint != "general"
+        and hasattr(
+            system,
+            "relevance_manager",
+        )
+    ):
+        relevance_ids = (
+            system.relevance_manager
+            .get_top_relevant_by_type(
+                memory_type_hint,
+                limit=settings.TOP_K,
+            )
+        )
+
         if relevance_ids:
-            rows = system.db.fetch_many(relevance_ids)
+            rows = system.db.fetch_many(
+                relevance_ids
+            )
+
             for mem_id, row in rows.items():
                 if row:
-                    memory = system.retrieval._build_memory_record(row)
-                    embedding = system.embedding_cache.get(mem_id) or system.vector_store.get(mem_id)
+                    memory = (
+                        system.retrieval
+                        ._build_memory_record(row)
+                    )
+
+                    embedding = (
+                        system.embedding_cache.get(mem_id)
+                        or system.vector_store.get(mem_id)
+                    )
+
                     relevance_candidates.append(
                         CandidateRecord(
                             memory=memory,
                             distance=0.0,
                             embedding=embedding,
-                            graph_hit=False
+                            graph_hit=False,
                         )
                     )
-            debug(f"[MemorySystem] Relevance pool returned {len(relevance_candidates)} candidates")
+
+            debug(
+                f"[MemorySystem] Relevance pool "
+                f"returned {len(relevance_candidates)} candidates"
+            )
+
         else:
             if pool != "memories":
-                type_rows = system.db.fetch_many_by_type(memory_type_hint, limit=settings.TOP_K)
+                type_rows = (
+                    system.db.fetch_many_by_type(
+                        memory_type_hint,
+                        limit=settings.TOP_K,
+                    )
+                )
             else:
-                type_rows = system.db.fetch_many(list(range(1, settings.TOP_K + 1)))
+                type_rows = system.db.fetch_many(
+                    list(
+                        range(
+                            1,
+                            settings.TOP_K + 1,
+                        )
+                    )
+                )
+
             for row in type_rows:
                 if row:
-                    memory = system.retrieval._build_memory_record(row)
-                    embedding = system.embedding_cache.get(row["id"]) or system.vector_store.get(row["id"])
+                    memory = (
+                        system.retrieval
+                        ._build_memory_record(row)
+                    )
+
+                    embedding = (
+                        system.embedding_cache.get(row["id"])
+                        or system.vector_store.get(row["id"])
+                    )
+
                     relevance_candidates.append(
                         CandidateRecord(
                             memory=memory,
                             distance=0.0,
                             embedding=embedding,
-                            graph_hit=False
+                            graph_hit=False,
                         )
                     )
-            debug(f"[MemorySystem] Type table fallback returned {len(relevance_candidates)} candidates")
 
-    # --- Step 3: If enough relevance candidates, skip workers ---
+            debug(
+                f"[MemorySystem] Type table fallback "
+                f"returned {len(relevance_candidates)} candidates"
+            )
+
+    # ------------------------------------------------------------------
+    # Step 3: Relevance pool can satisfy query by itself
+    # ------------------------------------------------------------------
+
     if len(relevance_candidates) >= settings.TOP_K:
         candidates = relevance_candidates
-        debug("[MemorySystem] Using relevance pool only (skipping workers)")
+
+        debug(
+            "[MemorySystem] Using relevance pool only "
+            "(skipping workers)"
+        )
+
     else:
-        # --- Step 4: Get shards ---
-        use_sharding = getattr(settings, "USE_SHARDING", False)
-        if use_sharding and hasattr(system, 'shard_manager'):
-            shards = system.shard_manager.get_shards_for_query(query, memory_type_hint)
+        # --------------------------------------------------------------
+        # Step 4: Determine shards
+        # --------------------------------------------------------------
+
+        use_sharding = getattr(
+            settings,
+            "USE_SHARDING",
+            False,
+        )
+
+        if (
+            use_sharding
+            and hasattr(
+                system,
+                "shard_manager",
+            )
+        ):
+            shards = (
+                system.shard_manager.get_shards_for_query(
+                    query,
+                    memory_type_hint,
+                )
+            )
+
             num_shards = len(shards)
-            debug(f"[MemorySystem] Using type sharding: {num_shards} shard(s) for type '{memory_type_hint}'")
+
+            debug(
+                f"[MemorySystem] Using type sharding: "
+                f"{num_shards} shard(s) "
+                f"for type '{memory_type_hint}'"
+            )
+
         else:
             shards = [0]
             num_shards = 1
 
-        # --- Step 5: Submit tasks per shard ---
+        # --------------------------------------------------------------
+        # Step 5: Submit retrieval tasks
+        # --------------------------------------------------------------
+
         task_ids = []
-        top_k_per_shard = getattr(settings, "TOP_K_PER_SHARD", 300)
-        graph_limit_per_shard = settings.GRAPH_TOP_K // num_shards if num_shards > 1 else settings.GRAPH_TOP_K
+
+        top_k_per_shard = getattr(
+            settings,
+            "TOP_K_PER_SHARD",
+            300,
+        )
+
+        graph_limit_per_shard = (
+            settings.GRAPH_TOP_K // num_shards
+            if num_shards > 1
+            else settings.GRAPH_TOP_K
+        )
+
+        phrases = query.metadata.get(
+            "phrases",
+            [],
+        )
+
+        subject = query.metadata.get(
+            "subject"
+        )
+
+        attribute = query.metadata.get(
+            "attribute"
+        )
 
         for shard_id in shards:
+
+            # ----------------------------------------------------------
+            # FAISS
+            # ----------------------------------------------------------
+
             if "faiss" in workers_to_use:
-                task_ids.append(
-                    system.scheduler.submit(
-                        "faiss",
-                        {"vector": vec, "top_k": top_k_per_shard,
-                         "shard_id": shard_id, "num_shards": num_shards}
-                    )
+                task_id = system.scheduler.submit(
+                    "faiss",
+                    {
+                        "vector": vec,
+                        "top_k": top_k_per_shard,
+                        "shard_id": shard_id,
+                        "num_shards": num_shards,
+                    },
                 )
-            if system.bm25_ranker and "bm25" in workers_to_use:
-                task_ids.append(
-                    system.scheduler.submit(
-                        "bm25",
-                        {"tokens": query.tokens, "limit": top_k_per_shard,
-                         "shard_id": shard_id, "num_shards": num_shards}
-                    )
+
+                task_ids.append(task_id)
+                task_source_map[task_id] = "faiss"
+                submitted_sources.add("faiss")
+
+            # ----------------------------------------------------------
+            # BM25
+            # ----------------------------------------------------------
+
+            if (
+                system.bm25_ranker
+                and "bm25" in workers_to_use
+            ):
+                task_id = system.scheduler.submit(
+                    "bm25",
+                    {
+                        "tokens": query.tokens,
+                        "limit": top_k_per_shard,
+                        "shard_id": shard_id,
+                        "num_shards": num_shards,
+                    },
                 )
-            if query.entities and "graph" in workers_to_use:
-                task_ids.append(
-                    system.scheduler.submit(
-                        "graph",
-                        {"entities": query.entities, "limit": graph_limit_per_shard,
-                         "shard_id": shard_id, "num_shards": num_shards, "depth": graph_depth}
-                    )
+
+                task_ids.append(task_id)
+                task_source_map[task_id] = "bm25"
+                submitted_sources.add("bm25")
+
+            # ----------------------------------------------------------
+            # Graph
+            # ----------------------------------------------------------
+
+            if (
+                query.entities
+                and "graph" in workers_to_use
+            ):
+                task_id = system.scheduler.submit(
+                    "graph",
+                    {
+                        "entities": query.entities,
+                        "limit": graph_limit_per_shard,
+                        "shard_id": shard_id,
+                        "num_shards": num_shards,
+                        "depth": graph_depth,
+                    },
                 )
-            phrases = query.metadata.get("phrases", [])
-            if phrases and system.inverted_index and "phrase" in workers_to_use:
-                task_ids.append(
-                    system.scheduler.submit(
-                        "phrase",
-                        {"phrases": phrases, "limit": 100 // num_shards,
-                         "shard_id": shard_id, "num_shards": num_shards}
-                    )
+
+                task_ids.append(task_id)
+                task_source_map[task_id] = "graph"
+                submitted_sources.add("graph")
+
+            # ----------------------------------------------------------
+            # Phrase
+            # ----------------------------------------------------------
+
+            if (
+                phrases
+                and system.inverted_index
+                and "phrase" in workers_to_use
+            ):
+                task_id = system.scheduler.submit(
+                    "phrase",
+                    {
+                        "phrases": phrases,
+                        "limit": 100 // num_shards,
+                        "shard_id": shard_id,
+                        "num_shards": num_shards,
+                    },
                 )
-            subject = query.metadata.get("subject")
-            attribute = query.metadata.get("attribute")
-            if subject and attribute and "attribute" in workers_to_use:
-                task_ids.append(
-                    system.scheduler.submit(
-                        "attribute",
-                        {"subject": subject, "attribute": attribute,
-                         "shard_id": shard_id, "num_shards": num_shards}
-                    )
+
+                task_ids.append(task_id)
+                task_source_map[task_id] = "phrase"
+                submitted_sources.add("phrase")
+
+            # ----------------------------------------------------------
+            # Attribute
+            # ----------------------------------------------------------
+
+            if (
+                subject
+                and attribute
+                and "attribute" in workers_to_use
+            ):
+                task_id = system.scheduler.submit(
+                    "attribute",
+                    {
+                        "subject": subject,
+                        "attribute": attribute,
+                        "shard_id": shard_id,
+                        "num_shards": num_shards,
+                    },
                 )
+
+                task_ids.append(task_id)
+                task_source_map[task_id] = "attribute"
+                submitted_sources.add("attribute")
+
+        debug(
+            f"[MemorySystem] Submitted retrieval sources: "
+            f"{sorted(submitted_sources)}"
+        )
+
+        # --------------------------------------------------------------
+        # Step 6: Execute retrieval according to policy
+        # --------------------------------------------------------------
+
+        policy = _build_retrieval_policy(
+            submitted_sources
+        )
+
+        # Hard ceiling is a safety mechanism, NOT the normal completion
+        # mechanism.
+        retrieval_deadline_ms = getattr(
+            settings,
+            "QUERY_RETRIEVAL_DEADLINE_MS",
+            50,
+        )
+
+        retrieval_deadline = (
+            retrieval_deadline_ms / 1000.0
+        )
 
         t_wait = time.perf_counter()
-        completed = system.scheduler.wait_for_tasks(task_ids, timeout=0.05)
-        debug(f"Scheduler wait {(time.perf_counter()-t_wait)*1000:.2f}ms ({'complete' if completed else 'timeout'})")
 
-        worker_results = system.scheduler.results(task_ids)
+        execution = system.scheduler.execute(
+            task_ids,
+            policy=policy,
+            deadline=retrieval_deadline,
+            cancel_pending=False,
+        )
+
+        scheduler_wait_ms = (
+            time.perf_counter() - t_wait
+        ) * 1000
+
+        debug(
+            f"[MemorySystem] Retrieval policy="
+            f"{execution.policy_name}, "
+            f"reason={execution.finish_reason}, "
+            f"completed="
+            f"{len(execution.completed_ids)}/"
+            f"{len(execution.task_ids)}, "
+            f"pending="
+            f"{len(execution.pending_ids)}, "
+            f"wait={scheduler_wait_ms:.2f}ms"
+        )
+
+        # --------------------------------------------------------------
+        # Source-level completion diagnostics
+        # --------------------------------------------------------------
+
+        completed_sources = {
+            task_source_map[task_id]
+            for task_id in execution.completed_ids
+            if task_id in task_source_map
+        }
+
+        pending_sources = {
+            task_source_map[task_id]
+            for task_id in execution.pending_ids
+            if task_id in task_source_map
+        }
+
+        failed_sources = {
+            task_source_map[task_id]
+            for task_id in execution.failed_ids
+            if task_id in task_source_map
+        }
+
+        debug(
+            f"[MemorySystem] Retrieval source state: "
+            f"submitted={sorted(submitted_sources)}, "
+            f"completed={sorted(completed_sources)}, "
+            f"pending={sorted(pending_sources)}, "
+            f"failed={sorted(failed_sources)}"
+        )
+
+        # --------------------------------------------------------------
+        # Step 7: Consume ONLY results completed by policy termination
+        # --------------------------------------------------------------
+
+        worker_results = execution.results
 
         mem_ids = set()
         source_map = {}
@@ -172,50 +640,130 @@ def _handle_query_blackboard(system, query, vec, embedding_ms, overall_start, te
         for result in worker_results:
             if not result:
                 continue
-            source = result["source"]
-            candidates = result["candidates"]
+
+            source = result.get("source")
+
+            result_candidates = result.get(
+                "candidates",
+                [],
+            )
 
             if source == "faiss":
-                for mem_id, dist in candidates:
+                for mem_id, dist in result_candidates:
                     mem_ids.add(mem_id)
-                    source_map[mem_id] = ("faiss", float(dist), False)
-            elif source == "bm25":
-                for mem_id, score in candidates:
-                    mem_ids.add(mem_id)
-                    source_map[mem_id] = ("bm25", 1.0 / (score + 1e-6), False)
-            elif source == "graph":
-                for mem_id in candidates:
-                    mem_ids.add(mem_id)
-                    source_map[mem_id] = ("graph", 0.0, True)
-            elif source == "phrase":
-                for mem_id, score in candidates:
-                    mem_ids.add(mem_id)
-                    source_map[mem_id] = ("phrase", 0.0, False)
-            elif source == "attribute":
-                for mem_id, dist in candidates:
-                    mem_ids.add(mem_id)
-                    source_map[mem_id] = ("attribute", float(dist), False)
 
-        # --- OPTIMIZATION: Cap mem_ids BEFORE DB fetch and Candidate building ---
+                    source_map[mem_id] = (
+                        "faiss",
+                        float(dist),
+                        False,
+                    )
+
+            elif source == "bm25":
+                for mem_id, score in result_candidates:
+                    mem_ids.add(mem_id)
+
+                    source_map[mem_id] = (
+                        "bm25",
+                        1.0 / (score + 1e-6),
+                        False,
+                    )
+
+            elif source == "graph":
+                for mem_id in result_candidates:
+                    mem_ids.add(mem_id)
+
+                    source_map[mem_id] = (
+                        "graph",
+                        0.0,
+                        True,
+                    )
+
+            elif source == "phrase":
+                for mem_id, score in result_candidates:
+                    mem_ids.add(mem_id)
+
+                    source_map[mem_id] = (
+                        "phrase",
+                        0.0,
+                        False,
+                    )
+
+            elif source == "attribute":
+                for mem_id, dist in result_candidates:
+                    mem_ids.add(mem_id)
+
+                    source_map[mem_id] = (
+                        "attribute",
+                        float(dist),
+                        False,
+                    )
+
+        # --------------------------------------------------------------
+        # Step 8: Cap candidates BEFORE DB fetch
+        # --------------------------------------------------------------
+
         mem_id_list = list(mem_ids)
+
         original_count = len(mem_id_list)
+
         if len(mem_id_list) > RANKING_CANDIDATE_LIMIT:
-            mem_id_list = mem_id_list[:RANKING_CANDIDATE_LIMIT]
-            debug(f"[MemorySystem] Capped mem_ids from {original_count} to {len(mem_id_list)} before DB fetch", category="system")
+            mem_id_list = mem_id_list[
+                :RANKING_CANDIDATE_LIMIT
+            ]
+
+            debug(
+                f"[MemorySystem] Capped mem_ids "
+                f"from {original_count} "
+                f"to {len(mem_id_list)} "
+                f"before DB fetch",
+                category="system",
+            )
+
+        # --------------------------------------------------------------
+        # Database fetch
+        # --------------------------------------------------------------
 
         t_db = time.perf_counter()
-        rows = system.db.fetch_many(mem_id_list)
-        database_ms = (time.perf_counter() - t_db) * 1000
 
-        # --- Now build CandidateRecords only for the capped list ---
+        rows = system.db.fetch_many(
+            mem_id_list
+        )
+
+        database_ms = (
+            time.perf_counter() - t_db
+        ) * 1000
+
+        # --------------------------------------------------------------
+        # Candidate construction
+        # --------------------------------------------------------------
+
         worker_candidates = []
+
         for mem_id in mem_id_list:
             row = rows.get(mem_id)
+
             if row is None:
                 continue
-            source, dist, graph_hit = source_map.get(mem_id, (None, 0.0, False))
-            memory = system.retrieval._build_memory_record(row)
-            embedding = system.embedding_cache.get(mem_id) or system.vector_store.get(mem_id)
+
+            source, dist, graph_hit = source_map.get(
+                mem_id,
+                (
+                    None,
+                    0.0,
+                    False,
+                ),
+            )
+
+            memory = (
+                system.retrieval
+                ._build_memory_record(row)
+            )
+
+            embedding = (
+                system.embedding_cache.get(mem_id)
+                or system.vector_store.get(mem_id)
+            )
+
             worker_candidates.append(
                 CandidateRecord(
                     memory=memory,
@@ -225,102 +773,471 @@ def _handle_query_blackboard(system, query, vec, embedding_ms, overall_start, te
                 )
             )
 
-        # --- Step 6: Merge candidates ---
-        candidates = relevance_candidates + worker_candidates
+        # --------------------------------------------------------------
+        # Step 9: Merge candidates
+        # --------------------------------------------------------------
+
+        candidates = (
+            relevance_candidates
+            + worker_candidates
+        )
+
         seen = set()
         unique_candidates = []
-        for c in candidates:
-            if c.memory.id not in seen:
-                seen.add(c.memory.id)
-                unique_candidates.append(c)
+
+        for candidate in candidates:
+            if candidate.memory.id in seen:
+                continue
+
+            seen.add(candidate.memory.id)
+            unique_candidates.append(candidate)
+
         candidates = unique_candidates
 
-        debug(f"[MemorySystem] Total candidates for ranking: {len(candidates)} (relevance: {len(relevance_candidates)}, workers: {len(worker_candidates)})")
+        debug(
+            f"[MemorySystem] Total candidates "
+            f"for ranking: {len(candidates)} "
+            f"(relevance: "
+            f"{len(relevance_candidates)}, "
+            f"workers: {len(worker_candidates)})"
+        )
 
-    # --- Step 7: Pass signals ---
+    # ------------------------------------------------------------------
+    # Step 10: Pass routing signals
+    # ------------------------------------------------------------------
+
     if signals:
         query.metadata["routing_signals"] = signals
         query.metadata["routing_pool"] = pool
 
-    # --- Step 8: Type Filtering ---
-    if memory_type_hint and memory_type_hint != "general":
-        filtered = [c for c in candidates if c.memory.memory_type == memory_type_hint]
+    # ------------------------------------------------------------------
+    # Step 11: Type filtering
+    # ------------------------------------------------------------------
+
+    if (
+        memory_type_hint
+        and memory_type_hint != "general"
+    ):
+        filtered = [
+            candidate
+            for candidate in candidates
+            if candidate.memory.memory_type
+            == memory_type_hint
+        ]
+
         if filtered:
             candidates = filtered
-            debug(f"[MemorySystem] Final type filter: {len(candidates)} candidates of type '{memory_type_hint}'")
-        else:
-            debug(f"[MemorySystem] No candidates of type '{memory_type_hint}', keeping all")
 
-    faiss_ms = (time.perf_counter() - t0_retrieval) * 1000
+            debug(
+                f"[MemorySystem] Final type filter: "
+                f"{len(candidates)} candidates "
+                f"of type '{memory_type_hint}'"
+            )
+
+        else:
+            debug(
+                f"[MemorySystem] No candidates "
+                f"of type '{memory_type_hint}', "
+                f"keeping all"
+            )
+
+    # ------------------------------------------------------------------
+    # Retrieval timing boundary
+    # ------------------------------------------------------------------
+
+    retrieval_ms = (
+        time.perf_counter() - t0_retrieval
+    ) * 1000
+
+    # ------------------------------------------------------------------
+    # Ranking
+    # ------------------------------------------------------------------
 
     t_rank = time.perf_counter()
-    results, ranking_diag = system.pipeline.run(query, candidates)
-    ranking_ms = (time.perf_counter() - t_rank) * 1000
 
-    # --- Build response (only top 10) ---
-    t_format = time.perf_counter()
-    response = build_response(results, limit=10)
-    formatting_ms = (time.perf_counter() - t_format) * 1000
+    results, ranking_diag = system.pipeline.run(
+        query,
+        candidates,
+    )
 
-    # Record feedback using the original text
-    system.query_history.record(text, response)
+    ranking_ms = (
+        time.perf_counter() - t_rank
+    ) * 1000
+
+    # ------------------------------------------------------------------
+    # Response
+    # ------------------------------------------------------------------
+
+    t_response = time.perf_counter()
+
+    response = build_response(
+        results,
+        limit=100,
+    )
+
+    response_ms = (
+        time.perf_counter() - t_response
+    ) * 1000
+
+    # ------------------------------------------------------------------
+    # Feedback
+    # ------------------------------------------------------------------
+
+    t_feedback = time.perf_counter()
+
+    system.query_history.record(
+        text,
+        response,
+    )
+
     if response:
         top_result = response[0]
-        system.feedback.record_click(top_result["id"], text)
 
-    total_query_ms = (time.perf_counter() - overall_start) * 1000
+        system.feedback.record_click(
+            top_result["id"],
+            text,
+        )
+
+    feedback_ms = (
+        time.perf_counter() - t_feedback
+    ) * 1000
+
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+
+    total_query_ms = (
+        time.perf_counter() - overall_start
+    ) * 1000
 
     return {
         "results": response,
         "diagnostics": {
             "candidate_count": len(candidates),
             "returned_count": len(response),
-            "embedding_ms": round(embedding_ms, 3),
-            "faiss_ms": round(faiss_ms, 3),
-            "database_ms": round(database_ms, 3),
-            "ranking_ms": round(ranking_ms, 3),
-            "before_mmr": ranking_diag.get("before_mmr"),
-            "after_mmr": ranking_diag.get("after_mmr"),
-            "mmr_changed": ranking_diag.get("mmr_changed", False),
-            "mmr_moves": ranking_diag.get("mmr_moves", 0),
-            "formatting_ms": round(formatting_ms, 3),
-            "total_query_ms": round(total_query_ms, 3),
+
+            # Precise timing boundaries.
+            "query_process_ms": round(
+                query_process_ms,
+                3,
+            ),
+            "embedding_ms": round(
+                embedding_ms,
+                3,
+            ),
+            "retrieval_ms": round(
+                retrieval_ms,
+                3,
+            ),
+            "database_ms": round(
+                database_ms,
+                3,
+            ),
+            "ranking_ms": round(
+                ranking_ms,
+                3,
+            ),
+            "response_ms": round(
+                response_ms,
+                3,
+            ),
+            "feedback_ms": round(
+                feedback_ms,
+                3,
+            ),
+
+            # Preserve the existing diagnostic name so existing
+            # benchmark/reporting consumers do not break.
+            "formatting_ms": round(
+                response_ms,
+                3,
+            ),
+
+            "total_query_ms": round(
+                total_query_ms,
+                3,
+            ),
+
+            # Existing ranking diagnostics.
+            "before_mmr": ranking_diag.get(
+                "before_mmr"
+            ),
+            "after_mmr": ranking_diag.get(
+                "after_mmr"
+            ),
+            "mmr_changed": ranking_diag.get(
+                "mmr_changed",
+                False,
+            ),
+            "mmr_moves": ranking_diag.get(
+                "mmr_moves",
+                0,
+            ),
+
+            # Existing scheduler diagnostics.
+            "retrieval_policy": (
+                execution.policy_name
+                if execution is not None
+                else None
+            ),
+            "retrieval_finish_reason": (
+                execution.finish_reason
+                if execution is not None
+                else None
+            ),
+            "retrieval_completed": (
+                len(execution.completed_ids)
+                if execution is not None
+                else 0
+            ),
+            "retrieval_pending": (
+                len(execution.pending_ids)
+                if execution is not None
+                else 0
+            ),
+            "retrieval_failed": (
+                len(execution.failed_ids)
+                if execution is not None
+                else 0
+            ),
+            "retrieval_wait_ms": round(
+                scheduler_wait_ms,
+                3,
+            ),
+
+            # New source-level scheduler diagnostics.
+            "retrieval_submitted_sources": sorted(
+                submitted_sources
+            ),
+            "retrieval_completed_sources": sorted(
+                completed_sources
+            ),
+            "retrieval_pending_sources": sorted(
+                pending_sources
+            ),
+            "retrieval_failed_sources": sorted(
+                failed_sources
+            ),
         },
     }
 
 
-def _handle_query_v3_fallback(system, query, vec, embedding_ms, overall_start):
-    """V3 fallback path. EXACT COPY."""
+# ---------------------------------------------------------------------------
+# V3 fallback
+# ---------------------------------------------------------------------------
+
+def _handle_query_v3_fallback(
+    system,
+    query,
+    vec,
+    embedding_ms,
+    overall_start,
+    text,
+    query_process_ms,
+):
+    """
+    V3 fallback path.
+
+    Existing V3 diagnostics contract is preserved through
+    build_diagnostics_v3(). Additional timing diagnostics are appended
+    afterward rather than changing that function's signature.
+    """
+
+    # ------------------------------------------------------------------
+    # Retrieval
+    # ------------------------------------------------------------------
+
+    t0_retrieval = time.perf_counter()
+
+    # Existing FAISS boundary.
     t0_faiss = time.perf_counter()
-    ids, distances = system.vector_store.search(vec)
-    faiss_ms = (time.perf_counter() - t0_faiss) * 1000
 
+    ids, distances = system.vector_store.search(
+        vec
+    )
+
+    faiss_ms = (
+        time.perf_counter() - t0_faiss
+    ) * 1000
+
+    # Existing DB/retrieval boundary.
     t0_db = time.perf_counter()
-    candidates = system.retrieval.retrieve(query, ids, distances)
-    database_ms = (time.perf_counter() - t0_db) * 1000
 
-    # --- OPTIMIZATION: Cap candidates before expensive ranking ---
+    candidates = system.retrieval.retrieve(
+        query,
+        ids,
+        distances,
+    )
+
+    database_ms = (
+        time.perf_counter() - t0_db
+    ) * 1000
+
+    retrieval_ms = (
+        time.perf_counter() - t0_retrieval
+    ) * 1000
+
+    # ------------------------------------------------------------------
+    # Cap candidates before expensive ranking
+    # ------------------------------------------------------------------
+
     original_count = len(candidates)
-    if len(candidates) > RANKING_CANDIDATE_LIMIT:
-        candidates = candidates[:RANKING_CANDIDATE_LIMIT]
-        debug(f"[MemorySystem] Capped candidates from {original_count} to {len(candidates)} for ranking (V3 fallback)", category="system")
 
-    debug("passing to pipeline:", len(candidates))
+    if len(candidates) > RANKING_CANDIDATE_LIMIT:
+        candidates = candidates[
+            :RANKING_CANDIDATE_LIMIT
+        ]
+
+        debug(
+            f"[MemorySystem] Capped candidates "
+            f"from {original_count} "
+            f"to {len(candidates)} "
+            f"for ranking "
+            f"(V3 fallback)",
+            category="system",
+        )
+
+    debug(
+        "passing to pipeline:",
+        len(candidates),
+    )
+
+    # ------------------------------------------------------------------
+    # Ranking
+    # ------------------------------------------------------------------
 
     t0_rank = time.perf_counter()
-    results, ranking_diag = system.pipeline.run(query, candidates)
-    ranking_ms = (time.perf_counter() - t0_rank) * 1000
 
-    t_format = time.perf_counter()
-    response = build_response(results, limit=10)
-    formatting_ms = (time.perf_counter() - t_format) * 1000
+    results, ranking_diag = system.pipeline.run(
+        query,
+        candidates,
+    )
 
-    total_query_ms = (time.perf_counter() - overall_start) * 1000
+    ranking_ms = (
+        time.perf_counter() - t0_rank
+    ) * 1000
+
+    # ------------------------------------------------------------------
+    # Response
+    # ------------------------------------------------------------------
+
+    t_response = time.perf_counter()
+
+    response = build_response(
+        results,
+        limit=10,
+    )
+
+    response_ms = (
+        time.perf_counter() - t_response
+    ) * 1000
+
+    # ------------------------------------------------------------------
+    # Feedback
+    # ------------------------------------------------------------------
+
+    t_feedback = time.perf_counter()
+
+    system.query_history.record(
+        text,
+        response,
+    )
+
+    if response:
+        top_result = response[0]
+
+        system.feedback.record_click(
+            top_result["id"],
+            text,
+        )
+
+    feedback_ms = (
+        time.perf_counter() - t_feedback
+    ) * 1000
+
+    # ------------------------------------------------------------------
+    # Total
+    # ------------------------------------------------------------------
+
+    total_query_ms = (
+        time.perf_counter() - overall_start
+    ) * 1000
+
+    diagnostics = build_diagnostics_v3(
+        candidates,
+        response,
+        embedding_ms,
+        faiss_ms,
+        database_ms,
+        ranking_ms,
+        response_ms,
+        total_query_ms,
+    )
+
+    # Preserve the V3 builder's existing contract while adding the
+    # diagnostics needed by the benchmark.
+    diagnostics.update(
+        {
+            "query_process_ms": round(
+                query_process_ms,
+                3,
+            ),
+            "embedding_ms": round(
+                embedding_ms,
+                3,
+            ),
+            "retrieval_ms": round(
+                retrieval_ms,
+                3,
+            ),
+            "database_ms": round(
+                database_ms,
+                3,
+            ),
+            "ranking_ms": round(
+                ranking_ms,
+                3,
+            ),
+            "response_ms": round(
+                response_ms,
+                3,
+            ),
+            "feedback_ms": round(
+                feedback_ms,
+                3,
+            ),
+
+            # Preserve existing naming.
+            "formatting_ms": round(
+                response_ms,
+                3,
+            ),
+
+            "total_query_ms": round(
+                total_query_ms,
+                3,
+            ),
+
+            # V3 has no scheduler/source completion state.
+            "retrieval_policy": None,
+            "retrieval_finish_reason": None,
+            "retrieval_completed": 0,
+            "retrieval_pending": 0,
+            "retrieval_failed": 0,
+            "retrieval_wait_ms": 0.0,
+
+            "retrieval_submitted_sources": [
+                "faiss",
+            ],
+            "retrieval_completed_sources": [
+                "faiss",
+            ],
+            "retrieval_pending_sources": [],
+            "retrieval_failed_sources": [],
+        }
+    )
 
     return {
         "results": response,
-        "diagnostics": build_diagnostics_v3(
-            candidates, response, embedding_ms, faiss_ms, database_ms,
-            ranking_ms, formatting_ms, total_query_ms
-        )
+        "diagnostics": diagnostics,
     }

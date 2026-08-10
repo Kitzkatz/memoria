@@ -8,6 +8,7 @@ class Embedder:
         model_name = model_name or settings.EMBEDDING_MODEL
         try:
             self.model = SentenceTransformer(model_name)
+            self._query_cache = {}  # ← NEW: Query embedding cache
             debug(f"[Embedder] Loaded model: {model_name}")
         except Exception as e:
             debug(f"[Embedder] Failed to load model: {e}")
@@ -17,30 +18,45 @@ class Embedder:
         """Embed a single text string."""
         if not text:
             return []
-        return self.model.encode(text).tolist()
+
+        # ← NEW: Check cache
+        if text in self._query_cache:
+            return self._query_cache[text]
+
+        # Compute and cache
+        vec = self.model.encode(text).tolist()
+        self._query_cache[text] = vec
+        return vec
 
     def embed_many(self, texts: list):
         """Embed multiple texts in batch for efficiency."""
         if not texts:
             return []
-        # Filter out empty texts
-        valid_texts = [t for t in texts if t]
-        if not valid_texts:
-            return [[] for _ in texts]
 
-        # Batch encode
-        embeddings = self.model.encode(valid_texts).tolist()
-
-        # Map back to original indices (empty texts get empty embeddings)
         result = []
-        idx = 0
-        for text in texts:
-            if text:
-                result.append(embeddings[idx])
-                idx += 1
-            else:
+        to_encode = []
+        to_encode_indices = []
+
+        for i, text in enumerate(texts):
+            if not text:
                 result.append([])
+            elif text in self._query_cache:
+                result.append(self._query_cache[text])
+            else:
+                to_encode.append(text)
+                to_encode_indices.append(i)
+
+        if to_encode:
+            embeddings = self.model.encode(to_encode).tolist()
+            for i, vec in zip(to_encode_indices, embeddings):
+                self._query_cache[texts[i]] = vec
+                result.append(vec)
+
         return result
 
+    def clear_cache(self):
+        """Clear the query embedding cache."""
+        self._query_cache.clear()
+
     def __repr__(self) -> str:
-        return f"Embedder(model={settings.EMBEDDING_MODEL})"
+        return f"Embedder(model={settings.EMBEDDING_MODEL}, cache_size={len(self._query_cache)})"
