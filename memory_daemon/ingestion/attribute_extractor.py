@@ -3,6 +3,18 @@ import re
 from ranking.attribute_map import ATTRIBUTE_MAP
 
 
+# Map extracted attributes to actual memory types
+ATTRIBUTE_TYPE_MAPPING = {
+    "likes": "semantic",
+    "vehicle": "semantic",
+    "city": "semantic",
+    "career": "semantic",
+    "pet": "semantic",
+    "education": "semantic",
+    "goal": "general",
+}
+
+
 class AttributeExtractor:
     """
     Deterministic structured fact extractor.
@@ -50,7 +62,7 @@ class AttributeExtractor:
 
         Example:
             text = "Alex likes coffee"
-            returns: ("likes", {"subject": "Alex", "attribute": "likes", "value": "coffee"}, [{"source": "Alex", "relation": "likes", "target": "coffee"}])
+            returns: ("semantic", {"subject": "Alex", "attribute": "likes", "value": "coffee"}, [{"source": "Alex", "relation": "likes", "target": "coffee"}])
         """
         if not text:
             return "semantic", {}, []
@@ -72,7 +84,8 @@ class AttributeExtractor:
             if not subject or not value:
                 continue
 
-            memory_type = attribute
+            # Map attribute to actual memory type
+            memory_type = ATTRIBUTE_TYPE_MAPPING.get(attribute, "semantic")
             metadata["subject"] = subject
             metadata["attribute"] = attribute
             metadata["value"] = value

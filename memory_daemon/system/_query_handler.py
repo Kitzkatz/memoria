@@ -6,10 +6,7 @@ polling/quiet-period wait.
 
 Retrieval policy:
 
-- Prefer FAISS as the mandatory primary source when submitted.
-- Require at least two distinct retrieval sources when available.
-- If only one source is actually submitted, accept that source.
-- Stop as soon as the policy is satisfied.
+- Require ALL submitted sources to complete.
 - Apply a hard retrieval deadline as a safety ceiling.
 - Workers still running after the policy finishes are not included in
   this query's result set.
@@ -41,22 +38,11 @@ def _build_retrieval_policy(submitted_sources):
     """
     Build the completion policy for one retrieval pass.
 
-    The scheduler only knows about generic task/source completion.
-    This function translates MemorySystem's retrieval requirements into
-    that generic scheduler policy.
-
     Policy:
-
-        1. FAISS is the primary semantic retrieval source when submitted.
-        2. Require two distinct sources when at least two are available.
-        3. If only one source was actually submitted, that source is enough.
-        4. Do not wait for every worker simply because one is slow.
-
-    IMPORTANT:
-        submitted_sources represents sources that were actually submitted
-        for this query, not merely sources configured by the router.
+        - Require ALL submitted sources to complete.
+        - If only one source was submitted, that source is enough.
+        - Do not finish early just because some sources are slow.
     """
-
     available_sources = set(submitted_sources)
 
     if not available_sources:
@@ -67,13 +53,12 @@ def _build_retrieval_policy(submitted_sources):
 
     required_sources = set()
 
-    # FAISS remains the primary semantic source whenever it was actually
-    # submitted for this query.
+    # FAISS is mandatory when submitted
     if "faiss" in available_sources:
         required_sources.add("faiss")
 
-    # Require diversity when multiple retrieval modalities actually exist.
-    min_sources = min(2, len(available_sources))
+    # Require ALL sources to complete
+    min_sources = len(available_sources)
 
     return SourceCoveragePolicy(
         required_sources=required_sources,
@@ -566,7 +551,7 @@ def _handle_query_blackboard(
         retrieval_deadline_ms = getattr(
             settings,
             "QUERY_RETRIEVAL_DEADLINE_MS",
-            50,
+            100,
         )
 
         retrieval_deadline = (
@@ -903,6 +888,25 @@ def _handle_query_blackboard(
     ) * 1000
 
     # ------------------------------------------------------------------
+    # Auto-store
+    # ------------------------------------------------------------------
+
+    t_auto_store = time.perf_counter()
+    auto_store_stored = 0
+
+    if hasattr(system, "auto_store") and system.auto_store:
+        if settings.AUTO_STORE_MEMORIES:
+            auto_store_stored = system.auto_store.process_results(
+                text,
+                response,
+                memory_type_hint or "chat"
+            )
+
+    auto_store_ms = (
+        time.perf_counter() - t_auto_store
+    ) * 1000
+
+    # ------------------------------------------------------------------
     # Diagnostics
     # ------------------------------------------------------------------
 
@@ -943,6 +947,10 @@ def _handle_query_blackboard(
             ),
             "feedback_ms": round(
                 feedback_ms,
+                3,
+            ),
+            "auto_store_ms": round(
+                auto_store_ms,
                 3,
             ),
 
@@ -1018,6 +1026,9 @@ def _handle_query_blackboard(
             "retrieval_failed_sources": sorted(
                 failed_sources
             ),
+
+            # Auto-store diagnostics.
+            "auto_store_stored": auto_store_stored,
         },
     }
 
@@ -1156,6 +1167,25 @@ def _handle_query_v3_fallback(
     ) * 1000
 
     # ------------------------------------------------------------------
+    # Auto-store (V3 fallback)
+    # ------------------------------------------------------------------
+
+    t_auto_store = time.perf_counter()
+    auto_store_stored = 0
+
+    if hasattr(system, "auto_store") and system.auto_store:
+        if settings.AUTO_STORE_MEMORIES:
+            auto_store_stored = system.auto_store.process_results(
+                text,
+                response,
+                "general"
+            )
+
+    auto_store_ms = (
+        time.perf_counter() - t_auto_store
+    ) * 1000
+
+    # ------------------------------------------------------------------
     # Total
     # ------------------------------------------------------------------
 
@@ -1206,6 +1236,10 @@ def _handle_query_v3_fallback(
                 feedback_ms,
                 3,
             ),
+            "auto_store_ms": round(
+                auto_store_ms,
+                3,
+            ),
 
             # Preserve existing naming.
             "formatting_ms": round(
@@ -1234,6 +1268,9 @@ def _handle_query_v3_fallback(
             ],
             "retrieval_pending_sources": [],
             "retrieval_failed_sources": [],
+
+            # Auto-store diagnostics.
+            "auto_store_stored": auto_store_stored,
         }
     )
 

@@ -15,10 +15,28 @@ class MemoryController:
         self.goals = GoalTracker(db)
         self.llm = llm
 
-    def remember(self, text: str):
+    def remember(self, text: str, metadata: dict = None):
+        """
+        Store a memory.
+
+        Args:
+            text: Memory text
+            metadata: Optional metadata dict (session_id, etc.)
+        """
+        if metadata:
+            return self.system.store(text, metadata=metadata)
         return self.system.store(text)
 
-    def remember_many(self, texts):
+    def remember_many(self, texts, metadatas=None):
+        """
+        Store multiple memories.
+
+        Args:
+            texts: List of memory texts
+            metadatas: Optional list of metadata dicts (one per text)
+        """
+        if metadatas:
+            return self.system.store_many(texts, metadatas=metadatas)
         return self.system.store_many(texts)
 
     def set_goal(self, goal, progress="started"):
@@ -70,5 +88,3 @@ class MemoryController:
 ##        if not self.llm:
 ##            return "LLM not configured."
 ##        return self.llm.chat(prompt)
-
-

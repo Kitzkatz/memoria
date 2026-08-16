@@ -4,6 +4,9 @@ import math
 import time as time_module
 from cache.config import settings
 from routing.matrix import ROUTING_MATRIX
+from ranking.signal_router import SignalRouter
+from ranking.signal_registry import get_registry
+from core.logger import debug
 
 
 class MemoryRanker:
@@ -18,44 +21,116 @@ class MemoryRanker:
         else:
             self.enable_diagnostics = enable_diagnostics
 
+        # ---- Signal Registry Integration ----
+        self.registry = get_registry()
+        self.signal_router = SignalRouter(self.registry)
+
+        # Fallback: keep default weights from routing matrix
         general_config = ROUTING_MATRIX.get("general", {})
-        default_signals = general_config.get("signals", {})
-        self._default_weights = default_signals.copy()
+        self._default_weights = general_config.get("signals", {}).copy()
 
         self._timing_accumulator = defaultdict(float)
         self._candidate_count = 0
 
     # ---------------------------------
-    # Recency
+    # Recency (PER-TYPE: different decay rates)
     # ---------------------------------
 
-    def recency_score(self, created_at, decay_days=30):
+    def recency_score(self, created_at, memory_type="general", decay_days=30):
+        """
+        Per-type recency scoring:
+        - Episodic: Fast decay (7 days) — events matter most when recent
+        - Procedural: Moderate decay (30 days) — skills fade but persist
+        - Semantic: Slow decay (365 days) — facts are permanent
+        - Code: Minimal decay (730 days) — code doesn't age
+        - Science: Moderate decay (90 days) — science evolves
+        - General: Default decay (30 days)
+        """
         try:
             created = datetime.fromisoformat(created_at)
             now = datetime.now(timezone.utc)
             age = max(0, (now - created).days)
+
+            # Episodic: fast decay (7 days)
+            if memory_type == "episodic":
+                return math.exp(-age / 7)
+            
+            # Code: minimal decay (730 days)
+            if memory_type == "code":
+                return math.exp(-age / 730)
+            
+            # Procedural: moderate decay (30 days)
+            if memory_type == "procedural":
+                return math.exp(-age / 30)
+            
+            # Science: moderate decay (90 days)
+            if memory_type == "science":
+                return math.exp(-age / 90)
+            
+            # Semantic: slow decay (365 days)
+            if memory_type == "semantic":
+                return math.exp(-age / 365)
+
+            # Default
             return math.exp(-age / decay_days)
         except Exception:
             return 0.5
 
     # ---------------------------------
-    # Token similarity
+    # Token similarity (PER-TYPE: query frequency OR union ratio)
     # ---------------------------------
 
-    def token_overlap(self, query_tokens, memory_tokens):
+    def token_overlap(self, query_tokens, memory_tokens, memory_type="general"):
+        """
+        Per-type token scoring:
+        - Episodic, Procedural, Code: Query frequency (exact matches)
+        - Semantic, Science, General: Union ratio (conceptual overlap)
+        """
         if not query_tokens or not memory_tokens:
             return 0.0
+
         q = set(query_tokens)
         m = set(memory_tokens)
-        intersection = len(q & m)
-        union = len(q | m)
-        return intersection / max(union, 1)
 
-    def entity_overlap(self, query_entities, memory_entities):
+        # Query frequency for exact-match types
+        if memory_type in ["episodic", "procedural", "code"]:
+            matches = sum(1 for token in q if token in m)
+            return matches / max(len(q), 1)
+
+        # Union ratio for conceptual types
+        else:  # semantic, science, general
+            intersection = len(q & m)
+            union = len(q | m)
+            return intersection / max(union, 1)
+
+    # ---------------------------------
+    # Entity overlap (PER-TYPE: different matching strategies)
+    # ---------------------------------
+
+    def entity_overlap(self, query_entities, memory_entities, memory_type="general"):
+        """
+        Per-type entity scoring:
+        - Code: Exact symbol matching (functions, classes, imports)
+        - Science: Conceptual entity matching (formulas, theories)
+        - Others: Standard overlap ratio
+        """
         if not query_entities or not memory_entities:
             return 0.0
+
         q = {str(e).lower() for e in query_entities}
         m = {str(e).lower() for e in memory_entities}
+
+        # Code: exact symbol matching (functions, classes, imports)
+        if memory_type == "code":
+            matches = sum(1 for e in q if e in m)
+            return matches / max(len(q), 1)
+
+        # Science: conceptual entity matching
+        if memory_type == "science":
+            overlap = len(q & m)
+            return overlap / max(len(q), 1)
+
+        # Default: overlap ratio
         return len(q & m) / max(len(q), 1)
 
     # ---------------------------------
@@ -90,6 +165,22 @@ class MemoryRanker:
         return 1.0 / (best_distance + 1e-6)
 
     def get_weights_for_type(self, query):
+        """
+        Get weights from the signal registry based on memory type.
+        Falls back to routing matrix if registry is not available.
+        """
+        # First try: get memory type from query
+        memory_type = query.metadata.get("memory_type_hint", "general")
+        
+        # Try registry
+        try:
+            weights = self.signal_router.get_active_signals(memory_type)
+            if weights:
+                return weights
+        except Exception:
+            pass
+        
+        # Fallback: routing matrix
         routing_signals = query.metadata.get("routing_signals")
         if routing_signals and isinstance(routing_signals, dict):
             merged = self._default_weights.copy()
@@ -97,6 +188,7 @@ class MemoryRanker:
                 if key in merged:
                     merged[key] = value
             return merged
+        
         return self._default_weights
 
     # ---------------------------------
@@ -108,26 +200,28 @@ class MemoryRanker:
 
         weights = self.get_weights_for_type(query)
 
+        # Get memory type for per-type scoring
+        memory_type = candidate.memory.memory_type or "general"
+
+        # Skip signals that don't help this type
+        # Check weights to see if signals are active
+        skip_tfidf = memory_type in ["episodic"] or weights.get("tfidf", 0.0) <= 0.001
+        skip_graph = memory_type in ["semantic", "general"] or weights.get("graph_distance", 0.0) <= 0.001
+
         t_semantic = time_module.perf_counter()
         semantic = self.semantic_score(candidate.distance)
         t_importance = time_module.perf_counter()
         importance = max(0.0, min(float(candidate.memory.importance), 1.0))
         t_recency = time_module.perf_counter()
-        recency = self.recency_score(candidate.memory.created_at)
+        recency = self.recency_score(candidate.memory.created_at, memory_type)
         t_token = time_module.perf_counter()
-        token = self.token_overlap(query.tokens, candidate.memory.tokens)
+        token = self.token_overlap(query.tokens, candidate.memory.tokens, memory_type)
         t_entity = time_module.perf_counter()
-        entity = self.entity_overlap(query.entities, candidate.memory.entities)
+        entity = self.entity_overlap(query.entities, candidate.memory.entities, memory_type)
         t_tfidf = time_module.perf_counter()
-
-        tfidf = 0.0
-        if weights.get("tfidf", 0.0) > 0:
-            tfidf = self.tfidf_score(query.tokens, candidate.memory.tokens)
+        tfidf = self.tfidf_score(query.tokens, candidate.memory.tokens) if not skip_tfidf else 0.0
         t_graph = time_module.perf_counter()
-
-        graph_dist = 0.0
-        if weights.get("graph_distance", 0.0) > 0:
-            graph_dist = self.graph_distance_score(query.entities, candidate.memory.entities)
+        graph_dist = self.graph_distance_score(query.entities, candidate.memory.entities) if not skip_graph else 0.0
         t_subject = time_module.perf_counter()
 
         subject = 0.0

@@ -168,12 +168,27 @@ class MemoryExtractor:
             return {}
 
     # ---------------------------------
-    # Public Entry
+    # Public Entry (with metadata support)
     # ---------------------------------
 
-    def extract(self, text: str) -> MemoryRecord:
+    def extract(self, text: str, metadata: dict = None) -> MemoryRecord:
+        """
+        Extract a memory record from text with optional metadata.
+
+        Args:
+            text: The text to extract from
+            metadata: Optional metadata dict to merge into the record
+
+        Returns:
+            MemoryRecord
+        """
         record = self.base_extract(text)
 
+        # Merge provided metadata
+        if metadata:
+            record.metadata.update(metadata)
+
+        # LLM enrichment (if available)
         if self.llm:
             try:
                 data = self.llm_extract(text)

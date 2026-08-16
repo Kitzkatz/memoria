@@ -61,17 +61,12 @@ class BenchmarkRunner:
     def find_expected_rank(self, results, expected):
         """
         Find the rank of the expected memory in results.
-
-        Args:
-            results: List of result dicts
-            expected: Expected text string
-
-        Returns:
-            int: Rank (1-indexed) or None if not found
+        Checks text AND metadata for matches.
         """
         expected = str(expected).lower()
 
         for result in results:
+            # Check text first (existing behavior)
             text = (
                 result.get("normalized_text")
                 or result.get("text", "")
@@ -79,6 +74,45 @@ class BenchmarkRunner:
 
             if expected in text:
                 return result.get("rank")
+
+            # Check metadata for session IDs and other fields
+            metadata = result.get("metadata", {})
+            if metadata:
+                # Check all string values in metadata
+                for value in metadata.values():
+                    if isinstance(value, str) and expected in value.lower():
+                        return result.get("rank")
+                    # Check if value is a list of strings
+                    if isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, str) and expected in item.lower():
+                                return result.get("rank")
+
+        return None
+
+    def find_expected_by_ids(self, results, expected_ids):
+        """
+        Find the rank of a memory by checking metadata IDs.
+
+        Args:
+            results: List of result dicts
+            expected_ids: List of metadata IDs to match
+
+        Returns:
+            int: Rank (1-indexed) or None if not found
+        """
+        if not expected_ids:
+            return None
+
+        expected_ids = [str(id) for id in expected_ids]
+
+        for result in results:
+            metadata = result.get("metadata", {})
+            # Try different possible ID fields
+            for key in ["id", "session_id", "question_id", "answer_id"]:
+                if key in metadata:
+                    if str(metadata[key]) in expected_ids:
+                        return result.get("rank")
 
         return None
 
@@ -118,9 +152,15 @@ class BenchmarkRunner:
         for index, item in enumerate(questions, start=1):
             query = item.get("query")
             expected = item.get("expected")
+            expected_ids = item.get("expected_ids", [])
 
-            if not query or not expected:
-                debug(f"[Benchmark] Skipping item {index}: missing query or expected", category="benchmark")
+            if not query:
+                debug(f"[Benchmark] Skipping item {index}: missing query", category="benchmark")
+                continue
+
+            # For LongMemEval, expected may be empty but expected_ids has the answer
+            if not expected and not expected_ids:
+                debug(f"[Benchmark] Skipping item {index}: missing expected and expected_ids", category="benchmark")
                 continue
 
             query_start = time.perf_counter()
@@ -132,7 +172,8 @@ class BenchmarkRunner:
                 # Record failure
                 self.writer.record(
                     query=query,
-                    expected=expected,
+                    expected=expected or "",
+                    expected_ids=expected_ids,
                     expected_rank=None,
                     retrieved=False,
                     candidates=[],
@@ -151,12 +192,20 @@ class BenchmarkRunner:
                 results = response
                 diagnostics = {}
 
-            expected_rank = self.find_expected_rank(results, expected)
+            # Try text match first
+            expected_rank = None
+            if expected:
+                expected_rank = self.find_expected_rank(results, expected)
+
+            # If text match fails, try ID match
+            if expected_rank is None and expected_ids:
+                expected_rank = self.find_expected_by_ids(results, expected_ids)
 
             # Record result
             self.writer.record(
                 query=query,
-                expected=expected,
+                expected=expected or "",
+                expected_ids=expected_ids,
                 expected_rank=expected_rank,
                 retrieved=(expected_rank is not None),
                 candidates=results,

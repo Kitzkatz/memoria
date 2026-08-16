@@ -9,7 +9,7 @@ This file ONLY records data.
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from core.logger import debug, info, error
 
@@ -46,7 +46,8 @@ class BenchmarkWriter:
         retrieved: bool,
         candidates: list,
         runtime_ms: float,
-        diagnostics: Optional[Dict[str, Any]] = None
+        diagnostics: Optional[Dict[str, Any]] = None,
+        expected_ids: Optional[List[str]] = None
     ):
         """
         Record a single benchmark question result.
@@ -59,6 +60,7 @@ class BenchmarkWriter:
             candidates: List of candidate results
             runtime_ms: Query runtime in milliseconds
             diagnostics: Additional diagnostic data
+            expected_ids: List of expected metadata IDs (for LongMemEval)
         """
         # Truncate candidates to reduce file size (keep top 20)
         truncated_candidates = candidates[:20]
@@ -71,16 +73,19 @@ class BenchmarkWriter:
                     if "diagnostics" in c and isinstance(c["diagnostics"], dict):
                         c["diagnostics"].pop("embedding", None)
 
-        self.records.append({
+        record = {
             "query": query,
             "expected": expected,
+            "expected_ids": expected_ids or [],  # <-- NEW
             "expected_rank": expected_rank,
             "retrieved": retrieved,
             "candidate_count": len(candidates),
             "runtime_ms": round(runtime_ms, 3),
             "diagnostics": dict(diagnostics) if diagnostics else {},
             "candidates": truncated_candidates
-        })
+        }
+
+        self.records.append(record)
 
         debug(f"[BenchmarkWriter] Recorded: {query[:50]}...", category="benchmark")
 

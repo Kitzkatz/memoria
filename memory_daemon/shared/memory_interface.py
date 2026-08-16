@@ -42,13 +42,16 @@ class MemoryInterface:
     # BATCH STORE
     # --------------------------------------------------
 
-    def remember_many(self, texts: list) -> list:
+    def remember_many(self, texts: list, metadatas: list = None) -> list:
         """
         Store many memories.
 
         Parameters
         ----------
         texts : iterable[str]
+            List of memory texts.
+        metadatas : list[dict], optional
+            List of metadata dicts corresponding to each text.
 
         Returns
         -------
@@ -56,6 +59,8 @@ class MemoryInterface:
             IDs of stored memories.
         """
         debug(f"[MemoryInterface] remember_many: {len(texts)} texts", category="interface")
+        if metadatas is not None:
+            return self.controller.remember_many(texts, metadatas=metadatas)
         return self.controller.remember_many(texts)
 
     def store_many(self, texts: list) -> list:

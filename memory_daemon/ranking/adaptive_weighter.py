@@ -51,7 +51,7 @@ def compute_signal_deltas(benchmark_file: str) -> Dict[str, float]:
     for record in records:
         expected_rank = record.get("expected_rank")
         if expected_rank is None or expected_rank <= 3:
-            continue  # skip successful and never retrieved
+            continue
 
         candidates = record.get("candidates", [])
         if not candidates or expected_rank >= len(candidates):
@@ -63,29 +63,9 @@ def compute_signal_deltas(benchmark_file: str) -> Dict[str, float]:
         w_diag = winner.get("diagnostics", {}).get("ranker", {})
         e_diag = expected.get("diagnostics", {}).get("ranker", {})
 
-        # --- FIX: Map signal names consistently ---
-        # If the diagnostics use "attribute_boost", map it to "attribute"
-        signal_map = {
-            "attribute_boost": "attribute",
-            "attribute": "attribute",
-            "bm25_score": "bm25",
-            "bm25": "bm25",
-        }
-
         for signal in deltas:
-            w_key = signal
-            e_key = signal
-
-            # Handle alternate names
-            if signal == "attribute":
-                w_key = "attribute_boost" if "attribute_boost" in w_diag else "attribute"
-                e_key = "attribute_boost" if "attribute_boost" in e_diag else "attribute"
-            elif signal == "bm25":
-                w_key = "bm25_score" if "bm25_score" in w_diag else "bm25"
-                e_key = "bm25_score" if "bm25_score" in e_diag else "bm25"
-
-            w_val = w_diag.get(w_key, 0.0)
-            e_val = e_diag.get(e_key, 0.0)
+            w_val = w_diag.get(signal, 0.0)
+            e_val = e_diag.get(signal, 0.0)
             deltas[signal] += w_val - e_val
 
         count += 1
@@ -100,14 +80,10 @@ def compute_signal_deltas(benchmark_file: str) -> Dict[str, float]:
 def adjust_weights(deltas: Dict[str, float], step_size: float = 0.02) -> Dict[str, float]:
     """
     Adjust ranking weights based on signal deltas.
-    Signals that helped winners more get their weights increased.
 
-    Args:
-        deltas: Signal deltas from compute_signal_deltas()
-        step_size: Maximum adjustment per signal (default 0.02)
-
-    Returns:
-        Adjusted weights dict
+    CORRECT LOGIC:
+    - If delta is NEGATIVE (expected wins on this signal), INCREASE the weight
+    - If delta is POSITIVE (winner wins on this signal), DECREASE the weight
     """
     if not deltas:
         debug("[AdaptiveWeighter] No deltas provided, returning default weights")
@@ -127,22 +103,20 @@ def adjust_weights(deltas: Dict[str, float], step_size: float = 0.02) -> Dict[st
         "bm25": getattr(settings, "RANKING_BM25", 0.10),
     }
 
-    # Only adjust signals that have deltas
     valid_signals = [s for s in weights if s in deltas]
     if not valid_signals:
         debug("[AdaptiveWeighter] No matching signals found, returning default weights")
         return weights
 
-    # Compute average delta for valid signals
-    avg_delta = sum(deltas[s] for s in valid_signals) / len(valid_signals)
-
-    # Adjust weights based on relative performance
+    # Adjust weights based on signal deltas
     for signal in valid_signals:
         delta = deltas[signal]
 
-        # If signal performed better than average, increase weight
-        # If worse than average, decrease weight
-        adjustment = step_size * (delta / (abs(avg_delta) + 0.001))
+        # CORRECTED LOGIC:
+        # Negative delta = expected wins = need MORE weight
+        # Positive delta = winner wins = need LESS weight
+        # Adjustment direction is inverted from before
+        adjustment = -step_size * (delta / (abs(delta) + 0.001))
         adjustment = max(-step_size, min(step_size, adjustment))
 
         weights[signal] = max(0.01, min(0.50, weights[signal] + adjustment))
@@ -152,7 +126,7 @@ def adjust_weights(deltas: Dict[str, float], step_size: float = 0.02) -> Dict[st
     for signal in weights:
         weights[signal] /= total
 
-    # Clamp to reasonable bounds after normalization
+    # Clamp to reasonable bounds
     for signal in weights:
         weights[signal] = max(0.01, min(0.50, weights[signal]))
 
@@ -181,7 +155,6 @@ def print_weight_comparison(old_weights: Dict[str, float], new_weights: Dict[str
     print(f"{'Signal':<15} {'Old':<8} {'New':<8} {'Δ':<8}")
     print("-" * 40)
 
-    # Get all signals from both dicts
     all_signals = set(old_weights.keys()) | set(new_weights.keys())
 
     for signal in sorted(all_signals):
@@ -194,10 +167,6 @@ def print_weight_comparison(old_weights: Dict[str, float], new_weights: Dict[str
 def save_weights_to_config(new_weights: Dict[str, float], config_path: Optional[str] = None):
     """
     Update config.py with new weights.
-
-    Args:
-        new_weights: Dict of signal -> weight
-        config_path: Path to config.py (defaults to cache/config.py)
     """
     if config_path is None:
         config_path = os.path.join("cache", "config.py")
@@ -210,20 +179,16 @@ def save_weights_to_config(new_weights: Dict[str, float], config_path: Optional[
         with open(config_path, 'r') as f:
             content = f.read()
 
-        # Backup original
         backup_path = config_path + ".backup"
         with open(backup_path, 'w') as f:
             f.write(content)
         debug(f"[AdaptiveWeighter] Backed up config to {backup_path}")
 
-        # Update each weight
         for signal, value in new_weights.items():
-            # Handle both formats: RANKING_SEMANTIC: float = 0.20
             pattern = f"RANKING_{signal.upper()}: float = [0-9.]+"
             replacement = f"RANKING_{signal.upper()}: float = {value:.4f}"
             content = re.sub(pattern, replacement, content)
 
-            # Also handle format with no spaces: RANKING_SEMANTIC: float = 0.20
             pattern2 = f"RANKING_{signal.upper()}: float=[0-9.]+"
             replacement2 = f"RANKING_{signal.upper()}: float={value:.4f}"
             content = re.sub(pattern2, replacement2, content)
@@ -240,33 +205,19 @@ def save_weights_to_config(new_weights: Dict[str, float], config_path: Optional[
 def adaptive_weighter_pipeline(benchmark_file: str, dry_run: bool = False, step_size: float = 0.02):
     """
     Run the full adaptive weighting pipeline.
-
-    Args:
-        benchmark_file: Path to benchmark results JSON
-        dry_run: If True, only compute and print, don't save
-        step_size: Maximum adjustment step per signal
-
-    Returns:
-        Dict with old_weights, new_weights, and deltas
     """
     debug("[AdaptiveWeighter] Starting pipeline...")
 
-    # Step 1: Compute deltas
     deltas = compute_signal_deltas(benchmark_file)
     if not deltas:
         debug("[AdaptiveWeighter] No deltas computed, skipping")
         return None
 
-    # Step 2: Get old weights
     old_weights = get_default_weights()
-
-    # Step 3: Adjust weights
     new_weights = adjust_weights(deltas, step_size=step_size)
 
-    # Step 4: Print comparison
     print_weight_comparison(old_weights, new_weights)
 
-    # Step 5: Save if not dry_run
     if not dry_run:
         save_weights_to_config(new_weights)
         debug("[AdaptiveWeighter] Pipeline complete")

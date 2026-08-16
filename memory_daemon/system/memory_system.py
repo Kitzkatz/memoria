@@ -38,13 +38,25 @@ class MemorySystem:
     # Public API - All signatures unchanged
     # -------------------------------------
 
-    def store(self, text):
-        """Store a single memory."""
-        return handle_store(self, text)
+    def store(self, text, metadata=None):
+        """
+        Store a single memory.
 
-    def store_many(self, texts):
-        """Store multiple memories."""
-        return handle_store_many(self, texts)
+        Args:
+            text: Memory text
+            metadata: Optional metadata dict to merge with extracted metadata
+        """
+        return handle_store(self, text, metadata=metadata)
+
+    def store_many(self, texts, metadatas=None):
+        """
+        Store multiple memories.
+
+        Args:
+            texts: List of memory texts
+            metadatas: Optional list of metadata dicts (one per text)
+        """
+        return handle_store_many(self, texts, metadatas=metadatas)
 
     def query(self, text):
         """Query the memory system."""

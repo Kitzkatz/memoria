@@ -73,16 +73,16 @@ class LLMAdapter:
             return text.strip()
 
         except requests.exceptions.Timeout:
-            error(f"LLM request timed out after {settings.LLM_TIMEOUT}s")
+            debug(f"LLM request timed out after {settings.LLM_TIMEOUT}s")
             return ""
         except requests.exceptions.RequestException as e:
-            error(f"LLM request failed: {e}")
+            debug(f"LLM request failed: {e}")
             return ""
         except KeyError as e:
             error(f"Unexpected LLM response structure: {e}")
             return ""
         except Exception as e:
-            error(f"LLM adapter error: {e}")
+            debug(f"LLM adapter error: {e}")
             return ""
 
     def chat_with_history(self, prompt: str, history: list = None):

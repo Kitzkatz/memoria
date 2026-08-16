@@ -29,28 +29,28 @@ class Embedder:
         return vec
 
     def embed_many(self, texts: list):
-        """Embed multiple texts in batch for efficiency."""
+        """Embed multiple texts in batch for efficiency, preserving order."""
         if not texts:
             return []
 
-        result = []
+        result = [None] * len(texts)  # Pre-allocate
         to_encode = []
         to_encode_indices = []
 
         for i, text in enumerate(texts):
             if not text:
-                result.append([])
+                result[i] = []
             elif text in self._query_cache:
-                result.append(self._query_cache[text])
+                result[i] = self._query_cache[text]
             else:
                 to_encode.append(text)
                 to_encode_indices.append(i)
 
         if to_encode:
             embeddings = self.model.encode(to_encode).tolist()
-            for i, vec in zip(to_encode_indices, embeddings):
-                self._query_cache[texts[i]] = vec
-                result.append(vec)
+            for idx, vec in zip(to_encode_indices, embeddings):
+                result[idx] = vec
+                self._query_cache[texts[idx]] = vec
 
         return result
 
