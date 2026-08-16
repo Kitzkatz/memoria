@@ -1,8 +1,14 @@
 import json
 import csv
 import argparse
-
-
+import random
+from world import World
+from people import PeopleGenerator
+from relationships import RelationshipGenerator
+from events import EventGenerator
+from questions import QuestionGenerator
+from exporter import Exporter
+from importance_utils import add_importance_cue, IMPORTANCE_CUES, IMPORTANCE_PROBABILITY
 
 
 # --------------------------------------------------------
@@ -10,7 +16,6 @@ import argparse
 # --------------------------------------------------------
 
 def load_data():
-
     with open("benchmark_output/benchmark_memories.txt", "r") as f:
         memories = [l.strip() for l in f if l.strip()]
 
@@ -21,110 +26,60 @@ def load_data():
 
 
 # --------------------------------------------------------
-# STORE VIA DAEMON (THIS IS THE KEY FIX)
+# BUILD WORLD
 # --------------------------------------------------------
-##
-##def store_memories(memories):
-##    from shared.memory_interface import MemoryInterface
-##    memory = MemoryInterface()
-##    return memory.remember_many(memories)
-##
-### --------------------------------------------------------
-### QUERY VIA DAEMON
-### --------------------------------------------------------
-##
-##def query_memory(q):
-##
-##    r = requests.post(
-##        f"{BASE_URL}/memory/query",
-##        json={"text": q},
-##        timeout=60
-##    )
-##
-##    if not r.ok:
-##
-##        return []
-##
-##    return r.json()
-##
-##
-### --------------------------------------------------------
-### EVAL LOOP
-### --------------------------------------------------------
-##
-##def run_eval(memories, questions):
-##
-##    print("\n[1] Storing memories via daemon...\n")
-##
-##    ids = store_memories(memories)
-##
-##    print(f"Stored {len(ids)} memories")
-##
-##    print("\n[2] Running queries...\n")
-##
-##    total = len(questions)
-##
-##    top1 = 0
-##
-##    top3 = 0
-##
-##    for i, q in enumerate(questions):
-##
-##        results = query_memory(q["query"])
-##
-##        expected = q.get("expected")
-##
-##        if not results:
-##
-##            continue
-##
-##        top_texts = [r["text"] for r in results[:3]]
-##
-##        if expected and expected in results[0]["text"]:
-##
-##            top1 += 1
-##
-##        if expected and any(expected in t for t in top_texts):
-##
-##            top3 += 1
-##
-##        if i % 500 == 0:
-##
-##            print(f"Queried {i}/{total}")
-##
-##    print("\n========== RESULTS ==========\n")
-##
-##    print(f"Top-1 Accuracy: {top1 / total:.4f}")
-##
-##    print(f"Top-3 Accuracy: {top3 / total:.4f}")
-##
-##    print("\n=============================\n")
-##
+
+def build_world(count):
+    world = World(seed=42)
+
+    print("\n[1/5] Generating people...")
+    PeopleGenerator(world).generate(count=count)
+
+    print("\n[2/5] Generating relationships...")
+    RelationshipGenerator(world).generate()
+
+    print("\n[3/5] Generating events...")
+    EventGenerator(world).generate()
+
+    print("\n[4/5] Generating questions...")
+    QuestionGenerator(world).generate()
+
+    print("\n[5/5] Exporting dataset...")
+    Exporter(world).write()
+
+    return world
+
 
 # --------------------------------------------------------
 # MAIN
 # --------------------------------------------------------
 
 def main():
-
     parser = argparse.ArgumentParser()
-
-    parser.add_argument("--people", type=int, default=500)
-
+    parser.add_argument("--people", type=int, default=500,
+                        help="Number of people to generate (max ~1000 before overlap)")
+    parser.add_argument("--no-importance", action="store_true",
+                        help="Disable importance cues")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
     args = parser.parse_args()
 
-    print("\n[RUNNING GENERATOR]\n")
+    print("\n====================================")
+    print(" SYNTHETIC WORLD BENCHMARK RUNNER")
+    print("====================================\n")
+    print(f"People: {args.people}")
+    print(f"Importance cues: {'OFF' if args.no_importance else 'ON'}")
+    print(f"Seed: {args.seed}")
+    print("\nGenerating dataset...\n")
 
-    # still generate dataset files
-    from benchmark_generator import build_world
-
-    build_world(args.people)
+    world = build_world(args.people)
 
     memories, questions = load_data()
 
-    #run_eval(memories, questions)
+    print(f"\nMemories: {len(memories)}")
+    print(f"Questions: {len(questions)}")
+    print("\nDONE")
 
 
 if __name__ == "__main__":
-
     main()
