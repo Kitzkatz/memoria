@@ -4,6 +4,7 @@ from system.memory_system import MemorySystem
 from memory.goal_tracker import GoalTracker
 from graph.entity_store import EntityStore
 from cache.config import settings
+from pathlib import Path
 
 
 class MemoryController:
@@ -16,26 +17,11 @@ class MemoryController:
         self.llm = llm
 
     def remember(self, text: str, metadata: dict = None):
-        """
-        Store a memory.
-
-        Args:
-            text: Memory text
-            metadata: Optional metadata dict (session_id, etc.)
-        """
         if metadata:
             return self.system.store(text, metadata=metadata)
         return self.system.store(text)
 
     def remember_many(self, texts, metadatas=None, skip_embedding_build=False):
-        """
-        Store multiple memories.
-
-        Args:
-            texts: List of memory texts
-            metadatas: Optional list of metadata dicts (one per text)
-            skip_embedding_build: If True, skip embedding computation and vector store ops
-        """
         if metadatas:
             return self.system.store_many(texts, metadatas=metadatas, skip_embedding_build=skip_embedding_build)
         return self.system.store_many(texts, metadatas=None, skip_embedding_build=skip_embedding_build)
@@ -55,30 +41,83 @@ class MemoryController:
     def reflect(self):
         return self.system.reflect()
 
-    def chat(self, prompt: str, top_n=None):
+    def chat(self, prompt: str, top_n=None, template=None, template_vars=None):
+        """
+        Chat with memory‑augmented LLM using a customizable template.
+
+        Args:
+            prompt: User's message.
+            top_n: Number of memories to retrieve (default from settings.TOP_N).
+            template: Optional template string or path to template file.
+                      If None, uses default from settings.CHAT_TEMPLATE_FILE.
+            template_vars: Optional dict of additional variables for the template.
+                           Default includes: system, context, user, assistant.
+        """
+        # 1. Retrieve memories
         response = self.recall(prompt)
         top_n = top_n or getattr(settings, "TOP_N", 5)
-        memories = response["results"][:top_n]
+        memories = response.get("results", [])[:top_n]
         context = "\n".join(m["text"] for m in memories if m and m.get("text"))
-
         if not context:
             context = "No relevant memories found."
 
-        # Llama 3 chat template
-        full_prompt = (
+        # 2. Load template
+        if template is None:
+            template = self._load_default_template()
+        elif Path(template).exists():
+            template = self._load_template_from_file(template)
+
+        # 3. Prepare template variables
+        default_vars = {
+            "system": "You are a helpful assistant. Answer concisely based on the context provided.",
+            "context": context,
+            "user": prompt,
+            "assistant": "",  # optional placeholder for assistant response
+        }
+        if template_vars:
+            default_vars.update(template_vars)
+
+        # 4. Format the template
+        try:
+            full_prompt = template.format(**default_vars)
+        except KeyError as e:
+            debug(f"[Controller] Missing template variable: {e}")
+            # fallback to simple concatenation
+            full_prompt = f"{default_vars['system']}\n\nContext:\n{context}\n\nUser:\n{prompt}\n\nAssistant:\n"
+
+        # 5. Send to LLM
+        reply = self.llm.chat(full_prompt)
+        print("CONTROLLER:", repr(reply))
+        return reply
+
+    def _load_default_template(self):
+        """Load the default template from config path."""
+        template_dir = getattr(settings, "CHAT_TEMPLATE_DIR", "chat_templates")
+        template_file = getattr(settings, "CHAT_TEMPLATE_FILE", "llama3.txt")
+        path = Path(template_dir) / template_file
+        if path.exists():
+            return self._load_template_from_file(path)
+        # Fallback to built‑in Llama 3 template
+        return self._get_builtin_llama3_template()
+
+    def _load_template_from_file(self, filepath):
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as e:
+            debug(f"[Controller] Failed to load template from {filepath}: {e}")
+            return self._get_builtin_llama3_template()
+
+    def _get_builtin_llama3_template(self):
+        """Default Llama 3 chat template."""
+        return (
             "<|start_header_id|>system<|end_header_id|>\n"
-            "You are a helpful assistant. Answer concisely based on the context provided.\n"
+            "{system}\n"
             "<|eot_id|>\n"
             "<|start_header_id|>user<|end_header_id|>\n"
-            f"Context:\n{context}\n\n"
-            f"User:\n{prompt}\n"
+            "Context:\n{context}\n\n"
+            "User:\n{user}\n"
             "<|eot_id|>\n"
             "<|start_header_id|>assistant<|end_header_id|>\n"
+            "{assistant}"
         )
-        
-
-        reply = self.llm.chat(full_prompt)
-
-        print("CONTROLLER:", repr(reply))
-
-        return reply

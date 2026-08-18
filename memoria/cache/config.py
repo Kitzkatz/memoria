@@ -26,6 +26,9 @@ class Settings(BaseModel):
     # -------------------------
 
     EMBEDDING_MODEL: str = "memory/models/all-MiniLM-L6-v2"
+    # Chat template configuration
+    CHAT_TEMPLATE_DIR: str = "chat_templates"          # folder where templates are stored
+    CHAT_TEMPLATE_FILE: str = "llama3.txt"            # default template file name
     VECTOR_DIM: int = 384
     CHAT_MODEL: str = "mistral"
     LLM_URL: str = "http://localhost:8080"
