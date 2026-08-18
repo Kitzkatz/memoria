@@ -225,6 +225,36 @@ class VectorStore:
                 debug(f"[FAISS] Save error: {e}")
 
     # --------------------------------------------------
+    # Cache-specific methods
+    # --------------------------------------------------
+
+    def save_to_file(self, filepath: str) -> None:
+        """Save the current index to a specific file."""
+        with self._lock:
+            try:
+                faiss.write_index(self.index, filepath)
+                debug(f"[FAISS] Saved index to {filepath} (ntotal={self.index.ntotal})")
+            except Exception as e:
+                debug(f"[FAISS] Save to file error: {e}")
+
+    def load_from_file(self, filepath: str) -> None:
+        """Load an index from a specific file, replacing the current index."""
+        with self._lock:
+            if not os.path.exists(filepath):
+                raise FileNotFoundError(f"Index file not found: {filepath}")
+            try:
+                self.index = faiss.read_index(filepath)
+                self.pending = 0
+                debug(f"[FAISS] Loaded index from {filepath} (ntotal={self.index.ntotal})")
+            except Exception as e:
+                debug(f"[FAISS] Load from file error: {e}")
+                raise
+
+    def cache_exists(self, filepath: str) -> bool:
+        """Check if a cache file exists."""
+        return os.path.exists(filepath)
+
+    # --------------------------------------------------
     # Maintenance
     # --------------------------------------------------
 

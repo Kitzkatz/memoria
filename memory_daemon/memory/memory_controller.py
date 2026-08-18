@@ -27,17 +27,18 @@ class MemoryController:
             return self.system.store(text, metadata=metadata)
         return self.system.store(text)
 
-    def remember_many(self, texts, metadatas=None):
+    def remember_many(self, texts, metadatas=None, skip_embedding_build=False):
         """
         Store multiple memories.
 
         Args:
             texts: List of memory texts
             metadatas: Optional list of metadata dicts (one per text)
+            skip_embedding_build: If True, skip embedding computation and vector store ops
         """
         if metadatas:
-            return self.system.store_many(texts, metadatas=metadatas)
-        return self.system.store_many(texts)
+            return self.system.store_many(texts, metadatas=metadatas, skip_embedding_build=skip_embedding_build)
+        return self.system.store_many(texts, metadatas=None, skip_embedding_build=skip_embedding_build)
 
     def set_goal(self, goal, progress="started"):
         return self.goals.set_goal(goal, progress)
@@ -81,10 +82,3 @@ class MemoryController:
         print("CONTROLLER:", repr(reply))
 
         return reply
-        
-
-##    def raw_chat(self, prompt: str):
-##        """Send a raw prompt directly to the LLM (no retrieval)."""
-##        if not self.llm:
-##            return "LLM not configured."
-##        return self.llm.chat(prompt)

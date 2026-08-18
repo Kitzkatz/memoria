@@ -17,14 +17,33 @@ MMR_DISPLAY_LIMIT = 10
 
 
 class BenchmarkAnalyzer:
-    def __init__(self, filepath: str):
+    def __init__(self, filepath: str, questions_path: str = None):
         self.filepath = Path(filepath)
+        self.questions_path = Path(questions_path) if questions_path else None
         self.data = None
+        self.questions_data = None
 
     def load(self) -> bool:
         try:
             with open(self.filepath, "r", encoding="utf8") as f:
                 self.data = json.load(f)
+
+            # If questions file provided, load it
+            if self.questions_path:
+                if not self.questions_path.exists():
+                    error(f"[Analyzer] Questions file not found: {self.questions_path}", category="benchmark")
+                else:
+                    with open(self.questions_path, "r", encoding="utf8") as qf:
+                        qlist = json.load(qf)
+                        # Build a dict keyed by question_id (or fallback to order)
+                        self.questions_data = {}
+                        for idx, q in enumerate(qlist):
+                            qid = q.get("question_id", f"q_{idx}")
+                            self.questions_data[qid] = q
+
+            # If data has 'results' but not 'records', convert to internal format
+            if "results" in self.data and "records" not in self.data:
+                self._convert_results_to_records()
 
             info(
                 f"[Analyzer] Loaded {len(self.records())} records from {self.filepath}",
@@ -41,6 +60,61 @@ class BenchmarkAnalyzer:
 
     def records(self) -> list:
         return self.data.get("records", []) if self.data else []
+
+    def _convert_results_to_records(self):
+        """Convert adapter's 'results' format to internal 'records' format."""
+        results = self.data.get("results", [])
+        if not results:
+            return
+
+        records = []
+        for idx, entry in enumerate(results):
+            # Try to get question_id from entry, else use order
+            qid = entry.get("question_id", f"q_{idx}")
+            rank = entry.get("rank")
+            retrieved = entry.get("retrieved", False)
+            expected_rank = rank if retrieved else None
+
+            # Get expected text and ids from questions data if available
+            expected_text = ""
+            expected_ids = []
+            if self.questions_data and qid in self.questions_data:
+                q_info = self.questions_data[qid]
+                expected_text = q_info.get("expected", "")
+                expected_ids = q_info.get("expected_ids", [])
+
+            # Build a minimal candidate list (for score analysis, we fake one if rank exists)
+            candidates = []
+            candidate_count = entry.get("candidate_count", 0)
+            if expected_rank is not None and candidate_count > 0:
+                # Create a dummy candidate at the correct rank (only for analysis)
+                candidates.append({
+                    "rank": expected_rank,
+                    "score": 1.0,
+                    "final_score": 1.0,
+                    "text": "dummy",
+                    "metadata": {}
+                })
+
+            record = {
+                "query": entry.get("question", entry.get("query", "")),
+                "expected": expected_text,
+                "expected_ids": expected_ids,
+                "expected_rank": expected_rank,
+                "retrieved": retrieved,
+                "candidates": candidates,
+                "candidate_count": candidate_count,
+                "runtime_ms": entry.get("query_time", 0.0) * 1000,  # convert seconds to ms
+                "diagnostics": {}  # no diagnostics
+            }
+            records.append(record)
+
+        self.data["records"] = records
+
+    # ------------------------------------------------------------------
+    # All methods below are unchanged from the original analyzer.
+    # They remain exactly as you had them.
+    # ------------------------------------------------------------------
 
     def analyze(self, show_mmr_details: bool = False) -> dict:
         records = self.records()
@@ -608,7 +682,7 @@ def analyze_all(results_dir=DEFAULT_RESULTS_DIR):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python benchmark_analyzer.py file.json [--explain N] [--export summary.json]")
+        print("  python benchmark_analyzer.py file.json [--questions questions.json] [--explain N] [--export summary.json]")
         print("  python benchmark_analyzer.py --all [--export summary.json]")
         sys.exit(1)
 
@@ -617,19 +691,35 @@ if __name__ == "__main__":
         print(json.dumps(results, indent=2))
         sys.exit(0)
 
-    analyzer = BenchmarkAnalyzer(sys.argv[1])
+    # Parse arguments manually (no argparse to avoid breaking existing)
+    filepath = sys.argv[1]
+    questions_path = None
+    explain_limit = None
+    export_path = None
+
+    i = 2
+    while i < len(sys.argv):
+        if sys.argv[i] == "--questions" and i+1 < len(sys.argv):
+            questions_path = sys.argv[i+1]
+            i += 2
+        elif sys.argv[i] == "--explain" and i+1 < len(sys.argv):
+            explain_limit = int(sys.argv[i+1])
+            i += 2
+        elif sys.argv[i] == "--export" and i+1 < len(sys.argv):
+            export_path = sys.argv[i+1]
+            i += 2
+        else:
+            i += 1
+
+    analyzer = BenchmarkAnalyzer(filepath, questions_path)
 
     if not analyzer.load():
         sys.exit(1)
 
     analyzer.analyze()
 
-    if "--explain" in sys.argv:
-        idx = sys.argv.index("--explain")
-        limit = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 20
-        analyzer.explain_failures(limit)
+    if explain_limit is not None:
+        analyzer.explain_failures(explain_limit)
 
-    if "--export" in sys.argv:
-        idx = sys.argv.index("--export")
-        outfile = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else "summary.json"
-        analyzer.export_summary(outfile)
+    if export_path:
+        analyzer.export_summary(export_path)

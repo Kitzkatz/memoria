@@ -1,6 +1,7 @@
 # Core
 faiss-cpu>=1.7.4
-sentence-transformers>=2.2.0
+sentence-transformers==5.6.0
+
 numpy>=1.24.0
 pydantic>=2.0.0
 fastapi>=0.100.0
@@ -14,7 +15,7 @@ rank_bm25>=0.2.2
 # Ingestion
 pdfplumber>=0.10.0
 tree-sitter>=0.20.0
-tree-sitter-languages>=0.1.0
+tree-sitter-languages==1.14.3
 
 # Optional
 aiohttp>=3.8.0

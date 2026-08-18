@@ -103,6 +103,7 @@ class BatchLoader:
         parallel_extract: bool = True,
         max_workers: int = 4,
         metadatas: Optional[List[Dict[str, Any]]] = None,
+        skip_embedding_build: bool = False,
     ) -> int:
         """
         Insert texts into memory in batches.
@@ -114,6 +115,7 @@ class BatchLoader:
             parallel_extract: If True, extract in parallel
             max_workers: Number of parallel workers
             metadatas: Optional list of metadata dicts corresponding to each text
+            skip_embedding_build: If True, skip embedding computation and vector store ops (cached FAISS)
 
         Returns:
             int: Number of texts stored
@@ -134,6 +136,7 @@ class BatchLoader:
         info(f"Skip embedding: {skip_embedding}", category="benchmark")
         info(f"Parallel extract: {parallel_extract}", category="benchmark")
         info(f"Metadatas provided: {metadatas is not None}", category="benchmark")
+        info(f"Skip embedding build: {skip_embedding_build}", category="benchmark")
         info("=" * 60, category="benchmark")
 
         # Disable auto-store during batch load
@@ -167,7 +170,11 @@ class BatchLoader:
                     else:
                         metadata_to_store = None
 
-                    ids = self.memory.remember_many(texts_to_store, metadatas=metadata_to_store)
+                    ids = self.memory.remember_many(
+                        texts_to_store,
+                        metadatas=metadata_to_store,
+                        skip_embedding_build=skip_embedding_build
+                    )
                     stored += len(ids)
 
                     percent = (stored / total) * 100
@@ -202,8 +209,18 @@ class BatchLoader:
         self,
         records: List,
         batch_size: int = 100,
+        skip_embedding_build: bool = False,
     ) -> int:
-        """Insert pre‑extracted MemoryRecord objects in batches."""
+        """Insert pre‑extracted MemoryRecord objects in batches.
+
+        Args:
+            records: List of MemoryRecord objects
+            batch_size: Number of records per batch
+            skip_embedding_build: If True, skip embedding computation and vector store ops (cached FAISS)
+
+        Returns:
+            int: Number of texts stored
+        """
         total = len(records)
         if total == 0:
             return 0
@@ -215,6 +232,7 @@ class BatchLoader:
         info("[BATCH LOAD START (RECORDS)]", category="benchmark")
         info(f"Memories: {total}", category="benchmark")
         info(f"Batch size: {batch_size}", category="benchmark")
+        info(f"Skip embedding build: {skip_embedding_build}", category="benchmark")
         info("=" * 60, category="benchmark")
 
         original_auto_store = getattr(self.memory.controller, "auto_store", False)
@@ -226,8 +244,11 @@ class BatchLoader:
                 batch = records[i:i+batch_size]
                 texts = [r.text for r in batch]
                 metadatas = [r.metadata for r in batch]
-                # No skip_embedding argument
-                ids = self.memory.controller.remember_many(texts, metadatas=metadatas)
+                ids = self.memory.controller.remember_many(
+                    texts,
+                    metadatas=metadatas,
+                    skip_embedding_build=skip_embedding_build
+                )
                 stored += len(ids)
 
                 percent = (stored / total) * 100
@@ -281,6 +302,7 @@ class BatchLoader:
         parallel_extract: bool = True,
         max_workers: int = 4,
         metadatas: Optional[List[Dict[str, Any]]] = None,
+        skip_embedding_build: bool = False,
     ) -> int:
         """
         Load from file and insert into memory in one call.
@@ -292,6 +314,7 @@ class BatchLoader:
             parallel_extract: If True, extract in parallel
             max_workers: Number of parallel workers
             metadatas: Optional list of metadata dicts
+            skip_embedding_build: If True, skip embedding computation (cached FAISS)
 
         Returns:
             int: Number of texts stored
@@ -312,6 +335,7 @@ class BatchLoader:
             parallel_extract=parallel_extract,
             max_workers=max_workers,
             metadatas=metadatas,
+            skip_embedding_build=skip_embedding_build,
         )
 
 

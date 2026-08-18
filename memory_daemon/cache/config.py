@@ -77,7 +77,7 @@ class Settings(BaseModel):
 
     CONTEXT_MAX_MEMORIES: int = 50
     CONTEXT_MIN_SCORE: float = 0.15
-    CONTEXT_TOKEN_BUDGET: int = 800
+    CONTEXT_TOKEN_BUDGET: int = 10000
 
     # -------------------------
     # Memory
@@ -106,13 +106,15 @@ class Settings(BaseModel):
     # Embedding Cache
     # -------------------------
 
+    SKIP_EMBEDDING: bool = False
+
     EMBEDDING_CACHE_MAX_SIZE: int = 100000  # Max entries before LRU eviction
 
     # -------------------------
     # Debug
     # -------------------------
 
-    DEBUG: bool = True
+    DEBUG: bool = False
 
 
     # ---- Ranking Diagnostics ----

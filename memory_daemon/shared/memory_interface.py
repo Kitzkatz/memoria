@@ -42,7 +42,7 @@ class MemoryInterface:
     # BATCH STORE
     # --------------------------------------------------
 
-    def remember_many(self, texts: list, metadatas: list = None) -> list:
+    def remember_many(self, texts: list, metadatas: list = None, skip_embedding_build: bool = False) -> list:
         """
         Store many memories.
 
@@ -52,6 +52,9 @@ class MemoryInterface:
             List of memory texts.
         metadatas : list[dict], optional
             List of metadata dicts corresponding to each text.
+        skip_embedding_build : bool, default False
+            If True, skip embedding computation and vector store operations
+            (assumes FAISS index is already loaded from cache).
 
         Returns
         -------
@@ -60,12 +63,12 @@ class MemoryInterface:
         """
         debug(f"[MemoryInterface] remember_many: {len(texts)} texts", category="interface")
         if metadatas is not None:
-            return self.controller.remember_many(texts, metadatas=metadatas)
-        return self.controller.remember_many(texts)
+            return self.controller.remember_many(texts, metadatas=metadatas, skip_embedding_build=skip_embedding_build)
+        return self.controller.remember_many(texts, metadatas=None, skip_embedding_build=skip_embedding_build)
 
-    def store_many(self, texts: list) -> list:
-        """Alias for remember_many()."""
-        return self.remember_many(texts)
+    def store_many(self, texts: list, metadatas: list = None, skip_embedding_build: bool = False) -> list:
+        """Alias for remember_many() with same parameters."""
+        return self.remember_many(texts, metadatas=metadatas, skip_embedding_build=skip_embedding_build)
 
     # --------------------------------------------------
     # SINGLE QUERY

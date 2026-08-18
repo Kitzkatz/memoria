@@ -48,15 +48,17 @@ class MemorySystem:
         """
         return handle_store(self, text, metadata=metadata)
 
-    def store_many(self, texts, metadatas=None):
+    def store_many(self, texts, metadatas=None, skip_embedding_build=False):
         """
         Store multiple memories.
 
         Args:
             texts: List of memory texts
             metadatas: Optional list of metadata dicts (one per text)
+            skip_embedding_build: If True, skip embedding computation and vector store operations
+                                  (assumes FAISS index is already loaded from cache).
         """
-        return handle_store_many(self, texts, metadatas=metadatas)
+        return handle_store_many(self, texts, metadatas=metadatas, skip_embedding_build=skip_embedding_build)
 
     def query(self, text):
         """Query the memory system."""
