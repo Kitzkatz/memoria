@@ -29,3 +29,7 @@ scipy>=1.10.0
 
 # Templates
 jinja2>=3.1.0
+
+
+# plugins
+pluggy>=1.6,<2.0
