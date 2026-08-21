@@ -36,7 +36,37 @@ class BenchmarkRunner:
         self.writer = BenchmarkWriter()
         self.question_file = question_file or DEFAULT_QUESTION_FILE
 
+        # ---- Plugin support ----
+        self.plugin_manager = getattr(self.memory, 'plugin_manager', None)
+        self.custom_adapters = []
+        self.custom_analyzers = []
+        if self.plugin_manager:
+            self._register_custom_adapters()
+            self._register_custom_analyzers()
+
         info(f"[Benchmark] Using questions from: {self.question_file}", category="benchmark")
+
+    def _register_custom_adapters(self):
+        """Register custom benchmark adapters from plugins."""
+        try:
+            adapters = self.plugin_manager.memoria_register_benchmark_adapter()
+            for adapter_config in adapters:
+                if isinstance(adapter_config, dict) and 'name' in adapter_config and 'adapter' in adapter_config:
+                    self.custom_adapters.append(adapter_config)
+                    info(f"[Benchmark] Registered custom adapter: {adapter_config['name']}", category="benchmark")
+        except Exception as e:
+            error(f"[Benchmark] Failed to register custom adapters: {e}", category="benchmark")
+
+    def _register_custom_analyzers(self):
+        """Register custom analyzers from plugins."""
+        try:
+            analyzers = self.plugin_manager.memoria_register_analyzer()
+            for analyzer_config in analyzers:
+                if isinstance(analyzer_config, dict) and 'name' in analyzer_config and 'analyzer' in analyzer_config:
+                    self.custom_analyzers.append(analyzer_config)
+                    info(f"[Benchmark] Registered custom analyzer: {analyzer_config['name']}", category="benchmark")
+        except Exception as e:
+            error(f"[Benchmark] Failed to register custom analyzers: {e}", category="benchmark")
 
     # -------------------------------------
     # LOAD QUESTIONS
@@ -135,6 +165,13 @@ class BenchmarkRunner:
         print("[BENCHMARK START]")
         print("=" * 60)
 
+        # ---- Plugin hook: pre-run ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_pre_query(None)  # Placeholder for pre-benchmark
+            except Exception as e:
+                error(f"[Plugin] pre-run hook error: {e}", category="benchmark")
+
         questions = self.load_questions()
         if not questions:
             error("[Benchmark] No questions loaded, exiting", category="benchmark")
@@ -142,6 +179,17 @@ class BenchmarkRunner:
 
         if limit:
             questions = questions[:limit]
+
+        # ---- Allow custom adapters to modify questions ----
+        for adapter_config in self.custom_adapters:
+            try:
+                adapter = adapter_config['adapter']
+                if hasattr(adapter, 'modify_questions'):
+                    questions = adapter.modify_questions(questions)
+                if hasattr(adapter, 'pre_run'):
+                    adapter.pre_run(self)
+            except Exception as e:
+                error(f"[Benchmark] Custom adapter error: {e}", category="benchmark")
 
         total = len(questions)
         info(f"[Benchmark] {total} questions loaded", category="benchmark")
@@ -213,6 +261,15 @@ class BenchmarkRunner:
                 diagnostics=diagnostics
             )
 
+            # ---- Custom adapter hook per query ----
+            for adapter_config in self.custom_adapters:
+                try:
+                    adapter = adapter_config['adapter']
+                    if hasattr(adapter, 'on_query'):
+                        adapter.on_query(index, item, response)
+                except Exception as e:
+                    error(f"[Benchmark] Custom adapter on_query error: {e}", category="benchmark")
+
             # Progress reporting
             percent = int(index / total * 100)
             if percent >= next_progress:
@@ -233,6 +290,24 @@ class BenchmarkRunner:
 
         outfile = self.writer.write()
         info(f"[Benchmark] Results written to: {outfile}", category="benchmark")
+
+        # ---- Plugin hook: post-run ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_post_query(None, {"results_file": outfile})
+            except Exception as e:
+                error(f"[Plugin] post-run hook error: {e}", category="benchmark")
+
+        # ---- Run custom analyzers (optional) ----
+        for analyzer_config in self.custom_analyzers:
+            try:
+                analyzer = analyzer_config['analyzer']
+                if hasattr(analyzer, 'analyze'):
+                    analyzer.analyze(outfile)
+                else:
+                    analyzer(outfile)
+            except Exception as e:
+                error(f"[Benchmark] Custom analyzer error: {e}", category="benchmark")
 
         return outfile
 

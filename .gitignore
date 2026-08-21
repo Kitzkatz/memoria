@@ -23,14 +23,18 @@ build/
 *.sqlite3
 *.sqlite
 
+# ----- Cache directories (added) -----
+                        # whole cache folder
+cache/faiss_indices/           # per-haystack FAISS caches
+cache/embedding_cache.pkl      # embedding cache file
+
 # Benchmark results (keep the folder, ignore its contents)
 benchmark_output/results/
-*.benchmark.json   # optional: if you have any other JSON results
+*.benchmark.json
 
 # Local models (download/embedding models)
 **/models/
 **/benchmark_output/
-
 
 # IDE / OS files
 .vscode/
@@ -40,10 +44,14 @@ benchmark_output/results/
 .DS_Store
 Thumbs.db
 
+# Large data files
+feedback_data.json
+query_history.json
+longmemeval_s_cleaned.json
 # Patches (if any)
 patches/
 
 # Allow essential files (optional)
 !requirements.txt
 !.gitignore
-!.gitkeep      # to keep empty folders tracked
+!.gitkeep

@@ -181,7 +181,14 @@ def _handle_query_blackboard(
         "general",
     )
 
-    if hasattr(system, "router") and system.router:
+    # ---- Plugin hook: pre-routing ----
+    if system.plugin_manager:
+        try:
+            system.plugin_manager.memoria_routing_pre(query, memory_type_hint)
+        except Exception as e:
+            debug(f"[Plugin] routing_pre error: {e}")
+
+    if getattr(settings, "USE_ROUTING", True) and hasattr(system, "router") and system.router:
         route = system.router.route(
             memory_type_hint
         )
@@ -244,6 +251,21 @@ def _handle_query_blackboard(
     # Keep this available for future routing diagnostics without changing
     # current behavior.
     _ = fallback_pools
+
+    # ---- Plugin hook: post-routing ----
+    if system.plugin_manager:
+        try:
+            # Pass the route info as a dict
+            route_info = {
+                "workers": workers_to_use,
+                "graph_depth": graph_depth,
+                "signals": signals,
+                "pool": pool,
+                "fallback_pools": fallback_pools,
+            }
+            system.plugin_manager.memoria_routing_post(route_info)
+        except Exception as e:
+            debug(f"[Plugin] routing_post error: {e}")
 
     # ------------------------------------------------------------------
     # Step 2: Relevance pool
@@ -352,6 +374,22 @@ def _handle_query_blackboard(
             "[MemorySystem] Using relevance pool only "
             "(skipping workers)"
         )
+
+        # No workers were submitted, so skip scheduler hooks.
+        # We still call pre/post retrieval hooks to allow plugins to modify candidates.
+        # ---- Plugin hook: pre-retrieval (with empty list) ----
+        if system.plugin_manager:
+            try:
+                system.plugin_manager.memoria_retrieval_pre(query, [])
+            except Exception as e:
+                debug(f"[Plugin] retrieval_pre error: {e}")
+
+        # ---- Plugin hook: post-retrieval ----
+        if system.plugin_manager:
+            try:
+                system.plugin_manager.memoria_retrieval_post(query, candidates)
+            except Exception as e:
+                debug(f"[Plugin] retrieval_post error: {e}")
 
     else:
         # --------------------------------------------------------------
@@ -538,6 +576,13 @@ def _handle_query_blackboard(
             f"{sorted(submitted_sources)}"
         )
 
+        # ---- Plugin hook: pre-scheduler ----
+        if system.plugin_manager:
+            try:
+                system.plugin_manager.memoria_scheduler_pre(task_ids)
+            except Exception as e:
+                debug(f"[Plugin] scheduler_pre error: {e}")
+
         # --------------------------------------------------------------
         # Step 6: Execute retrieval according to policy
         # --------------------------------------------------------------
@@ -582,6 +627,13 @@ def _handle_query_blackboard(
             f"{len(execution.pending_ids)}, "
             f"wait={scheduler_wait_ms:.2f}ms"
         )
+
+        # ---- Plugin hook: post-scheduler ----
+        if system.plugin_manager:
+            try:
+                system.plugin_manager.memoria_scheduler_post(execution)
+            except Exception as e:
+                debug(f"[Plugin] scheduler_post error: {e}")
 
         # --------------------------------------------------------------
         # Source-level completion diagnostics
@@ -682,6 +734,13 @@ def _handle_query_blackboard(
                         float(dist),
                         False,
                     )
+
+        # ---- Plugin hook: pre-retrieval ----
+        if system.plugin_manager:
+            try:
+                system.plugin_manager.memoria_retrieval_pre(query, list(mem_ids))
+            except Exception as e:
+                debug(f"[Plugin] retrieval_pre error: {e}")
 
         # --------------------------------------------------------------
         # Step 8: Cap candidates BEFORE DB fetch
@@ -786,6 +845,13 @@ def _handle_query_blackboard(
             f"{len(relevance_candidates)}, "
             f"workers: {len(worker_candidates)})"
         )
+
+        # ---- Plugin hook: post-retrieval ----
+        if system.plugin_manager:
+            try:
+                system.plugin_manager.memoria_retrieval_post(query, candidates)
+            except Exception as e:
+                debug(f"[Plugin] retrieval_post error: {e}")
 
     # ------------------------------------------------------------------
     # Step 10: Pass routing signals

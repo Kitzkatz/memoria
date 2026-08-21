@@ -1,4 +1,3 @@
-# memory/feedback.py
 """
 Automatic feedback loop — tracks user behavior and adjusts memory relevance.
 No manual input required.
@@ -11,33 +10,54 @@ from collections import defaultdict
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 
+from core.logger import debug
+
 
 class FeedbackLoop:
-    def __init__(self, db, persist_path: str = "feedback_data.json"):
+    def __init__(self, db, persist_path: str = "feedback_data.json", plugin_manager=None):
         self.db = db
         self.persist_path = persist_path
-        
+        self.plugin_manager = plugin_manager
+
         # Internal lock for thread safety
         self._lock = threading.RLock()
-        
+
         # Memory feedback scores: mem_id -> cumulative score
         self.memory_feedback: Dict[int, float] = defaultdict(float)
-        
+
         # Query history: query -> list of (mem_id, action, timestamp)
         self.query_history: Dict[str, List[Dict]] = defaultdict(list)
-        
+
         # Recent clicks for session context
         self.session_clicks: List[int] = []
-        
+
         # Internal: track when scores were last updated for decay
         self._last_update: Dict[int, float] = {}
-        
+
         # Internal: debounce saving
         self._dirty = False
         self._last_save = time.time()
         self._save_threshold = 5.0  # seconds between saves
-        
+
         self._load()
+
+        # ---- Register custom feedback recorders from plugins ----
+        if self.plugin_manager:
+            self._register_custom_recorders()
+
+    def _register_custom_recorders(self):
+        """Register custom feedback recorders from plugins."""
+        try:
+            recorders = self.plugin_manager.memoria_register_feedback_recorder()
+            self._custom_recorders = []
+            for recorder_config in recorders:
+                if isinstance(recorder_config, dict) and 'name' in recorder_config and 'recorder' in recorder_config:
+                    self._custom_recorders.append(recorder_config)
+                    debug(f"[Plugin] Registered custom feedback recorder: {recorder_config['name']}")
+        except Exception as e:
+            debug(f"[Plugin] Failed to register custom feedback recorders: {e}")
+        else:
+            self._custom_recorders = []
 
     # -------------------------
     # Record user behavior
@@ -48,6 +68,13 @@ class FeedbackLoop:
         User clicked on a memory — positive signal.
         """
         with self._lock:
+            # ---- Plugin hook: pre-record ----
+            if self.plugin_manager:
+                try:
+                    self.plugin_manager.memoria_feedback_pre(mem_id, query, "click")
+                except Exception as e:
+                    debug(f"[Plugin] feedback_pre error: {e}")
+
             self.memory_feedback[mem_id] += 0.5
             self._last_update[mem_id] = time.time()
             self.query_history[query].append({
@@ -62,11 +89,34 @@ class FeedbackLoop:
             self._dirty = True
             self._maybe_save()
 
+            # ---- Plugin hook: post-record ----
+            if self.plugin_manager:
+                try:
+                    self.plugin_manager.memoria_feedback_post(mem_id, query, "click", success=True)
+                except Exception as e:
+                    debug(f"[Plugin] feedback_post error: {e}")
+
+            # ---- Custom recorders ----
+            if hasattr(self, '_custom_recorders'):
+                for recorder_config in self._custom_recorders:
+                    try:
+                        recorder = recorder_config['recorder']
+                        recorder(mem_id, query, "click", 0.5)
+                    except Exception as e:
+                        debug(f"[Plugin] Custom recorder error: {e}")
+
     def record_skip(self, mem_id: int, query: str):
         """
         User skipped a memory (scrolled past) — negative signal.
         """
         with self._lock:
+            # ---- Plugin hook: pre-record ----
+            if self.plugin_manager:
+                try:
+                    self.plugin_manager.memoria_feedback_pre(mem_id, query, "skip")
+                except Exception as e:
+                    debug(f"[Plugin] feedback_pre error: {e}")
+
             self.memory_feedback[mem_id] -= 0.2
             self._last_update[mem_id] = time.time()
             self.query_history[query].append({
@@ -80,12 +130,35 @@ class FeedbackLoop:
             self._dirty = True
             self._maybe_save()
 
+            # ---- Plugin hook: post-record ----
+            if self.plugin_manager:
+                try:
+                    self.plugin_manager.memoria_feedback_post(mem_id, query, "skip", success=True)
+                except Exception as e:
+                    debug(f"[Plugin] feedback_post error: {e}")
+
+            # ---- Custom recorders ----
+            if hasattr(self, '_custom_recorders'):
+                for recorder_config in self._custom_recorders:
+                    try:
+                        recorder = recorder_config['recorder']
+                        recorder(mem_id, query, "skip", -0.2)
+                    except Exception as e:
+                        debug(f"[Plugin] Custom recorder error: {e}")
+
     def record_dwell(self, mem_id: int, query: str, duration_ms: float):
         """
         User spent time reading a memory — strong positive signal.
         Duration > 5 seconds is meaningful.
         """
         with self._lock:
+            # ---- Plugin hook: pre-record ----
+            if self.plugin_manager:
+                try:
+                    self.plugin_manager.memoria_feedback_pre(mem_id, query, "dwell")
+                except Exception as e:
+                    debug(f"[Plugin] feedback_pre error: {e}")
+
             # Use log scaling instead of linear cap
             import math
             if duration_ms > 100:  # Ignore accidental dwells
@@ -103,11 +176,34 @@ class FeedbackLoop:
             self._dirty = True
             self._maybe_save()
 
+            # ---- Plugin hook: post-record ----
+            if self.plugin_manager:
+                try:
+                    self.plugin_manager.memoria_feedback_post(mem_id, query, "dwell", success=True)
+                except Exception as e:
+                    debug(f"[Plugin] feedback_post error: {e}")
+
+            # ---- Custom recorders ----
+            if hasattr(self, '_custom_recorders'):
+                for recorder_config in self._custom_recorders:
+                    try:
+                        recorder = recorder_config['recorder']
+                        recorder(mem_id, query, "dwell", boost)
+                    except Exception as e:
+                        debug(f"[Plugin] Custom recorder error: {e}")
+
     def record_follow_up(self, query: str, previous_query: str):
         """
         User asked a follow-up query — the previous result was relevant.
         """
         with self._lock:
+            # ---- Plugin hook: pre-record ----
+            if self.plugin_manager:
+                try:
+                    self.plugin_manager.memoria_feedback_pre(None, query, "follow_up")
+                except Exception as e:
+                    debug(f"[Plugin] feedback_pre error: {e}")
+
             if previous_query in self.query_history:
                 # Get recent entries, weight by recency
                 recent = self.query_history[previous_query][-10:]
@@ -119,6 +215,22 @@ class FeedbackLoop:
                         self._last_update[entry["mem_id"]] = time.time()
             self._dirty = True
             self._maybe_save()
+
+            # ---- Plugin hook: post-record ----
+            if self.plugin_manager:
+                try:
+                    self.plugin_manager.memoria_feedback_post(None, query, "follow_up", success=True)
+                except Exception as e:
+                    debug(f"[Plugin] feedback_post error: {e}")
+
+            # ---- Custom recorders ----
+            if hasattr(self, '_custom_recorders'):
+                for recorder_config in self._custom_recorders:
+                    try:
+                        recorder = recorder_config['recorder']
+                        recorder(None, query, "follow_up", 0.0)
+                    except Exception as e:
+                        debug(f"[Plugin] Custom recorder error: {e}")
 
     # -------------------------
     # Query feedback signals
@@ -185,7 +297,7 @@ class FeedbackLoop:
                 for query in list(self.query_history.keys()):
                     if len(self.query_history[query]) > 100:
                         self.query_history[query] = self.query_history[query][-50:]
-                
+
                 data = {
                     "memory_feedback": dict(self.memory_feedback),
                     "query_history": {

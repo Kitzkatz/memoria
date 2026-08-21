@@ -20,10 +20,11 @@ TYPE_PRIORITY = [
 
 
 class Router:
-    def __init__(self, matrix=None):
+    def __init__(self, matrix=None, plugin_manager=None):
         self.matrix = matrix or ROUTING_MATRIX
         self.default_type = "general"
         self.type_priority = TYPE_PRIORITY
+        self.plugin_manager = plugin_manager  # <-- NEW
         # Cache for route lookups
         self._route_cache = {}
         self._signal_cache = {}
@@ -33,20 +34,36 @@ class Router:
         Return the routing configuration for a memory type.
         Cached for performance.
         """
+        # ---- Plugin hook: pre-routing ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_routing_pre(memory_type)
+            except Exception as e:
+                debug(f"[Plugin] router_pre error: {e}")
+
         # Check cache first
         if memory_type in self._route_cache:
-            return self._route_cache[memory_type]
-
-        # Get config, fallback to general if not found
-        if memory_type not in self.matrix:
-            debug(f"Unknown type '{memory_type}', falling back to '{self.default_type}'")
-            config = self.matrix[self.default_type]
+            route = self._route_cache[memory_type]
         else:
-            config = self.matrix[memory_type]
+            # Get config, fallback to general if not found
+            if memory_type not in self.matrix:
+                debug(f"Unknown type '{memory_type}', falling back to '{self.default_type}'")
+                config = self.matrix[self.default_type]
+            else:
+                config = self.matrix[memory_type]
 
-        # Cache and return
-        self._route_cache[memory_type] = config
-        return config
+            # Cache and return
+            self._route_cache[memory_type] = config
+            route = config
+
+        # ---- Plugin hook: post-routing ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_routing_post(route)
+            except Exception as e:
+                debug(f"[Plugin] router_post error: {e}")
+
+        return route
 
     def get_signals(self, memory_type: str) -> dict:
         """Return the signal weights for a memory type. Cached."""

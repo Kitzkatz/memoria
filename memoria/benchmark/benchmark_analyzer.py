@@ -17,9 +17,10 @@ MMR_DISPLAY_LIMIT = 10
 
 
 class BenchmarkAnalyzer:
-    def __init__(self, filepath: str, questions_path: str = None):
+    def __init__(self, filepath: str, questions_path: str = None, plugin_manager=None):
         self.filepath = Path(filepath)
         self.questions_path = Path(questions_path) if questions_path else None
+        self.plugin_manager = plugin_manager
         self.data = None
         self.questions_data = None
 
@@ -124,6 +125,13 @@ class BenchmarkAnalyzer:
             info("[Analyzer] No records to analyze", category="benchmark")
             return {"total": 0}
 
+        # ---- Plugin hook: pre-analysis ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_analysis_pre(records, {})
+            except Exception as e:
+                error(f"[Plugin] analysis_pre error: {e}", category="benchmark")
+
         metrics = {
             "total": total,
             "retrieved": 0,
@@ -164,9 +172,18 @@ class BenchmarkAnalyzer:
 
         self._print_analysis(metrics)
 
+        summary = self._build_summary(metrics)
+
+        # ---- Plugin hook: post-analysis ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_analysis_post(metrics, summary)
+            except Exception as e:
+                error(f"[Plugin] analysis_post error: {e}", category="benchmark")
+
         return {
             "metrics": metrics,
-            "summary": self._build_summary(metrics),
+            "summary": summary,
         }
 
     def _analyze_record(self, record, metrics, timing_keys, show_mmr_details):

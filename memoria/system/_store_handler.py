@@ -9,6 +9,13 @@ from core.logger import debug
 
 def handle_store(system, text, metadata=None):
     """Store a single memory."""
+    # ---- Plugin hook: pre-ingestion ----
+    if system.plugin_manager:
+        try:
+            system.plugin_manager.memoria_ingestion_pre(text, metadata)
+        except Exception as e:
+            debug(f"[Plugin] ingestion_pre error: {e}")
+
     t0 = time.perf_counter()
     record = system.extractor.extract(text)
     debug("extract:", time.perf_counter() - t0)
@@ -16,6 +23,13 @@ def handle_store(system, text, metadata=None):
     # Merge any provided metadata
     if metadata:
         record.metadata.update(metadata)
+
+    # ---- Plugin hook: post-ingestion ----
+    if system.plugin_manager:
+        try:
+            system.plugin_manager.memoria_ingestion_post(record)
+        except Exception as e:
+            debug(f"[Plugin] ingestion_post error: {e}")
 
     debug("\n[TEST EXTRACTOR OUTPUT]")
     debug("TEXT:", record.text)
@@ -30,6 +44,13 @@ def handle_store(system, text, metadata=None):
     t0 = time.perf_counter()
     record.importance = system.scorer.score(record.text, record.metadata)
     debug("score:", time.perf_counter() - t0)
+
+    # ---- Plugin hook: pre-storage ----
+    if system.plugin_manager:
+        try:
+            system.plugin_manager.memoria_storage_pre(record, metadata)
+        except Exception as e:
+            debug(f"[Plugin] storage_pre error: {e}")
 
     t0 = time.perf_counter()
     debug(id(system.vector_store))
@@ -55,6 +76,14 @@ def handle_store(system, text, metadata=None):
     debug("faiss:", time.perf_counter() - t0)
 
     debug(f"Stored memory {mem_id}")
+
+    # ---- Plugin hook: post-storage ----
+    if system.plugin_manager:
+        try:
+            system.plugin_manager.memoria_storage_post(mem_id, record, metadata)
+        except Exception as e:
+            debug(f"[Plugin] storage_post error: {e}")
+
     return mem_id
 
 
@@ -85,12 +114,27 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
     score_time = 0.0
 
     for i, text in enumerate(texts):
+        # ---- Plugin hook: pre-ingestion per record ----
+        if system.plugin_manager:
+            try:
+                meta = metadatas[i] if metadatas else None
+                system.plugin_manager.memoria_ingestion_pre(text, meta)
+            except Exception as e:
+                debug(f"[Plugin] ingestion_pre error: {e}")
+
         t0 = time.perf_counter()
         record = system.extractor.extract(text)
         extract_time += time.perf_counter() - t0
 
         if metadatas and i < len(metadatas) and metadatas[i]:
             record.metadata.update(metadatas[i])
+
+        # ---- Plugin hook: post-ingestion per record ----
+        if system.plugin_manager:
+            try:
+                system.plugin_manager.memoria_ingestion_post(record)
+            except Exception as e:
+                debug(f"[Plugin] ingestion_post error: {e}")
 
         t0 = time.perf_counter()
         record.importance = system.scorer.score(record.text, record.metadata)
@@ -115,6 +159,13 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
         else:
             debug("[EMBED]   skipped (embedding disabled)", category="store")
     debug(f"[READY] {len(records)} records", category="store")
+
+    # ---- Plugin hook: pre-storage (batch) ----
+    if system.plugin_manager:
+        try:
+            system.plugin_manager.memoria_storage_pre(records, metadatas)
+        except Exception as e:
+            debug(f"[Plugin] storage_pre error: {e}")
 
     # ---- DB Insert ----
     t0 = time.perf_counter()
@@ -173,6 +224,13 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
             debug("[FAISS SAVE] skipped (using cached FAISS index)", category="store")
         else:
             debug("[FAISS SAVE] skipped (embedding disabled)", category="store")
+
+    # ---- Plugin hook: post-storage (batch) ----
+    if system.plugin_manager:
+        try:
+            system.plugin_manager.memoria_storage_post(ids, records, metadatas)
+        except Exception as e:
+            debug(f"[Plugin] storage_post error: {e}")
 
     runtime = time.perf_counter() - overall_start
     debug(f"[COMPLETE] {len(ids)} memories in {runtime:.2f}s", category="store")

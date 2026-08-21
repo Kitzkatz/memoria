@@ -33,7 +33,17 @@ class RankingPipeline:
         context_builder=None,
         mmr=None,
         finalizer=None,
+        plugin_manager=None,   # <-- NEW
     ):
+        # ---- Plugin support ----
+        self.plugin_manager = plugin_manager
+        self.custom_signals = []
+        self.custom_rerankers = []
+
+        if self.plugin_manager:
+            self._register_custom_signals()
+            self._register_custom_rerankers()
+
         self.ranker = ranker or MemoryRanker(
             tfidf_ranker=tfidf_ranker,
             feedback_loop=feedback_loop,
@@ -79,6 +89,28 @@ class RankingPipeline:
             else:
                 debug("BM25: No memories found in DB")
 
+    def _register_custom_signals(self):
+        """Collect custom ranking signals from plugins."""
+        try:
+            signals = self.plugin_manager.memoria_register_ranking_signal()
+            for signal_config in signals:
+                if isinstance(signal_config, dict) and 'name' in signal_config and 'score_func' in signal_config:
+                    self.custom_signals.append(signal_config)
+                    debug(f"[Plugin] Registered custom ranking signal: {signal_config['name']}")
+        except Exception as e:
+            debug(f"[Plugin] Failed to register custom ranking signals: {e}")
+
+    def _register_custom_rerankers(self):
+        """Collect custom rerankers from plugins."""
+        try:
+            rerankers = self.plugin_manager.memoria_register_reranker()
+            for reranker_config in rerankers:
+                if isinstance(reranker_config, dict) and 'name' in reranker_config and 'reranker' in reranker_config:
+                    self.custom_rerankers.append(reranker_config)
+                    debug(f"[Plugin] Registered custom reranker: {reranker_config['name']}")
+        except Exception as e:
+            debug(f"[Plugin] Failed to register custom rerankers: {e}")
+
     def _build_id_to_idx(self, db):
         """Build mapping from memory ID to BM25 index position."""
         if db is None:
@@ -95,11 +127,15 @@ class RankingPipeline:
         diagnostics = {}
         t_total_start = time.perf_counter()
 
-        # --- ✅ ENSURE ROUTING SIGNALS ARE PASSED TO RANKER ---
-        # The router should have already set query.metadata["routing_signals"]
-        # But if not, we make sure the ranker has access to it via the query object.
+        # ---- Plugin hook: pre‑ranking ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_ranking_pre(query, candidates)
+            except Exception as e:
+                debug(f"[Plugin] ranking_pre error: {e}")
+
+        # --- Ensure routing signals are passed to ranker ---
         # MemoryRanker.get_weights_for_type() reads query.metadata.get("routing_signals")
-        # This is the connection point between routing and ranking.
 
         # --- Ranker ---
         t0 = time.perf_counter()
@@ -177,6 +213,38 @@ class RankingPipeline:
             {"id": c.memory.id, "score": c.final_score}
             for c in candidates[:5]
         ]
+
+        # ---- Apply custom rerankers (after MMR) ----
+        if self.custom_rerankers:
+            for reranker_config in self.custom_rerankers:
+                try:
+                    name = reranker_config['name']
+                    reranker_fn = reranker_config['reranker']
+                    candidates = reranker_fn(candidates, query)
+                    debug(f"[Plugin] Applied custom reranker: {name}")
+                except Exception as e:
+                    debug(f"[Plugin] Custom reranker '{name}' failed: {e}")
+
+        # ---- Apply custom signals (store in diagnostics) ----
+        if self.custom_signals:
+            for signal_config in self.custom_signals:
+                name = signal_config['name']
+                score_func = signal_config['score_func']
+                for candidate in candidates:
+                    try:
+                        val = score_func(candidate.memory, query.text)
+                        if 'custom_signals' not in candidate.diagnostics:
+                            candidate.diagnostics['custom_signals'] = {}
+                        candidate.diagnostics['custom_signals'][name] = val
+                    except Exception as e:
+                        debug(f"[Plugin] Custom signal '{name}' failed for candidate {candidate.memory.id}: {e}")
+
+        # ---- Plugin hook: post‑ranking ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_ranking_post(query, candidates)
+            except Exception as e:
+                debug(f"[Plugin] ranking_post error: {e}")
 
         t_total = (time.perf_counter() - t_total_start) * 1000
         debug(f"[Pipeline] TOTAL pipeline time: {t_total:.2f}ms")

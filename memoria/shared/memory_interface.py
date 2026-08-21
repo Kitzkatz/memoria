@@ -22,6 +22,11 @@ class MemoryInterface:
         self.controller = MemoryController()
         info("[MemoryInterface] Initialized", category="interface")
 
+    @property
+    def plugin_manager(self):
+        """Expose the plugin manager from the controller."""
+        return getattr(self.controller, 'plugin_manager', None)
+
     # --------------------------------------------------
     # SINGLE MEMORY
     # --------------------------------------------------
@@ -36,6 +41,7 @@ class MemoryInterface:
             Memory ID.
         """
         debug(f"[MemoryInterface] remember: {text[:50]}...", category="interface")
+        # Pre-store hook could be added here, but MemorySystem already has it.
         return self.controller.remember(text)
 
     # --------------------------------------------------

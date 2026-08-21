@@ -53,7 +53,8 @@ def initialize_components(system, db, vector_store, embedder, entity_store, llm=
     """
     # ---- Core components ----
     system.attribute_map = ATTRIBUTE_MAP
-    system.extractor = MemoryExtractor(llm)
+    # Pass plugin_manager to MemoryExtractor
+    system.extractor = MemoryExtractor(llm, plugin_manager=getattr(system, 'plugin_manager', None))
     system.scorer = ImportanceScorer()
     system.embedding_cache = EmbeddingCache()
     system.query_processor = QueryProcessor()
@@ -102,7 +103,9 @@ def initialize_components(system, db, vector_store, embedder, entity_store, llm=
 
     # ---- Feedback Loop ----
     system.feedback = FeedbackLoop(
-        db, persist_path=getattr(settings, "FEEDBACK_PERSIST_PATH", "feedback_data.json")
+        db,
+        persist_path=getattr(settings, "FEEDBACK_PERSIST_PATH", "feedback_data.json"),
+        plugin_manager=getattr(system, 'plugin_manager', None),  # <-- ADDED
     )
     system.query_history = QueryHistory(
         max_history=getattr(settings, "QUERY_HISTORY_MAX", 1000),
@@ -121,6 +124,7 @@ def initialize_components(system, db, vector_store, embedder, entity_store, llm=
         db=db,
         bm25_ranker=system.bm25_ranker,
         tfidf_ranker=system.tfidf,
+        numpy_graph=system.numpy_graph,
         feedback_loop=system.feedback,
         ranker=None,
         normalizer=None,
@@ -128,7 +132,15 @@ def initialize_components(system, db, vector_store, embedder, entity_store, llm=
         context_builder=None,
         mmr=None,
         finalizer=None,
+        plugin_manager=getattr(system, 'plugin_manager', None),
     )
+
+    # ---- Propagate plugin manager to router and scheduler ----
+    if hasattr(system, 'plugin_manager') and system.plugin_manager:
+        if hasattr(system, 'router') and system.router:
+            system.router.plugin_manager = system.plugin_manager
+        if hasattr(system, 'scheduler') and system.scheduler:
+            system.scheduler.plugin_manager = system.plugin_manager
 
 
 def _build_tfidf(db):

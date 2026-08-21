@@ -16,6 +16,11 @@ class MemoryController:
         self.goals = GoalTracker(db)
         self.llm = llm
 
+    @property
+    def plugin_manager(self):
+        """Expose the plugin manager from the underlying MemorySystem."""
+        return getattr(self.system, 'plugin_manager', None)
+
     def remember(self, text: str, metadata: dict = None):
         if metadata:
             return self.system.store(text, metadata=metadata)

@@ -26,6 +26,9 @@ class Settings(BaseModel):
     # -------------------------
 
     EMBEDDING_MODEL: str = "memory/models/all-MiniLM-L6-v2"
+    # Chat template configuration
+    CHAT_TEMPLATE_DIR: str = "chat_templates"          # folder where templates are stored
+    CHAT_TEMPLATE_FILE: str = "llama3.txt"            # default template file name
     VECTOR_DIM: int = 384
     CHAT_MODEL: str = "mistral"
     LLM_URL: str = "http://localhost:8080"
@@ -77,7 +80,7 @@ class Settings(BaseModel):
 
     CONTEXT_MAX_MEMORIES: int = 50
     CONTEXT_MIN_SCORE: float = 0.15
-    CONTEXT_TOKEN_BUDGET: int = 800
+    CONTEXT_TOKEN_BUDGET: int = 10000
 
     # -------------------------
     # Memory
@@ -106,6 +109,8 @@ class Settings(BaseModel):
     # Embedding Cache
     # -------------------------
 
+    SKIP_EMBEDDING: bool = False
+
     EMBEDDING_CACHE_MAX_SIZE: int = 100000  # Max entries before LRU eviction
 
     # -------------------------
@@ -132,6 +137,16 @@ class Settings(BaseModel):
     # Adaptive Weighter
     # -------------------------
 
+    # cache/config.py - ADD auto-store settings
+
+    # ... existing settings ...
+
+    # Auto-store settings
+    AUTO_STORE_MEMORIES: bool = False  # Off by default for benchmarks
+    AUTO_STORE_THRESHOLD: float = 0.7  # Minimum confidence score to auto-store
+    AUTO_STORE_MAX_PER_SESSION: int = 10  # Max auto-stores per conversation session
+    AUTO_STORE_TYPES: List[str] = ["general", "chat"]  # Which memory types to auto-store
+
     USE_ADAPTIVE_WEIGHTS: bool = True
     ADAPTIVE_WEIGHT_STEP: float = 0.02
     ADAPTIVE_WEIGHT_MAX: float = 0.40
@@ -140,18 +155,20 @@ class Settings(BaseModel):
     # -------------------------
     # Ranking Weights (must sum to ~1.0)
     # -------------------------
+    # ---- Signal Registry ----
+    SIGNAL_REGISTRY_PATH: str = "ranking/signal_registry.json"
+    ENABLE_SIGNAL_REGISTRY: bool = True
 
-
-    RANKING_SEMANTIC: float = 0.1584   # Down from 0.1900
-    RANKING_IMPORTANCE: float = 0.0111
-    RANKING_RECENCY: float = 0.0244
-    RANKING_TOKEN: float = 0.2331       # Slightly down from 0.1800
-    RANKING_FEEDBACK: float = 0.0244
-    RANKING_ENTITY: float = 0.0738      # Down from 0.1840
-    RANKING_SUBJECT: float = 0.1391
-    RANKING_ATTRIBUTE: float = 0.0479
-    RANKING_TFIDF: float = 0.2185
-    RANKING_BM25: float = 0.0694        # Down from 0.0900
+    RANKING_SEMANTIC: float = 0.1360   # Down from 0.1900
+    RANKING_IMPORTANCE: float = 0.0100
+    RANKING_RECENCY: float = 0.0263
+    RANKING_TOKEN: float = 0.3235       # Slightly down from 0.1800
+    RANKING_FEEDBACK: float = 0.0100
+    RANKING_ENTITY: float = 0.0100      # Down from 0.1840
+    RANKING_SUBJECT: float = 0.0961
+    RANKING_ATTRIBUTE: float = 0.0108
+    RANKING_TFIDF: float = 0.3032
+    RANKING_BM25: float = 0.0747        # Down from 0.0900
     # Total: 1.0000
 
     # -------------------------
@@ -206,6 +223,11 @@ class Settings(BaseModel):
     CLI_HISTORY_FILE: str = ".memory_history"
     CLI_SHOW_SCORES: bool = True
     CLI_TABLE_WIDTH: int = 80
+
+    # ---- Plugin System ----
+    PLUGIN_ENABLED: bool = True
+    PLUGIN_DIR: str = "plugins"
+    PLUGIN_AUTO_LOAD: bool = True
 
     # -------------------------
     # Validation

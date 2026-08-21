@@ -159,16 +159,16 @@ class Settings(BaseModel):
     SIGNAL_REGISTRY_PATH: str = "ranking/signal_registry.json"
     ENABLE_SIGNAL_REGISTRY: bool = True
 
-    RANKING_SEMANTIC: float = 0.1195   # Down from 0.1900
-    RANKING_IMPORTANCE: float = 0.0110
-    RANKING_RECENCY: float = 0.0268
-    RANKING_TOKEN: float = 0.3107       # Slightly down from 0.1800
-    RANKING_FEEDBACK: float = 0.0268
-    RANKING_ENTITY: float = 0.0272      # Down from 0.1840
-    RANKING_SUBJECT: float = 0.0980
-    RANKING_ATTRIBUTE: float = 0.0110
-    RANKING_TFIDF: float = 0.2929
-    RANKING_BM25: float = 0.0762        # Down from 0.0900
+    RANKING_SEMANTIC: float = 0.1470   # Down from 0.1900
+    RANKING_IMPORTANCE: float = 0.0100
+    RANKING_RECENCY: float = 0.0249
+    RANKING_TOKEN: float = 0.3247       # Slightly down from 0.1800
+    RANKING_FEEDBACK: float = 0.0100
+    RANKING_ENTITY: float = 0.0100      # Down from 0.1840
+    RANKING_SUBJECT: float = 0.0911
+    RANKING_ATTRIBUTE: float = 0.0102
+    RANKING_TFIDF: float = 0.3028
+    RANKING_BM25: float = 0.0708        # Down from 0.0900
     # Total: 1.0000
 
     # -------------------------
@@ -223,6 +223,11 @@ class Settings(BaseModel):
     CLI_HISTORY_FILE: str = ".memory_history"
     CLI_SHOW_SCORES: bool = True
     CLI_TABLE_WIDTH: int = 80
+
+    # ---- Plugin System ----
+    PLUGIN_ENABLED: bool = True
+    PLUGIN_DIR: str = "plugins"
+    PLUGIN_AUTO_LOAD: bool = True
 
     # -------------------------
     # Validation

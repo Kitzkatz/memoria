@@ -208,11 +208,12 @@ class SufficientPolicy(CompletionPolicy):
 
 class Scheduler:
 
-    def __init__(self, blackboard, max_workers=None):
+    def __init__(self, blackboard, max_workers=None, plugin_manager=None):
         if max_workers is None:
             max_workers = min(8, (os.cpu_count() or 4))
 
         self.blackboard = blackboard
+        self.plugin_manager = plugin_manager  # <-- NEW
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
 
         self.handlers = {}
@@ -248,8 +249,6 @@ class Scheduler:
 
         submitted_at = time.perf_counter()
 
-        # Register the execution record BEFORE the worker is allowed
-        # to acquire self.lock inside _run_task().
         with self.lock:
             execution = TaskExecution(
                 task_id=task_id,
@@ -260,9 +259,6 @@ class Scheduler:
 
             self.executions[task_id] = execution
 
-            # executor.submit() may start the worker immediately.
-            # That's okay because _run_task() will block on self.lock
-            # until this block finishes.
             future = self.executor.submit(
                 self._run_task,
                 task_id,
@@ -464,7 +460,6 @@ class Scheduler:
 
             "completed_sources": completed_sources,
 
-            # Retrieval policies can inspect actual worker output.
             "completed_results": completed_results,
         }
 
@@ -515,6 +510,13 @@ class Scheduler:
         """
 
         task_ids = list(task_ids)
+
+        # ---- Plugin hook: pre-scheduler ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_scheduler_pre(task_ids)
+            except Exception as e:
+                debug(f"[Plugin] scheduler_pre error: {e}")
 
         if not task_ids:
             return ExecutionResult(
@@ -571,13 +573,6 @@ class Scheduler:
 
                 timeout = remaining
 
-            # IMPORTANT:
-            #
-            # We block until something ACTUALLY completes.
-            #
-            # No polling interval.
-            # No quiet period.
-            # No artificial minimum wait.
             done, pending_futures = wait(
                 pending_futures,
                 timeout=timeout,
@@ -649,7 +644,7 @@ class Scheduler:
                     "error": execution.error,
                 }
 
-        return ExecutionResult(
+        execution_result = ExecutionResult(
             task_ids=task_ids,
             completed_ids=state["completed_ids"],
             failed_ids=state["failed_ids"],
@@ -661,6 +656,15 @@ class Scheduler:
             finish_reason=finish_reason,
             task_stats=task_stats,
         )
+
+        # ---- Plugin hook: post-scheduler ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_scheduler_post(execution_result)
+            except Exception as e:
+                debug(f"[Plugin] scheduler_post error: {e}")
+
+        return execution_result
 
     # ------------------------------------------------------------------
     # Cancellation

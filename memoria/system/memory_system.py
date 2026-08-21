@@ -5,6 +5,7 @@ Facade that delegates to specialized handlers.
 
 from cache.config import settings
 from core.logger import debug
+from core.plugin_manager import MemoriaPluginManager  # <-- NEW IMPORT
 
 # Import the new internal modules (prefixed with _ to indicate internal)
 from system._initializer import initialize_components
@@ -32,6 +33,19 @@ class MemorySystem:
         # For backward compatibility with any external code checking these
         self.use_blackboard = getattr(settings, "USE_BLACKBOARD", False)
 
+        # ---- Plugin System ----
+        if getattr(settings, "PLUGIN_ENABLED", True):
+            self.plugin_manager = MemoriaPluginManager()
+            if getattr(settings, "PLUGIN_AUTO_LOAD", True):
+                self.plugin_manager.discover_plugins()
+                # Call startup hook
+                try:
+                    self.plugin_manager.memoria_on_startup()
+                except Exception as e:
+                    debug(f"[Plugin] Startup hook error: {e}")
+        else:
+            self.plugin_manager = None
+
         debug("MemorySystem initialized")
 
     # -------------------------------------
@@ -46,7 +60,23 @@ class MemorySystem:
             text: Memory text
             metadata: Optional metadata dict to merge with extracted metadata
         """
-        return handle_store(self, text, metadata=metadata)
+        # Pre-store hook
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_pre_store(text, metadata)
+            except Exception as e:
+                debug(f"[Plugin] pre-store hook error: {e}")
+
+        mem_id = handle_store(self, text, metadata=metadata)
+
+        # Post-store hook
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_post_store(mem_id, text, metadata)
+            except Exception as e:
+                debug(f"[Plugin] post-store hook error: {e}")
+
+        return mem_id
 
     def store_many(self, texts, metadatas=None, skip_embedding_build=False):
         """
@@ -58,11 +88,43 @@ class MemorySystem:
             skip_embedding_build: If True, skip embedding computation and vector store operations
                                   (assumes FAISS index is already loaded from cache).
         """
-        return handle_store_many(self, texts, metadatas=metadatas, skip_embedding_build=skip_embedding_build)
+        # Pre-store hook for batch
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_pre_store(texts, metadatas)
+            except Exception as e:
+                debug(f"[Plugin] pre-store hook error: {e}")
+
+        ids = handle_store_many(self, texts, metadatas=metadatas, skip_embedding_build=skip_embedding_build)
+
+        # Post-store hook for batch
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_post_store(ids, texts, metadatas)
+            except Exception as e:
+                debug(f"[Plugin] post-store hook error: {e}")
+
+        return ids
 
     def query(self, text):
         """Query the memory system."""
-        return handle_query(self, text)
+        # Pre-query hook
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_pre_query(text)
+            except Exception as e:
+                debug(f"[Plugin] pre-query hook error: {e}")
+
+        response = handle_query(self, text)
+
+        # Post-query hook
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_post_query(text, response)
+            except Exception as e:
+                debug(f"[Plugin] post-query hook error: {e}")
+
+        return response
 
     def ingest_pdf(self, filepath: str, max_pages: int = 100):
         """Ingest a PDF file."""
@@ -89,3 +151,18 @@ class MemorySystem:
     def prune(self, dry_run: bool = False) -> dict:
         """Manually run the pruner."""
         return self.pruner.prune_now(dry_run=dry_run)
+
+    def shutdown(self):
+        """Explicitly shut down the system and call plugin shutdown hooks."""
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_on_shutdown()
+            except Exception as e:
+                debug(f"[Plugin] Shutdown hook error: {e}")
+
+    def __del__(self):
+        """Destructor – attempt to call shutdown hooks."""
+        try:
+            self.shutdown()
+        except Exception:
+            pass

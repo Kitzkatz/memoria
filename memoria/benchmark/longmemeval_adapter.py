@@ -2,14 +2,14 @@
 """
 LongMemEval-S adapter — stores texts WITH metadata, queries, and records retrieval ranks.
 Per‑question isolation: store haystack, query, clear.
-
-Uses ResultFormatter to produce output compatible with the normal benchmark runner.
+Supports per‑haystack DB + FAISS caching with independent rebuilds.
 """
 
 import json
 import hashlib
 import sys
 import time
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -162,6 +162,33 @@ def clear_db_fast(controller):
     debug(f"[LongMemEval] DB cleared.")
 
 
+def rebuild_indices_from_db(system):
+    """Rebuild inverted index and BM25 from the current DB."""
+    if hasattr(system, 'inverted_index') and system.inverted_index:
+        system.inverted_index.build()
+    if hasattr(system, 'bm25_ranker') and system.bm25_ranker:
+        rows = system.db.fetch_all()
+        if rows:
+            corpus_tokens = [row.get('tokens', []) for row in rows]
+            system.bm25_ranker.build(corpus_tokens)
+        else:
+            system.bm25_ranker.build([])
+
+
+def build_faiss_from_texts(controller, texts, mem_ids):
+    """
+    Compute embeddings from texts and add to vector store with given memory IDs.
+    Returns vectors.
+    """
+    extractor = controller.system.extractor
+    records = [extractor.extract(text) for text in texts]
+    normalized_texts = [r.normalized_text for r in records]
+    vectors = controller.system.embedder.embed_many(normalized_texts)
+    controller.system.vector_store.add_many(mem_ids, vectors, persist=False)
+    controller.system.embedding_cache.add_many(mem_ids, vectors)
+    return vectors
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -171,11 +198,11 @@ def main():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--skip-embedding", action="store_true")
     parser.add_argument("--no-parallel", action="store_true")
-    # Optimizer flags
     parser.add_argument("--optimize", action="store_true", help="Run adaptive weight optimization after benchmark")
     parser.add_argument("--dry-run-weights", action="store_true", help="Print weight changes without saving")
     parser.add_argument("--step-size", type=float, default=0.02, help="Step size for weight adjustment")
-    # Output file (optional)
+    parser.add_argument("--cache-dir", default="cache/faiss_indices", help="Directory to store per-haystack caches (DB + FAISS)")
+    parser.add_argument("--rebuild-cache", action="store_true", help="Force rebuilding all caches (ignore existing)")
     parser.add_argument("--output", type=str, help="Override output file path (default: timestamped in benchmark_output/results/)")
     args = parser.parse_args()
 
@@ -194,10 +221,8 @@ def main():
     print(f"[LongMemEval] {len(questions)} questions loaded")
     print(f"[LongMemEval] Dataset checksum: {compute_checksum(dataset_path)}")
 
-    # ---- INCREASE CONTEXT TOKEN BUDGET FOR BENCHMARK ----
     settings.CONTEXT_TOKEN_BUDGET = 10000
 
-    # Load questions file for expected answer text matching (optional)
     questions_data = load_questions_file()
 
     memory = MemoryInterface()
@@ -205,7 +230,10 @@ def main():
     controller = memory.controller
     print("Embedder model:", controller.system.embedder.model)
 
-    records = []            # Will hold per‑question records (standard format)
+    cache_dir = Path(args.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    records = []
     retrieval_hits = 0
     total_memories = 0
     start_time = time.perf_counter()
@@ -216,10 +244,7 @@ def main():
         answer_ids = question.get('answer_session_ids', [])
         print(f"\n[Question {q_idx+1}/{len(questions)}] {question_text[:60]}...")
 
-        # Get haystack_session_ids from the question
         haystack_session_ids = question.get('haystack_session_ids', [])
-
-        # Build haystack with the session IDs
         texts, metadatas = build_texts_and_metadata(
             question,
             haystack_session_ids=haystack_session_ids,
@@ -231,24 +256,101 @@ def main():
 
         print(f"    Haystack: {haystack_mem_count} memories", end="", flush=True)
 
-        # ---- Store the haystack ----
-        store_start = time.perf_counter()
-        count = loader.insert_batch(
-            texts,
-            metadatas=metadatas,
-            batch_size=args.batch_size,
-            skip_embedding=args.skip_embedding,
-            parallel_extract=not args.no_parallel,
-            max_workers=args.workers,
-        )
-        store_time = time.perf_counter() - store_start
+        # ---- Check caches ----
+        db_cache_path = cache_dir / f"db_{q_id}.sqlite"
+        faiss_cache_path = cache_dir / f"faiss_{q_id}.index"
+        db_cache_exists = db_cache_path.exists() and not args.rebuild_cache
+        faiss_cache_exists = faiss_cache_path.exists() and not args.rebuild_cache
+
+        skip_embedding_build = False
+        skip_db_insert = False
+
+        # ---- Load DB cache if exists ----
+        if db_cache_exists:
+            print(f"\n    Loading cached DB for {q_id}...", end="", flush=True)
+            try:
+                if hasattr(controller.system.db, '_conn'):
+                    controller.system.db._conn.close()
+                shutil.copy2(str(db_cache_path), settings.DB_PATH)
+                from db.connection import DBConnection
+                controller.system.db._conn = DBConnection()
+                rebuild_indices_from_db(controller.system)
+                controller.system.vector_store.reset()
+                skip_db_insert = True
+                print(" loaded", end="", flush=True)
+            except Exception as e:
+                print(f" failed ({e}), rebuilding", end="", flush=True)
+                skip_db_insert = False
+
+        # ---- Build FAISS if needed (when DB loaded but FAISS missing) ----
+        faiss_built = False
+        if not args.skip_embedding and not faiss_cache_exists and skip_db_insert:
+            print(f"\n    Building FAISS for {q_id}...", end="", flush=True)
+            try:
+                # Fetch memory IDs from DB (they should be in insertion order)
+                rows = controller.system.db.fetch_all()
+                mem_ids = [row['id'] for row in rows]
+                if len(mem_ids) == len(texts):
+                    build_faiss_from_texts(controller, texts, mem_ids)
+                    controller.system.vector_store.save_to_file(str(faiss_cache_path))
+                    faiss_built = True
+                    skip_embedding_build = True
+                    print(" built and saved", end="", flush=True)
+                else:
+                    # Mismatch: fallback to full rebuild
+                    print(f" ID count mismatch: {len(mem_ids)} vs {len(texts)}, rebuilding DB+FAISS", end="", flush=True)
+                    skip_db_insert = False
+            except Exception as e:
+                print(f" failed ({e}), will rebuild DB+FAISS", end="", flush=True)
+                skip_db_insert = False
+
+        # ---- Store (or skip) ----
+        store_time = 0.0
+        count = 0
+        if not skip_db_insert:
+            store_start = time.perf_counter()
+            count = loader.insert_batch(
+                texts,
+                metadatas=metadatas,
+                batch_size=args.batch_size,
+                skip_embedding=args.skip_embedding,
+                parallel_extract=not args.no_parallel,
+                max_workers=args.workers,
+                skip_embedding_build=skip_embedding_build,
+            )
+            store_time = time.perf_counter() - store_start
+
+            # Save caches
+            if not args.rebuild_cache:
+                print(f"\n    Saving DB cache for {q_id}...", end="", flush=True)
+                try:
+                    shutil.copy2(settings.DB_PATH, str(db_cache_path))
+                    print(" saved", end="", flush=True)
+                except Exception as e:
+                    print(f" failed ({e})", end="", flush=True)
+
+                if not args.skip_embedding and not skip_embedding_build:
+                    print(f"\n    Saving FAISS cache for {q_id}...", end="", flush=True)
+                    try:
+                        controller.system.vector_store.save_to_file(str(faiss_cache_path))
+                        print(" saved", end="", flush=True)
+                    except Exception as e:
+                        print(f" failed ({e})", end="", flush=True)
+        else:
+            # DB was loaded, count is haystack_mem_count
+            count = haystack_mem_count
+            if faiss_built:
+                # Already saved FAISS
+                pass
+            elif not faiss_cache_exists and not args.skip_embedding:
+                # This case should be rare, but if it happens we warn
+                print(f"\n    FAISS missing and could not build; consider --rebuild-cache")
 
         # ---- Query ----
         query_start = time.perf_counter()
         response = controller.recall(question_text)
         query_time = time.perf_counter() - query_start
 
-        # ---- DEBUG: inspect candidate metadata ----
         candidates = response.get("results", [])
         if candidates:
             first_meta = candidates[0].get("metadata", {})
@@ -257,20 +359,18 @@ def main():
         else:
             print(f"\n    [DEBUG] No candidates returned!")
 
-        # ---- Check retrieval ----
         found, rank = check_retrieval(response, answer_ids)
         if found:
             retrieval_hits += 1
 
-        # ---- Build record using ResultFormatter ----
         raw_candidates = response.get("results", [])
         record = build_record(
             query=question_text,
-            expected="",  # No expected text from this adapter; analyzer can use expected_ids
+            expected="",
             expected_ids=answer_ids,
             expected_rank=rank,
             retrieved=found,
-            candidates=raw_candidates,      # Raw candidates from controller
+            candidates=raw_candidates,
             runtime_ms=query_time * 1000,
             diagnostics=response.get("diagnostics", {})
         )
@@ -278,31 +378,32 @@ def main():
 
         print(f", inserted {count} in {store_time:.2f}s, queried in {query_time:.2f}s", end="", flush=True)
 
-        # ---- Clear DB ----
-        clear_db_fast(controller)
+        # ---- Clear DB (only if we built it) ----
+        if not skip_db_insert:
+            clear_db_fast(controller)
+        else:
+            controller.system.vector_store.reset()
+            controller.system.embedding_cache.clear()
+            debug(f"[LongMemEval] DB cache used, skipping clear.")
         print(", cleared")
 
     elapsed = time.perf_counter() - start_time
 
-    # ---- Assemble final output using ResultFormatter ----
     output = build_output(records, question_count=len(questions))
 
-    # ---- Determine output path ----
+    # Determine output path
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
     else:
-        # Timestamped filename in results directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"longmemeval_{timestamp}.json"
         output_dir = Path("benchmark_output/results")
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / output_filename
 
-    # ---- Write results ----
     write_output(output, str(output_path))
 
-    # ---- Summary ----
     total_questions = len(questions)
     print("\n" + "=" * 60)
     print("[LongMemEval] Benchmark Complete")
@@ -315,7 +416,6 @@ def main():
     print("=" * 60)
     print(f"\nResults saved to: {output_path}")
 
-    # ---- Run optimizer if requested ----
     if args.optimize:
         print("\n[Optimizer] Running adaptive weight adjustment...")
         result = adaptive_weighter_pipeline(

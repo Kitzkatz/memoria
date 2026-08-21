@@ -7,6 +7,7 @@ from functools import lru_cache
 from retrieval.case_folding import fold_case
 from ranking.attribute_map import ATTRIBUTE_MAP
 from retrieval.query_models import QueryRecord
+from cache.config import settings   # <-- ADD THIS IMPORT
 
 
 class QueryProcessor:
@@ -61,7 +62,10 @@ class QueryProcessor:
         """Lowercase, collapse whitespace, strip."""
         if not text:
             return ""
-        text = fold_case(text)
+        # Conditionally apply case folding
+        if getattr(settings, "USE_CASE_FOLDING", True):
+            text = fold_case(text)
+        # else keep original case
         text = re.sub(r"\s+", " ", text)
         return text.strip()
 
