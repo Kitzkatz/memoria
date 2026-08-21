@@ -235,3 +235,4 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
     runtime = time.perf_counter() - overall_start
     debug(f"[COMPLETE] {len(ids)} memories in {runtime:.2f}s", category="store")
     return ids
+	
