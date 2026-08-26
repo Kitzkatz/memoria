@@ -222,11 +222,10 @@ class FusionWorker(Worker):
         # 1. Run FAISS and BM25
         faiss_result = self.faiss_worker.process({
             "vector": payload.get("vector"),
-            "top_k": top_k * 2,  # overfetch to compensate for filtering
+            "top_k": top_k * 2,
             "shard_id": shard_id,
             "num_shards": num_shards
         })
-
         bm25_result = self.bm25_worker.process({
             "tokens": payload.get("tokens", []),
             "limit": top_k * 2,
@@ -234,41 +233,35 @@ class FusionWorker(Worker):
             "num_shards": num_shards
         })
 
-        # 2. Collect candidates with scores
         faiss_candidates = faiss_result.get("candidates", [])   # list of (mem_id, distance)
         bm25_candidates = bm25_result.get("candidates", [])     # list of (mem_id, score)
 
-        # 3. Convert distances to similarity (invert, clamp)
-        def distance_to_similarity(dist):
-            # FAISS distance is L2 – smaller is better; convert to 0..1 similarity
-            # Use exp(-dist) to get a similarity measure
-            import math
-            return math.exp(-dist / 100.0)  # scale factor can be tuned
+        # 2. Build rank dictionaries (1‑indexed, lower rank = better)
+        faiss_rank = {mem_id: idx+1 for idx, (mem_id, _) in enumerate(faiss_candidates)}
+        bm25_rank   = {mem_id: idx+1 for idx, (mem_id, _) in enumerate(bm25_candidates)}
 
-        faiss_scored = {mem_id: distance_to_similarity(dist) for mem_id, dist in faiss_candidates}
-        bm25_scored = {mem_id: score for mem_id, score in bm25_candidates}
-
-        # 4. Combine scores (weighted sum)
-        fused = {}
-        all_ids = set(faiss_scored.keys()) | set(bm25_scored.keys())
+        # 3. RRF fusion
+        k = getattr(settings, "RRF_K", 60)  # configurable
+        rrf_scores = {}
+        all_ids = set(faiss_rank.keys()) | set(bm25_rank.keys())
 
         for mem_id in all_ids:
-            faiss_score = faiss_scored.get(mem_id, 0.0)
-            bm25_score = bm25_scored.get(mem_id, 0.0)
-            # Normalize BM25 score (assumes scores are already positive; clamp to 0..1)
-            # We'll apply a softmax-like scaling if needed, but for now assume BM25 scores are in a reasonable range.
-            # We'll normalize BM25 by dividing by max score (we know it's non‑negative)
-            # Since we don't know max, we can use a sigmoid or simply clamp.
-            bm25_norm = min(1.0, bm25_score / 10.0)  # adjust based on typical BM25 scores
-            combined = (self.semantic_weight * faiss_score) + ((1 - self.semantic_weight) * bm25_norm)
-            fused[mem_id] = combined
+            faiss_r = faiss_rank.get(mem_id, float('inf'))  # missing = infinity
+            bm25_r   = bm25_rank.get(mem_id, float('inf'))
+            # RRF: 1/(rank + k) – missing ranks get 0
+            score = 0.0
+            if faiss_r != float('inf'):
+                score += 1.0 / (faiss_r + k)
+            if bm25_r != float('inf'):
+                score += 1.0 / (bm25_r + k)
+            rrf_scores[mem_id] = score
 
-        # 5. Sort and truncate
-        sorted_candidates = sorted(fused.items(), key=lambda x: x[1], reverse=True)
+        # 4. Sort and truncate
+        sorted_candidates = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
         top_candidates = sorted_candidates[:top_k]
 
         fusion_time = (time.perf_counter() - start) * 1000
-        debug(f"FusionWorker (shard {shard_id}): fusion={fusion_time:.2f}ms, count={len(top_candidates)}")
+        debug(f"FusionWorker (RRF, k={k}): fusion={fusion_time:.2f}ms, count={len(top_candidates)}")
 
         return {
             "source": "fusion",

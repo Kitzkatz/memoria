@@ -229,7 +229,7 @@ def _handle_query_blackboard(
     if getattr(settings, "USE_ROUTING", True) and hasattr(system, "router") and system.router:
         route = system.router.route(memory_type_hint)
         # ---- USE FUSION-AWARE WORKER LIST ----
-        workers_to_use = get_workers_for_type(memory_type_hint)
+        workers_to_use = getattr(settings, "WORKERS_TO_USE", get_workers_for_type(memory_type_hint))
         graph_depth = route.get("graph_depth", getattr(settings, "GRAPH_DEPTH", 2))
         signals = route.get("signals", {})
         pool = route.get("pool", "memories")
@@ -893,6 +893,39 @@ def _handle_query_blackboard(
                 system.plugin_manager.memoria_retrieval_post(query, candidates)
             except Exception as e:
                 debug(f"[Plugin] retrieval_post error: {e}")
+
+    # ==================================================================
+    # CROSS-ENCODER RERANKER (optional, configurable)
+    # ==================================================================
+    if getattr(settings, "USE_CROSS_ENCODER", False) and len(candidates) > 1:
+        try:
+            from sentence_transformers import CrossEncoder
+            import os
+
+            ce_path = getattr(settings, "CROSS_ENCODER_MODEL_PATH", "memory/models/cross-encoder")
+            top_k = getattr(settings, "CROSS_ENCODER_TOP_K", 100)
+
+            # Load the model from local path
+            ce = CrossEncoder(ce_path)
+            top_candidates = candidates[:top_k]
+            pairs = [[query.text, c.memory.text] for c in top_candidates]
+            ce_scores = ce.predict(pairs)
+
+            for c, score in zip(top_candidates, ce_scores):
+                c.base_score = float(score)
+                c.final_score = float(score)  # also set final_score
+
+            # Re-sort the top candidates by CE score
+            top_candidates.sort(key=lambda c: c.base_score, reverse=True)
+
+            # Merge back: top candidates first, then the rest
+            candidates = top_candidates + candidates[top_k:]
+
+            debug(f"[Cross-Encoder] Reranked {len(top_candidates)} candidates")
+        except ImportError:
+            debug("[Cross-Encoder] sentence_transformers not installed. Skipping.")
+        except Exception as e:
+            debug(f"[Cross-Encoder] Error: {e}. Skipping.")
 
     # ------------------------------------------------------------------
     # Step 10: Pass routing signals

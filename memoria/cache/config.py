@@ -87,9 +87,25 @@ class Settings(BaseModel):
     FUSION_SEMANTIC_WEIGHT: float = 0.5
     # CRITICAL FIX: The benchmark IGNORED this flag last time and forced MMR ON.
     # To guarantee it's off, you MUST pass MEMORY_MMR_ENABLED=False as an ENV var.
+    RRF_K: int = 10
+
     MMR_ENABLED: bool = False
     USE_BLACKBOARD: bool = True
     USE_CASE_FOLDING: bool = True
+
+    # -------------------------
+    # Retrieval Workers
+    # -------------------------
+
+    WORKERS_TO_USE: List[str] = ["fusion"]  # exclude "graph", "attribute"
+
+    # -------------------------
+    # Cross-Encoder
+    # -------------------------
+
+    USE_CROSS_ENCODER: bool = False
+    CROSS_ENCODER_MODEL_PATH: str = "memory/models/cross-encoder"
+    CROSS_ENCODER_TOP_K: int = 10
 
     # -------------------------
     # Routing

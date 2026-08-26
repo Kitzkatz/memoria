@@ -1,16 +1,31 @@
-# Memoria V4
+# Memoria V4.5
 
-**Local-first, LLM-agnostic memory system with parallel hybrid retrieval, multi-signal ranking, and a declarative type-routing architecture.**
+**Local-first, LLM-agnostic memory system with parallel hybrid retrieval, multi-signal ranking, declarative type routing, and a plugin-based architecture.**
 
-~122ms average query latency · 99.5% retrieval · 4GB RAM · CPU-only · No cloud
+**4GB RAM · CPU-only · No cloud · No API keys required · MIT licensed**
+
+Memoria is designed as a configurable memory/retrieval substrate rather than a chatbot-specific memory implementation.
 
 ---
 
 ## What It Is
 
-Memoria is a fully local memory system for LLMs. It stores memories, retrieves them using parallel workers (FAISS, BM25, Graph, Phrase, Attribute) coordinated through a blackboard scheduler, ranks candidates with multiple signals, and routes queries by memory type.
+Memoria is a fully local memory system for LLMs and other applications that need persistent contextual retrieval.
 
-**You own your data. No cloud. No API keys. No subscription.**
+It can store memories, route queries by memory type, retrieve candidates using parallel workers, rank and finalize results, construct context, and expose the system through CLI, TUI, GUI, and API interfaces.
+
+Retrieval workers can include:
+
+* **FAISS** — semantic retrieval
+* **BM25** — lexical retrieval
+* **Graph** — entity/relationship traversal
+* **Phrase** — phrase matching
+* **Attribute** — structured attribute retrieval
+* **Fusion** — combined retrieval strategies
+
+Retrieval workers are coordinated through a **blackboard/scheduler architecture** with declarative completion policies rather than requiring the query handler to synchronously wait for every worker.
+
+**You own your data. No cloud. No subscription.**
 
 ---
 
@@ -31,12 +46,12 @@ python cli.py recall "What does Kevin Johnson like?"
 
 ## Interfaces
 
-| Interface | Command | URL |
-|-----------|---------|-----|
-| CLI | `python cli.py` | Terminal |
-| TUI | `python tui.py` | Terminal |
-| GUI | `python gui.py` | http://localhost:5000 |
-| API | `python main.py` | http://localhost:8000/docs |
+| Interface | Command          | URL                        |
+| --------- | ---------------- | -------------------------- |
+| CLI       | `python cli.py`  | Terminal                   |
+| TUI       | `python tui.py`  | Terminal                   |
+| GUI       | `python gui.py`  | http://localhost:5000      |
+| API       | `python main.py` | http://localhost:8000/docs |
 
 ---
 
@@ -65,7 +80,9 @@ python cli.py config
 python tui.py
 ```
 
-Commands: `store`, `recall`, `chat`, `set-goal`, `list-goals`, `graph`, `stats`, `doctor`, `export`, `import`, `quit`
+Commands:
+
+`store`, `recall`, `chat`, `set-goal`, `list-goals`, `graph`, `stats`, `doctor`, `export`, `import`, `quit`
 
 ---
 
@@ -73,8 +90,11 @@ Commands: `store`, `recall`, `chat`, `set-goal`, `list-goals`, `graph`, `stats`,
 
 ```bash
 python gui.py
-# http://localhost:5000
 ```
+
+Open:
+
+`http://localhost:5000`
 
 ---
 
@@ -82,128 +102,301 @@ python gui.py
 
 ```bash
 python main.py
-# http://localhost:8000/docs
 ```
 
-Endpoints: `/memory/store`, `/memory/query`, `/memory/batch_store`, `/chat`, `/chat/raw`, `/debug/stats`, `/debug/health`, `/maintenance/rebuild_index`, `/benchmark/run`
+Open:
+
+`http://localhost:8000/docs`
+
+Endpoints include:
+
+`/memory/store` · `/memory/query` · `/memory/batch_store` · `/chat` · `/chat/raw` · `/debug/stats` · `/debug/health` · `/maintenance/rebuild_index` · `/benchmark/run`
 
 ---
 
-## Synthetic World Demo
+# LongMemEval
 
-```bash
-cd synthetic_world && python run_benchmark.py
-cp benchmark_output/*.json ../memoria/benchmark_output/
-cd ../memoria
+Memoria includes an adapter for the **LongMemEval-S** benchmark.
 
-python benchmark/test_batch_load.py
-python benchmark/benchmark_runner.py --limit 50
-python benchmark/benchmark_analyzer.py benchmark_output/results/benchmark_*.json
+The adapter works from the benchmark's native question/haystack structure rather than converting the dataset into Memoria's original database format.
+
+For each question it can:
+
+* isolate the relevant haystack
+* construct the corresponding memory state
+* cache embeddings
+* reuse cached embeddings across runs
+* execute the query
+* identify expected answer sessions
+* compare retrieved memories against expected IDs
+* record retrieval and ranking diagnostics
+* record per-stage timing
+
+The adapter is designed to make repeated evaluation practical even on constrained hardware.
+
+On a **4GB RAM CPU-only laptop**, caching the embeddings for the 500-question evaluation took roughly **one minute**. Subsequent evaluation runs against the cached embeddings take roughly **2–3 minutes**.
+
+### Current LongMemEval Retrieval Result
+
+**500-question LongMemEval-S run**
+
+> **Important:** These numbers measure **retrieval performance only**. They evaluate whether the expected memory/session was retrieved and where it appeared in the candidate ranking. They are **not end-to-end answer-generation accuracy**.
+
+```text
+Questions:     500
+Retrieved:     497 (99.40%)
+Failed:          3
+
+Recall@1:       79.40%
+Recall@3:       87.20%
+Recall@5:       90.20%
+Recall@10:      93.60%
+
+Average query:  219.9 ms
+Embedding:       48.7 ms
+Retrieval:       80.3 ms
+Ranking:          0.3 ms
 ```
+
+The current run uses a fusion-based retrieval configuration with FAISS/semantic retrieval combined with additional retrieval sources where routed.
+
+The remaining failures are primarily **retrieval coverage failures**, while retrieved-but-not-top-ranked cases are tracked separately for further tuning.
+
+These results are from an ongoing evaluation and should not be interpreted as a claim of state-of-the-art performance without matching the evaluation protocol and comparison conditions of other systems.
 
 ---
 
-## Benchmark Results
+# Synthetic Benchmark
 
-Full 4,632-question synthetic benchmark:
+Memoria also includes a larger synthetic benchmark for evaluating retrieval and ranking behavior across controlled workloads.
 
-```
-Questions:  4632
-Retrieved:  99.46%
+Full benchmark:
 
-Recall@1:   32.60%
-Recall@3:   39.98%
-Recall@5:   52.03%
-Recall@10:  78.76%
+```text
+Questions:       4632
+Retrieved:       99.46%
 
-Avg query latency: 122.3ms
+Recall@1:         32.60%
+Recall@3:         39.98%
+Recall@5:         52.03%
+Recall@10:        78.76%
+
+Avg query latency: 122.3 ms
 Hardware:           4GB RAM, CPU-only
 ```
 
-Ranking accuracy is under active tuning — retrieval coverage and latency are strong; top-1/top-3 precision is the current focus area.
+The synthetic benchmark is primarily used for architectural regression testing, retrieval/ranking experiments, and performance analysis.
+
+The LongMemEval adapter provides a separate evaluation path using a real-world conversational-memory benchmark.
 
 ---
 
-## Configuration
+# Architecture
 
-All settings are managed via Pydantic in `cache/config.py`. Override any value with `MEMORY_` environment variables (e.g. `MEMORY_TOP_K=100`).
+The primary V4 boundary is:
 
-You must provide an embedding model inside `memory/models/` and set the path in `cache/config.py`.
+```text
+Query
+  ↓
+Query Processing
+  ↓
+Routing
+  ↓
+Parallel Retrieval
+  ↓
+Scheduler / Blackboard
+  ↓
+Candidate Records
+  ↓
+Ranking
+  ↓
+Finalization
+  ↓
+Context Construction
+  ↓
+MMR
+  ↓
+Results
+```
 
-### Paths & Models
-- `DB_PATH` — SQLite file (`memory.db`)
-- `VECTOR_INDEX_PATH` — FAISS index (`memory.index`)
-- `CACHE_PATH` — Embedding cache (`cache/embedding_cache.pkl`)
-- `EMBEDDING_MODEL` — Sentence-Transformer model (`memory/models/all-MiniLM-L6-v2`)
-- `VECTOR_DIM` — Embedding dimension (384)
-- `CHAT_TEMPLATE_DIR` — Chat template folder (`chat_templates`)
-- `CHAT_TEMPLATE_FILE` — Default template (`llama3.txt`)
+The architectural goal is to keep **retrieval responsible for finding candidates** and **ranking responsible for determining which candidates are useful**.
 
-### Retrieval & Ranking
-- `TOP_K` — Max candidates returned (500)
-- `TOP_N` — Max memories passed to the LLM (25)
-- `TOP_K_PER_SHARD` — Candidates per shard (150 by default — increase toward 500 for higher recall)
-- `CONTEXT_TOKEN_BUDGET` — Token budget for the context builder (10000)
-- `USE_BLACKBOARD` — Enable multi-source retrieval (True)
-- `MMR_ENABLED` — Enable MMR reranking (True)
+Retrieval workers are independently replaceable and can be coordinated by declarative completion policies.
 
-### Ranking Weights (sum ~1.0)
+---
 
-| Signal | Default |
-|--------|---------|
-| `RANKING_SEMANTIC` | 0.1195 |
-| `RANKING_TOKEN` | 0.3107 |
-| `RANKING_TFIDF` | 0.2929 |
-| `RANKING_ENTITY` | 0.0272 |
-| `RANKING_SUBJECT` | 0.0980 |
-| `RANKING_BM25` | 0.0762 |
+# Plugin Architecture
 
-Use `--optimize` to auto-tune these.
+Memoria uses **Pluggy** to expose extension points across the system.
 
-### Performance Tuning
+Current architecture:
 
-| Goal | Action |
-|------|--------|
-| **Speed** | Set `SKIP_EMBEDDING=True` or use `--skip-embedding` |
-| **Recall** | Increase `TOP_K_PER_SHARD` and `TOP_K` |
-| **Quality** | Enable `MMR_ENABLED` and tune ranking weights |
-| **Memory** | Increase `CONTEXT_TOKEN_BUDGET` (more candidates in context) |
+* **10 plugin subsystems**
+* **39 hook specifications**
+* Plugin discovery through entry points and a local `plugins/` directory
 
-### Environment Overrides
+Subsystems include:
+
+| Subsystem  | Hooks |
+| ---------- | ----: |
+| Lifecycle  |     6 |
+| Ranking    |     4 |
+| Storage    |     4 |
+| Ingestion  |     4 |
+| Scheduler  |     4 |
+| Routing    |     4 |
+| Evaluation |     4 |
+| Retrieval  |     3 |
+| Query      |     3 |
+| Feedback   |     3 |
+
+Plugins can register components such as:
+
+* retrieval workers
+* ranking signals
+* rerankers
+* database backends
+* vector stores
+* ingestion extractors
+* entity recognizers
+* scheduler workers
+* completion policies
+* routers
+* benchmark adapters
+* analyzers
+* feedback recorders
+* query processors
+
+The goal is to make major pieces of the memory substrate replaceable without requiring the core query pipeline to be rewritten.
+
+---
+
+# Configuration
+
+Memoria exposes a large set of configurable parameters through Pydantic in `cache/config.py`.
+
+Environment variables can override settings using the `MEMORY_` prefix.
+
+Example:
 
 ```bash
 export MEMORY_TOP_K=1000
 export MEMORY_CONTEXT_TOKEN_BUDGET=20000
 ```
 
+### Retrieval
+
+* `TOP_K`
+* `TOP_N`
+* `TOP_K_PER_SHARD`
+* `GRAPH_TOP_K`
+* `GRAPH_SEARCH_LIMIT`
+* `GRAPH_DEPTH`
+* `USE_BM25`
+* `USE_PHRASE_SEARCH`
+* `USE_INVERTED_INDEX`
+* `RETRIEVAL_MIN_CANDIDATES`
+* `MIN_RETRIEVAL_SOURCES`
+* `RETRIEVAL_DEADLINE`
+
+### Routing
+
+* `USE_ROUTING`
+* `ROUTING_MATRIX_OVERRIDE`
+* `ROUTING_FALLBACK_ENABLED`
+
+### Ranking
+
+* `RANKING_SEMANTIC`
+* `RANKING_TOKEN`
+* `RANKING_TFIDF`
+* `RANKING_BM25`
+* `RANKING_ENTITY`
+* `RANKING_SUBJECT`
+* `RANKING_ATTRIBUTE`
+* `RANKING_IMPORTANCE`
+* `RANKING_RECENCY`
+* `RANKING_FEEDBACK`
+
+### Memory
+
+* `MEMORY_DECAY_DAYS`
+* `MEMORY_DECAY_RATE`
+* `CONSOLIDATE_THRESHOLD`
+* `CONSOLIDATE_BATCH_SIZE`
+* `PRUNE_THRESHOLD`
+* `PRUNE_MAX_AGE_DAYS`
+* `AUTO_STORE_MEMORIES`
+* `AUTO_STORE_THRESHOLD`
+
+### Architecture
+
+* `USE_BLACKBOARD`
+* `USE_SHARDING`
+* `NUM_SHARDS`
+* `MMR_ENABLED`
+* `USE_ADAPTIVE_WEIGHTS`
+* `RANKER_DIAGNOSTICS`
+* `ENABLE_SIGNAL_REGISTRY`
+
+---
+
+## Ranking Weights
+
+Default ranking weights:
+
+| Signal   | Weight |
+| -------- | -----: |
+| Semantic | 0.1195 |
+| Token    | 0.3107 |
+| TF-IDF   | 0.2929 |
+| Entity   | 0.0272 |
+| Subject  | 0.0980 |
+| BM25     | 0.0762 |
+
+Additional ranking signals such as importance, recency, attribute, and feedback can also be configured.
+
+---
+
+## Performance Tuning
+
+| Goal        | Action                                                |
+| ----------- | ----------------------------------------------------- |
+| **Speed**   | Use embedding cache / skip embedding when appropriate |
+| **Recall**  | Increase `TOP_K_PER_SHARD` and `TOP_K`                |
+| **Quality** | Tune retrieval and ranking configuration              |
+| **Context** | Adjust `CONTEXT_TOKEN_BUDGET`                         |
+
+Memoria is designed so retrieval, ranking, routing, scheduling, and storage behavior can be tuned independently.
+
 ---
 
 ## Chat Templates & LLM Configuration
 
-The system is pre-configured to work with a Llama 3 server. To switch to a different model or template:
+Memoria is LLM-agnostic at the memory layer.
 
-1. **Create a custom template file** for your model and place it inside `memory/chat_templates/`. Use the placeholders `{system}`, `{context}`, `{user}`, and `{assistant}`.
-2. **Update `cache/config.py`** by setting `CHAT_TEMPLATE_FILE` to the name of your new template (e.g. `"mistral.txt"`). The system will automatically use that file.
+Chat templates can be configured through `CHAT_TEMPLATE_FILE`.
 
-If the specified template file is not found, the system falls back to the built-in Llama 3 template. This works best with instruction-tuned models, but you can adapt it to any chat-style LLM by adjusting the endpoint (`LLM_URL`) and stop tokens (`LLM_STOP_TOKENS`).
+Templates use:
 
----
+```text
+{system}
+{context}
+{user}
+{assistant}
+```
 
-## Troubleshooting
-
-| Issue | Fix |
-|-------|-----|
-| `No module named 'faiss'` | `pip install faiss-cpu` |
-| `No cache file found` | Cache builds on first run |
-| `LLM connection failed` | Set `LLM_URL` in config |
+The LLM endpoint and generation settings can also be configured through `LLM_URL`, `LLM_ENDPOINT`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`, `LLM_TIMEOUT`, and `LLM_STOP_TOKENS`.
 
 ---
 
 ## Requirements
 
-- Python 3.12+
-- 4GB RAM
-- CPU only
+* Python 3.12+
+* 4GB RAM minimum target
+* CPU-compatible
+* Local embedding model
+* No cloud service required
 
 ---
 
@@ -213,4 +406,4 @@ MIT
 
 ---
 
-**Built solo, from scratch, in 7 weeks. Local-first. No cloud.**
+**Built solo. Local-first. LLM-agnostic. Designed to be extended rather than replaced.**
