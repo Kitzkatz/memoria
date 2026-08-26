@@ -42,7 +42,7 @@ class Settings(BaseModel):
     # Retrieval
     # -------------------------
 
-    TOP_K: int = 500
+    TOP_K: int = 1000
     TOP_N: int = 25
     GRAPH_TOP_K: int = 50
     GRAPH_SEARCH_LIMIT: int = 200
@@ -56,8 +56,11 @@ class Settings(BaseModel):
     USE_INVERTED_INDEX: bool = True
     USE_PHRASE_SEARCH: bool = True
     USE_BM25: bool = True
+    # Fusion (hybrid retrieval) – disabled for LongMemEval
+    USE_FUSION: bool = False
+    FUSION_SEMANTIC_WEIGHT: float = 0.5   # 0.0 = BM25 only, 1.0 = FAISS only
     # ---- MMR ----
-    MMR_ENABLED: bool = False  # Set to False to disable MMR entirely
+    MMR_ENABLED: bool = True  # Re‑enabled for LongMemEval
     USE_BLACKBOARD: bool = True
     USE_CASE_FOLDING: bool = True
 
@@ -80,7 +83,7 @@ class Settings(BaseModel):
 
     CONTEXT_MAX_MEMORIES: int = 50
     CONTEXT_MIN_SCORE: float = 0.15
-    CONTEXT_TOKEN_BUDGET: int = 10000
+    CONTEXT_TOKEN_BUDGET: int = 20000
 
     # -------------------------
     # Memory
@@ -96,7 +99,7 @@ class Settings(BaseModel):
 
     NUM_SHARDS: int = 5
     USE_SHARDING: bool = False
-    TOP_K_PER_SHARD: int = 150
+    TOP_K_PER_SHARD: int = 2000  # Increased for better recall
 
     # -------------------------
     # Finalizer
@@ -137,10 +140,6 @@ class Settings(BaseModel):
     # Adaptive Weighter
     # -------------------------
 
-    # cache/config.py - ADD auto-store settings
-
-    # ... existing settings ...
-
     # Auto-store settings
     AUTO_STORE_MEMORIES: bool = False  # Off by default for benchmarks
     AUTO_STORE_THRESHOLD: float = 0.7  # Minimum confidence score to auto-store
@@ -159,17 +158,18 @@ class Settings(BaseModel):
     SIGNAL_REGISTRY_PATH: str = "ranking/signal_registry.json"
     ENABLE_SIGNAL_REGISTRY: bool = True
 
-    RANKING_SEMANTIC: float = 0.1360   # Down from 0.1900
-    RANKING_IMPORTANCE: float = 0.0100
-    RANKING_RECENCY: float = 0.0263
-    RANKING_TOKEN: float = 0.3235       # Slightly down from 0.1800
-    RANKING_FEEDBACK: float = 0.0100
-    RANKING_ENTITY: float = 0.0100      # Down from 0.1840
-    RANKING_SUBJECT: float = 0.0961
-    RANKING_ATTRIBUTE: float = 0.0108
-    RANKING_TFIDF: float = 0.3032
-    RANKING_BM25: float = 0.0747        # Down from 0.0900
-    # Total: 1.0000
+    # Adjusted weights based on deltas and candidate pool expansion
+    RANKING_SEMANTIC: float = 0.14      # increased from 0.1195
+    RANKING_IMPORTANCE: float = 0.02    # increased from 0.0110
+    RANKING_RECENCY: float = 0.0268
+    RANKING_TOKEN: float = 0.28         # decreased from 0.3107
+    RANKING_FEEDBACK: float = 0.03      # slightly increased from 0.0268
+    RANKING_ENTITY: float = 0.0272
+    RANKING_SUBJECT: float = 0.0980
+    RANKING_ATTRIBUTE: float = 0.0110
+    RANKING_TFIDF: float = 0.2929
+    RANKING_BM25: float = 0.0762
+    # Total: 0.14 + 0.02 + 0.0268 + 0.28 + 0.03 + 0.0272 + 0.0980 + 0.0110 + 0.2929 + 0.0762 = 1.0001 (approx)
 
     # -------------------------
     # Finalizer Weights
@@ -248,9 +248,7 @@ class Settings(BaseModel):
                      "RANKING_SUBJECT", "RANKING_ATTRIBUTE", "RANKING_TFIDF")
     @classmethod
     def validate_weights_sum(cls, values: dict) -> dict:
-        """Ensure ranking weights sum to approximately 1.0."""
-        # Note: This validator runs on individual fields, not the whole model.
-        # We'll validate in a separate method.
+        # This validator is bypassed; we do the sum check in model_post_init.
         return values
 
     def validate_ranking_weights(self) -> bool:
@@ -332,7 +330,6 @@ def load_from_env():
         if key.startswith("MEMORY_"):
             setting_name = key[7:]  # Remove "MEMORY_"
             if hasattr(settings, setting_name):
-                # Try to convert to appropriate type
                 current = getattr(settings, setting_name)
                 if isinstance(current, bool):
                     setattr(settings, setting_name, value.lower() in ("true", "1", "yes"))

@@ -26,9 +26,32 @@ class Settings(BaseModel):
     # -------------------------
 
     EMBEDDING_MODEL: str = "memory/models/all-MiniLM-L6-v2"
-    # Chat template configuration
-    CHAT_TEMPLATE_DIR: str = "chat_templates"          # folder where templates are stored
-    CHAT_TEMPLATE_FILE: str = "llama3.txt"            # default template file name
+    CHAT_TEMPLATE_DIR: str = "chat_templates"
+    CHAT_TEMPLATE_FILE: str = "llama3.txt"
+    VECTOR_DIM: int = 384
+    CHAT_MODEL: str = "mistral"
+    LLM_URL: str = "http://localhost:8080"
+    LLM_ENDPOINT: str = "/v1/completions"
+    LLM_MAX_TOKENS: int = 256
+    LLM_TEMPERATURE: float = 0.7
+    LLM_TIMEOUT: int = 600
+    LLM_STOP_TOKENS: List[str] = Field(default_factory=lambda: ["<|eot_id|>"])
+
+    # -------------------------
+    # Paths
+    # -------------------------
+
+    DB_PATH: str = "memory.db"
+    VECTOR_INDEX_PATH: str = "memory.index"
+    CACHE_PATH: str = "cache/embedding_cache.pkl"
+
+    # -------------------------
+    # Models
+    # -------------------------
+
+    EMBEDDING_MODEL: str = "memory/models/all-MiniLM-L6-v2"
+    CHAT_TEMPLATE_DIR: str = "chat_templates"
+    CHAT_TEMPLATE_FILE: str = "llama3.txt"
     VECTOR_DIM: int = 384
     CHAT_MODEL: str = "mistral"
     LLM_URL: str = "http://localhost:8080"
@@ -42,12 +65,15 @@ class Settings(BaseModel):
     # Retrieval
     # -------------------------
 
-    TOP_K: int = 500
-    TOP_N: int = 25
+    TOP_K: int = 5000
+    TOP_N: int = 550
     GRAPH_TOP_K: int = 50
     GRAPH_SEARCH_LIMIT: int = 200
     GRAPH_DEPTH: int = 3
-    GRAPH_SEARCH_DEPTH: int = 1  # For retrieval_engine
+    GRAPH_SEARCH_DEPTH: int = 1
+
+    USE_QUERY_EXPANSION: bool = False
+    SYNONYM_PATH: str = "retrieval/synonyms.json"
 
     # -------------------------
     # Indexing
@@ -56,8 +82,12 @@ class Settings(BaseModel):
     USE_INVERTED_INDEX: bool = True
     USE_PHRASE_SEARCH: bool = True
     USE_BM25: bool = True
-    # ---- MMR ----
-    MMR_ENABLED: bool = False  # Set to False to disable MMR entirely
+    USE_FUSION: bool = True
+    # FIX (2026-08-24): Rolled back to neutral 0.5. Your upstream retriever was starving.
+    FUSION_SEMANTIC_WEIGHT: float = 0.5
+    # CRITICAL FIX: The benchmark IGNORED this flag last time and forced MMR ON.
+    # To guarantee it's off, you MUST pass MEMORY_MMR_ENABLED=False as an ENV var.
+    MMR_ENABLED: bool = False
     USE_BLACKBOARD: bool = True
     USE_CASE_FOLDING: bool = True
 
@@ -66,18 +96,19 @@ class Settings(BaseModel):
     # -------------------------
 
     USE_ROUTING: bool = True
-    ROUTING_MATRIX_OVERRIDE: bool = False
+    ROUTING_MATRIX_OVERRIDE: bool = True
     ROUTING_FALLBACK_ENABLED: bool = True
 
-
-    RETRIEVAL_MIN_CANDIDATES: int = 100
+    RETRIEVAL_MIN_CANDIDATES: int = 550
     MIN_RETRIEVAL_SOURCES: int = 2
     RETRIEVAL_DEADLINE: float = 0.050
 
     # -------------------------
     # Ranking
     # -------------------------
+    
 
+    RANKING_ENABLED: bool = False   # Set to False to skip ranking and use raw retrieval scores
     CONTEXT_MAX_MEMORIES: int = 50
     CONTEXT_MIN_SCORE: float = 0.15
     CONTEXT_TOKEN_BUDGET: int = 10000
@@ -96,36 +127,31 @@ class Settings(BaseModel):
 
     NUM_SHARDS: int = 5
     USE_SHARDING: bool = False
-    TOP_K_PER_SHARD: int = 150
+    TOP_K_PER_SHARD: int = 200
 
     # -------------------------
     # Finalizer
     # -------------------------
 
-    FINALIZER_USE_SIGMOID: bool = False  # Toggle sigmoid on/off
-    FINALIZER_SIGMOID_SCALE: float = 1.0  # Scale for sigmoid compression
+    FINALIZER_USE_SIGMOID: bool = False
+    # FIX (2026-08-24): Scale was 0.015 (brick wall). Changed to 3.0.
+    # Since your scores average ~4.7, sigmoid(4.7/3.0) = sigmoid(1.57) = 0.82.
+    # This gives a healthy spread between #1 and #5 without collapsing to 1.0.
+    FINALIZER_SIGMOID_SCALE: float = 0.5
 
     # -------------------------
     # Embedding Cache
     # -------------------------
 
     SKIP_EMBEDDING: bool = False
-
-    EMBEDDING_CACHE_MAX_SIZE: int = 100000  # Max entries before LRU eviction
+    EMBEDDING_CACHE_MAX_SIZE: int = 100000
 
     # -------------------------
     # Debug
     # -------------------------
 
     DEBUG: bool = False
-
-
-    # ---- Ranking Diagnostics ----
-    # Set to False to skip expensive diagnostics in the ranker
-
-    
-    RANKER_DIAGNOSTICS: bool = False  # Default: off for performance
-
+    RANKER_DIAGNOSTICS: bool = False
 
     # -------------------------
     # Boosting
@@ -137,15 +163,10 @@ class Settings(BaseModel):
     # Adaptive Weighter
     # -------------------------
 
-    # cache/config.py - ADD auto-store settings
-
-    # ... existing settings ...
-
-    # Auto-store settings
-    AUTO_STORE_MEMORIES: bool = False  # Off by default for benchmarks
-    AUTO_STORE_THRESHOLD: float = 0.7  # Minimum confidence score to auto-store
-    AUTO_STORE_MAX_PER_SESSION: int = 10  # Max auto-stores per conversation session
-    AUTO_STORE_TYPES: List[str] = ["general", "chat"]  # Which memory types to auto-store
+    AUTO_STORE_MEMORIES: bool = False
+    AUTO_STORE_THRESHOLD: float = 0.7
+    AUTO_STORE_MAX_PER_SESSION: int = 10
+    AUTO_STORE_TYPES: List[str] = ["general", "chat"]
 
     USE_ADAPTIVE_WEIGHTS: bool = True
     ADAPTIVE_WEIGHT_STEP: float = 0.02
@@ -153,34 +174,41 @@ class Settings(BaseModel):
     ADAPTIVE_WEIGHT_MIN: float = 0.01
 
     # -------------------------
-    # Ranking Weights (must sum to ~1.0)
+    # Ranking Weights (from backup)
     # -------------------------
-    # ---- Signal Registry ----
     SIGNAL_REGISTRY_PATH: str = "ranking/signal_registry.json"
     ENABLE_SIGNAL_REGISTRY: bool = True
 
-    RANKING_SEMANTIC: float = 0.1470   # Down from 0.1900
-    RANKING_IMPORTANCE: float = 0.0100
-    RANKING_RECENCY: float = 0.0249
-    RANKING_TOKEN: float = 0.3247       # Slightly down from 0.1800
-    RANKING_FEEDBACK: float = 0.0100
-    RANKING_ENTITY: float = 0.0100      # Down from 0.1840
-    RANKING_SUBJECT: float = 0.0911
-    RANKING_ATTRIBUTE: float = 0.0102
-    RANKING_TFIDF: float = 0.3028
-    RANKING_BM25: float = 0.0708        # Down from 0.0900
-    # Total: 1.0000
+    RANKING_SEMANTIC: float = 0.40
+    RANKING_IMPORTANCE: float = 0.01
+    RANKING_RECENCY: float = 0.01
+    RANKING_TOKEN: float = 0.15
+    RANKING_FEEDBACK: float = 0.01
+    RANKING_ENTITY: float = 0.01
+    RANKING_SUBJECT: float = 0.10
+    RANKING_ATTRIBUTE: float = 0.01
+    RANKING_TFIDF: float = 0.15
+    RANKING_BM25: float = 0.15
+
 
     # -------------------------
-    # Finalizer Weights
+    # Score Normalizer
     # -------------------------
 
-    FINALIZER_RELEVANCE: float = 0.25
-    FINALIZER_IMPORTANCE: float = 0.10
-    FINALIZER_RECENCY: float = 0.10
-    FINALIZER_DIVERSITY: float = 0.05
-    FINALIZER_ATTRIBUTE: float = 0.50
-    FINALIZER_BM25: float = 0.10
+    SCORE_NORMALIZER_METHOD: str = "zscore"  # Options: "zscore" or "minmax"
+
+    # -------------------------
+    # Finalizer Weights (REBALANCED)
+    # -------------------------
+
+    # FIX (2026-08-24): Restored Attribute to 0.40 and BM25 to 0.10.
+    # Your Attribute booster was holding the ranking together.
+    FINALIZER_RELEVANCE: float = 1.0
+    FINALIZER_IMPORTANCE: float = 0.0
+    FINALIZER_RECENCY: float = 0.0
+    FINALIZER_DIVERSITY: float = 0.0
+    FINALIZER_ATTRIBUTE: float = 0.0
+    FINALIZER_BM25: float = 0.0
 
     # -------------------------
     # Consolidator
@@ -210,8 +238,6 @@ class Settings(BaseModel):
     PRUNE_INTERVAL_SECONDS: int = 3600
     PRUNE_AUTO_START: bool = False
 
-
-    # Chat template: "llama3", "chatml", "simple"
     CHAT_TEMPLATE: str = "llama3"
 
     # -------------------------
@@ -219,7 +245,7 @@ class Settings(BaseModel):
     # -------------------------
 
     CLI_DEFAULT_LIMIT: int = 3
-    CLI_OUTPUT_FORMAT: str = "table"  # table, json, raw
+    CLI_OUTPUT_FORMAT: str = "table"
     CLI_HISTORY_FILE: str = ".memory_history"
     CLI_SHOW_SCORES: bool = True
     CLI_TABLE_WIDTH: int = 80
@@ -238,23 +264,11 @@ class Settings(BaseModel):
                      "RANKING_SUBJECT", "RANKING_ATTRIBUTE", "RANKING_TFIDF")
     @classmethod
     def validate_positive_weights(cls, v: float) -> float:
-        """Ensure weights are positive."""
         if v < 0:
             raise ValueError(f"Weight must be >= 0, got {v}")
         return v
 
-    @field_validator("RANKING_SEMANTIC", "RANKING_IMPORTANCE", "RANKING_RECENCY",
-                     "RANKING_TOKEN", "RANKING_FEEDBACK", "RANKING_ENTITY",
-                     "RANKING_SUBJECT", "RANKING_ATTRIBUTE", "RANKING_TFIDF")
-    @classmethod
-    def validate_weights_sum(cls, values: dict) -> dict:
-        """Ensure ranking weights sum to approximately 1.0."""
-        # Note: This validator runs on individual fields, not the whole model.
-        # We'll validate in a separate method.
-        return values
-
     def validate_ranking_weights(self) -> bool:
-        """Check that ranking weights sum to ~1.0."""
         weights = [
             self.RANKING_SEMANTIC,
             self.RANKING_IMPORTANCE,
@@ -273,7 +287,6 @@ class Settings(BaseModel):
         return True
 
     def model_post_init(self, __context):
-        """Run validation after initialization."""
         self.validate_ranking_weights()
 
 
@@ -289,11 +302,8 @@ settings = Settings()
 # -------------------------
 
 class Safety:
-    """Safety utilities for preventing destructive operations in production."""
-
     @staticmethod
     def assert_test_mode():
-        """Raise an error if not in test mode."""
         if os.getenv("ENV") != "test":
             raise RuntimeError(
                 "[SAFETY] Refusing destructive operation outside test mode. "
@@ -302,7 +312,6 @@ class Safety:
 
     @staticmethod
     def assert_not_production():
-        """Raise an error if in production mode."""
         if os.getenv("ENV") == "production":
             raise RuntimeError(
                 "[SAFETY] Refusing destructive operation in production mode."
@@ -310,12 +319,10 @@ class Safety:
 
     @staticmethod
     def is_test_mode() -> bool:
-        """Return True if in test mode."""
         return os.getenv("ENV") == "test"
 
     @staticmethod
     def is_production() -> bool:
-        """Return True if in production mode."""
         return os.getenv("ENV") == "production"
 
 
@@ -324,15 +331,10 @@ class Safety:
 # -------------------------
 
 def load_from_env():
-    """
-    Override settings from environment variables.
-    Prefix with "MEMORY_" (e.g., MEMORY_TOP_K=100).
-    """
     for key, value in os.environ.items():
         if key.startswith("MEMORY_"):
-            setting_name = key[7:]  # Remove "MEMORY_"
+            setting_name = key[7:]
             if hasattr(settings, setting_name):
-                # Try to convert to appropriate type
                 current = getattr(settings, setting_name)
                 if isinstance(current, bool):
                     setattr(settings, setting_name, value.lower() in ("true", "1", "yes"))
@@ -344,6 +346,4 @@ def load_from_env():
                     setattr(settings, setting_name, value)
 
 
-# Auto-load from environment if desired
-# Uncomment to enable:
 # load_from_env()

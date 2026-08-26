@@ -1,157 +1,122 @@
 {
-  "version": "1.0",
-  "description": "Declarative signal registry for ranking signals",
+  "version": "4.0",
+  "description": "SEMANTIC DOMINANT — All signals explicitly zeroed except semantic/token/tfidf/bm25",
   "signals": {
     "semantic": {
       "enabled": true,
-      "default_weight": 0.2100,
+      "default_weight": 0.70,
       "cost": "low",
       "category": "retrieval",
       "description": "Cosine similarity from FAISS embeddings",
       "per_type": {
-        "semantic": 0.30,
-        "episodic": 0.10,
-        "procedural": 0.15,
-        "code": 0.10,
-        "science": 0.20,
-        "general": 0.20
+        "semantic": 0.80,
+        "episodic": 0.50,
+        "procedural": 0.60,
+        "code": 0.50,
+        "science": 0.70,
+        "general": 0.70
       }
     },
     "token": {
       "enabled": true,
-      "default_weight": 0.3107,
+      "default_weight": 0.10,
       "cost": "low",
       "category": "ranking",
-      "description": "Token overlap between query and memory (type-aware)",
+      "description": "Token overlap",
       "per_type": {
-        "semantic": 0.15,
-        "episodic": 0.35,
-        "procedural": 0.35,
-        "code": 0.40,
-        "science": 0.10,
-        "general": 0.20
-      }
-    },
-    "entity": {
-      "enabled": true,
-      "default_weight": 0.0272,
-      "cost": "low",
-      "category": "ranking",
-      "description": "Entity overlap between query and memory",
-      "per_type": {
-        "semantic": 0.15,
+        "semantic": 0.05,
         "episodic": 0.20,
-        "procedural": 0.15,
-        "code": 0.30,
-        "science": 0.25,
-        "general": 0.15
-      }
-    },
-    "subject": {
-      "enabled": true,
-      "default_weight": 0.0980,
-      "cost": "low",
-      "category": "ranking",
-      "description": "Subject match from metadata",
-      "per_type": {
-        "semantic": 0.20,
-        "episodic": 0.05,
-        "procedural": 0.05,
-        "code": 0.05,
-        "science": 0.15,
-        "general": 0.15
-      }
-    },
-    "attribute": {
-      "enabled": true,
-      "default_weight": 0.0110,
-      "cost": "low",
-      "category": "ranking",
-      "description": "Attribute match from metadata",
-      "per_type": {
-        "semantic": 0.15,
-        "episodic": 0.02,
-        "procedural": 0.10,
-        "code": 0.05,
-        "science": 0.25,
+        "procedural": 0.20,
+        "code": 0.25,
+        "science": 0.10,
         "general": 0.10
       }
     },
-    "recency": {
-      "enabled": true,
-      "default_weight": 0.0268,
-      "cost": "low",
-      "category": "behavioral",
-      "description": "Time decay based on creation date",
-      "per_type": {
-        "semantic": 0.02,
-        "episodic": 0.35,
-        "procedural": 0.10,
-        "code": 0.01,
-        "science": 0.05,
-        "general": 0.05
-      }
-    },
-    "importance": {
-      "enabled": false,
-      "default_weight": 0.0110,
-      "cost": "low",
-      "category": "behavioral",
-      "description": "Heuristic importance score",
-      "per_type": {}
-    },
-    "feedback": {
-      "enabled": true,
-      "default_weight": 0.0268,
-      "cost": "low",
-      "category": "behavioral",
-      "description": "User feedback (clicks, dwell time, skips)",
-      "per_type": {}
-    },
     "tfidf": {
       "enabled": true,
-      "default_weight": 0.2929,
+      "default_weight": 0.10,
       "cost": "medium",
       "category": "retrieval",
-      "description": "TF-IDF similarity from inverted index",
+      "description": "TF-IDF similarity",
       "per_type": {
-        "semantic": 0.15,
+        "semantic": 0.05,
         "episodic": 0.02,
-        "procedural": 0.25,
-        "code": 0.30,
-        "science": 0.20,
-        "general": 0.15
+        "procedural": 0.15,
+        "code": 0.15,
+        "science": 0.06,
+        "general": 0.10
       }
     },
     "bm25": {
       "enabled": true,
-      "default_weight": 0.0762,
+      "default_weight": 0.10,
       "cost": "medium",
       "category": "retrieval",
       "description": "BM25 lexical score",
       "per_type": {
         "semantic": 0.05,
         "episodic": 0.02,
-        "procedural": 0.20,
-        "code": 0.25,
-        "science": 0.05,
+        "procedural": 0.15,
+        "code": 0.15,
+        "science": 0.06,
         "general": 0.10
       }
     },
+    "entity": {
+      "enabled": true,
+      "default_weight": 0.00,
+      "cost": "low",
+      "category": "ranking",
+      "description": "Entity overlap (EXPLICITLY ZERO)",
+      "per_type": {}
+    },
+    "subject": {
+      "enabled": true,
+      "default_weight": 0.00,
+      "cost": "low",
+      "category": "ranking",
+      "description": "Subject match (EXPLICITLY ZERO)",
+      "per_type": {}
+    },
+    "attribute": {
+      "enabled": true,
+      "default_weight": 0.00,
+      "cost": "low",
+      "category": "ranking",
+      "description": "Attribute match (EXPLICITLY ZERO)",
+      "per_type": {}
+    },
+    "recency": {
+      "enabled": true,
+      "default_weight": 0.00,
+      "cost": "low",
+      "category": "behavioral",
+      "description": "Time decay (EXPLICITLY ZERO)",
+      "per_type": {}
+    },
+    "importance": {
+      "enabled": true,
+      "default_weight": 0.00,
+      "cost": "low",
+      "category": "behavioral",
+      "description": "Importance score (EXPLICITLY ZERO)",
+      "per_type": {}
+    },
+    "feedback": {
+      "enabled": true,
+      "default_weight": 0.00,
+      "cost": "low",
+      "category": "behavioral",
+      "description": "User feedback (EXPLICITLY ZERO)",
+      "per_type": {}
+    },
     "graph_distance": {
-      "enabled": false,
-      "default_weight": 0.10,
+      "enabled": true,
+      "default_weight": 0.00,
       "cost": "high",
       "category": "structural",
-      "description": "Graph shortest path distance between entities",
-      "per_type": {
-        "semantic": 0.05,
-        "episodic": 0.20,
-        "procedural": 0.10,
-        "code": 0.05,
-        "science": 0.15,
-        "general": 0.10
-      }
+      "description": "Graph distance (EXPLICITLY ZERO)",
+      "per_type": {}
     }
   }
 }

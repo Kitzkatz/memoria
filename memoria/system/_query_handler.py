@@ -25,9 +25,35 @@ from system._response_builder import (
 
 from blackboard.scheduler import SourceCoveragePolicy
 
+# ---- NEW IMPORT ----
+from routing.matrix import get_workers_for_type
+
 
 # How many candidates to keep before expensive ranking.
-RANKING_CANDIDATE_LIMIT = 300
+RANKING_CANDIDATE_LIMIT = 200
+
+
+# ---------------------------------------------------------------------------
+# Helper: Sort candidates by retrieval score (skip ranking)
+# ---------------------------------------------------------------------------
+
+def _sort_candidates_by_retrieval_score(candidates):
+    """
+    Sort candidates using the score already present from the retriever/fusion.
+    If base_score is not set, fall back to inverse distance.
+    Also set final_score = base_score for response builder.
+    """
+    for c in candidates:
+        # Compute base_score if missing
+        if not hasattr(c, 'base_score') or c.base_score is None:
+            if c.distance is not None:
+                c.base_score = 1.0 / (1.0 + c.distance)
+            else:
+                c.base_score = 0.0
+        # Ensure final_score is set to base_score
+        c.final_score = c.base_score
+    candidates.sort(key=lambda c: c.base_score, reverse=True)
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +114,18 @@ def handle_query(system, text):
     query_process_ms = (
         time.perf_counter() - t_query_process
     ) * 1000
+
+    # ---- Query expansion ----
+    if hasattr(system, 'query_expander') and system.query_expander:
+        if getattr(settings, "USE_QUERY_EXPANSION", True):
+            original_tokens = query.tokens.copy()
+            expanded_tokens = system.query_expander.expand(original_tokens)
+            if expanded_tokens != original_tokens:
+                query.tokens = expanded_tokens
+                query.metadata["original_tokens"] = original_tokens
+                query.metadata["expanded_tokens"] = expanded_tokens
+                query.metadata["expansion_applied"] = True
+                debug(f"[QueryExpander] Expanded tokens: {original_tokens} -> {expanded_tokens}")
 
     # ------------------------------------------------------------------
     # Embedding
@@ -189,38 +227,13 @@ def _handle_query_blackboard(
             debug(f"[Plugin] routing_pre error: {e}")
 
     if getattr(settings, "USE_ROUTING", True) and hasattr(system, "router") and system.router:
-        route = system.router.route(
-            memory_type_hint
-        )
-
-        workers_to_use = route.get(
-            "workers",
-            ["faiss", "bm25", "graph"],
-        )
-
-        graph_depth = route.get(
-            "graph_depth",
-            getattr(
-                settings,
-                "GRAPH_DEPTH",
-                2,
-            ),
-        )
-
-        signals = route.get(
-            "signals",
-            {},
-        )
-
-        pool = route.get(
-            "pool",
-            "memories",
-        )
-
-        fallback_pools = route.get(
-            "fallback_pools",
-            [],
-        )
+        route = system.router.route(memory_type_hint)
+        # ---- USE FUSION-AWARE WORKER LIST ----
+        workers_to_use = get_workers_for_type(memory_type_hint)
+        graph_depth = route.get("graph_depth", getattr(settings, "GRAPH_DEPTH", 2))
+        signals = route.get("signals", {})
+        pool = route.get("pool", "memories")
+        fallback_pools = route.get("fallback_pools", [])
 
         debug(
             f"[MemorySystem] Routing: "
@@ -230,20 +243,9 @@ def _handle_query_blackboard(
         )
 
     else:
-        workers_to_use = [
-            "faiss",
-            "bm25",
-            "graph",
-            "phrase",
-            "attribute",
-        ]
-
-        graph_depth = getattr(
-            settings,
-            "GRAPH_DEPTH",
-            2,
-        )
-
+        # ---- FALLBACK: use general fusion-aware workers ----
+        workers_to_use = get_workers_for_type("general")
+        graph_depth = getattr(settings, "GRAPH_DEPTH", 2)
         signals = {}
         pool = "memories"
         fallback_pools = []
@@ -255,7 +257,6 @@ def _handle_query_blackboard(
     # ---- Plugin hook: post-routing ----
     if system.plugin_manager:
         try:
-            # Pass the route info as a dict
             route_info = {
                 "workers": workers_to_use,
                 "graph_depth": graph_depth,
@@ -571,6 +572,27 @@ def _handle_query_blackboard(
                 task_source_map[task_id] = "attribute"
                 submitted_sources.add("attribute")
 
+            # ----------------------------------------------------------
+            # Fusion
+            # ----------------------------------------------------------
+            if "fusion" in workers_to_use:
+                task_id = system.scheduler.submit(
+                    "fusion",
+                    {
+                        "vector": vec,
+                        "tokens": query.tokens,
+                        "top_k": top_k_per_shard,
+                        "shard_id": shard_id,
+                        "num_shards": num_shards,
+                    }
+                )
+                task_ids.append(task_id)
+                task_source_map[task_id] = "fusion"
+                submitted_sources.add("fusion")
+
+        debug(f"[Fusion] task_ids: {task_ids}")
+        debug(f"[Fusion] submitted_sources: {submitted_sources}")
+
         debug(
             f"[MemorySystem] Submitted retrieval sources: "
             f"{sorted(submitted_sources)}"
@@ -734,6 +756,10 @@ def _handle_query_blackboard(
                         float(dist),
                         False,
                     )
+            elif source == "fusion":
+                for mem_id, score in result_candidates:
+                    mem_ids.add(mem_id)
+                    source_map[mem_id] = ("fusion", float(score), False)
 
         # ---- Plugin hook: pre-retrieval ----
         if system.plugin_manager:
@@ -808,14 +834,29 @@ def _handle_query_blackboard(
                 or system.vector_store.get(mem_id)
             )
 
-            worker_candidates.append(
-                CandidateRecord(
-                    memory=memory,
-                    distance=dist,
-                    embedding=embedding,
-                    graph_hit=graph_hit,
-                )
+            # Create candidate
+            candidate = CandidateRecord(
+                memory=memory,
+                distance=dist,
+                embedding=embedding,
+                graph_hit=graph_hit,
             )
+
+            # ---- Set base_score based on retrieval source ----
+            if source == "fusion":
+                # dist is already a similarity score from fusion worker
+                candidate.base_score = dist if dist is not None else 0.0
+            elif source == "faiss":
+                # Convert distance to similarity (lower distance = higher similarity)
+                candidate.base_score = 1.0 / (1.0 + dist) if dist is not None else 0.0
+            elif source == "bm25":
+                # dist is already inverted (1/(score+epsilon)) in source_map
+                candidate.base_score = dist if dist is not None else 0.0
+            else:
+                # For graph, attribute, phrase – auxiliary, set to 0
+                candidate.base_score = 0.0
+
+            worker_candidates.append(candidate)
 
         # --------------------------------------------------------------
         # Step 9: Merge candidates
@@ -901,15 +942,22 @@ def _handle_query_blackboard(
     ) * 1000
 
     # ------------------------------------------------------------------
-    # Ranking
+    # Ranking (TOGGLED)
     # ------------------------------------------------------------------
 
     t_rank = time.perf_counter()
 
-    results, ranking_diag = system.pipeline.run(
-        query,
-        candidates,
-    )
+    if getattr(settings, "RANKING_ENABLED", True):
+        # Full ranking pipeline
+        results, ranking_diag = system.pipeline.run(
+            query,
+            candidates,
+        )
+    else:
+        # Retrieval-only: use existing scores from retriever/fusion
+        # Sort candidates by base_score (or fallback to distance inverse)
+        results = _sort_candidates_by_retrieval_score(candidates)
+        ranking_diag = {"ranking_skipped": True}
 
     ranking_ms = (
         time.perf_counter() - t_rank
@@ -1095,6 +1143,9 @@ def _handle_query_blackboard(
 
             # Auto-store diagnostics.
             "auto_store_stored": auto_store_stored,
+
+            # Indicate if ranking was skipped
+            "ranking_skipped": not getattr(settings, "RANKING_ENABLED", True),
         },
     }
 
@@ -1180,15 +1231,20 @@ def _handle_query_v3_fallback(
     )
 
     # ------------------------------------------------------------------
-    # Ranking
+    # Ranking (TOGGLED)
     # ------------------------------------------------------------------
 
     t0_rank = time.perf_counter()
 
-    results, ranking_diag = system.pipeline.run(
-        query,
-        candidates,
-    )
+    if getattr(settings, "RANKING_ENABLED", True):
+        results, ranking_diag = system.pipeline.run(
+            query,
+            candidates,
+        )
+    else:
+        # Retrieval-only: use existing scores from retriever
+        results = _sort_candidates_by_retrieval_score(candidates)
+        ranking_diag = {"ranking_skipped": True}
 
     ranking_ms = (
         time.perf_counter() - t0_rank
@@ -1337,6 +1393,9 @@ def _handle_query_v3_fallback(
 
             # Auto-store diagnostics.
             "auto_store_stored": auto_store_stored,
+
+            # Indicate if ranking was skipped
+            "ranking_skipped": not getattr(settings, "RANKING_ENABLED", True),
         }
     )
 

@@ -1,0 +1,15 @@
+{
+  "degree": ["diploma", "bachelor", "master", "phd", "doctorate", "undergraduate", "graduate"],
+  "commute": ["travel", "drive", "journey", "trip"],
+  "playlist": ["song list", "music collection", "tracks"],
+  "volunteer": ["help", "assist", "serve", "voluntary", "charity"],
+  "fundraising": ["fundraise", "donation", "benefit", "fundraiser"],
+  "occupation": ["job", "profession", "career", "work", "vocation"],
+  "identity": ["self", "personality", "character", "nature"],
+  "research": ["study", "investigate", "examine", "explore", "analysis"],
+  "support": ["help", "assist", "aid", "backing", "guidance"],
+  "counseling": ["therapy", "guidance", "advice", "consultation", "mentoring"],
+  "program": ["course", "curriculum", "syllabus", "schedule"],
+  "event": ["occasion", "activity", "happening", "function"],
+  "session": ["meeting", "gathering", "conference", "consultation"]
+}

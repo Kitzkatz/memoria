@@ -246,17 +246,21 @@ class MemoryRanker:
         combined_feedback = max(-1.0, min(auto_feedback, 1.0))
         t_score = time_module.perf_counter()
 
+        # ============================================================
+        # FIX: Removed hardcoded fallback defaults, replaced with 0.0.
+        # Now any signal missing from weights dict has zero effect.
+        # ============================================================
         score = (
-            semantic * weights.get("semantic", 0.20)
-            + importance * weights.get("importance", 0.08)
-            + recency * weights.get("recency", 0.05)
-            + token * weights.get("token", 0.07)
-            + combined_feedback * weights.get("feedback", 0.02)
-            + entity * weights.get("entity", 0.23)
-            + subject * weights.get("subject", 0.20)
-            + attribute * weights.get("attribute", 0.15)
-            + tfidf * weights.get("tfidf", 0.08)
-            + graph_dist * weights.get("graph_distance", 0.10)
+            semantic * weights.get("semantic", 0.0)
+            + importance * weights.get("importance", 0.0)
+            + recency * weights.get("recency", 0.0)
+            + token * weights.get("token", 0.0)
+            + combined_feedback * weights.get("feedback", 0.0)
+            + entity * weights.get("entity", 0.0)
+            + subject * weights.get("subject", 0.0)
+            + attribute * weights.get("attribute", 0.0)
+            + tfidf * weights.get("tfidf", 0.0)
+            + graph_dist * weights.get("graph_distance", 0.0)
         )
         t_end = time_module.perf_counter()
 

@@ -2,6 +2,8 @@
 Routing Matrix — Declarative routing for memory types, signals, and workers.
 """
 
+from cache.config import settings  # <-- ADD THIS IMPORT
+
 # Signal definitions — what each signal actually means
 SIGNAL_DEFINITIONS = {
     "semantic": "Cosine similarity from FAISS embeddings",
@@ -16,8 +18,8 @@ SIGNAL_DEFINITIONS = {
     "graph_distance": "Graph shortest path distance between entities"
 }
 
-# Valid workers — used for validation
-VALID_WORKERS = ["faiss", "bm25", "graph", "phrase", "attribute"]
+# Valid workers — includes fusion now
+VALID_WORKERS = ["faiss", "bm25", "graph", "phrase", "attribute", "fusion"]
 
 # Valid pools — used for validation
 VALID_POOLS = ["memories", "memories_semantic", "memories_episodic", 
@@ -27,10 +29,10 @@ VALID_POOLS = ["memories", "memories_semantic", "memories_episodic",
 # Detection scoring weights
 DETECTION_WEIGHTS = {
     "keyword_match": 1.0,
-    "exclude_match": -2.0,      # Strong negative for exclusions
+    "exclude_match": -2.0,
     "entity_required_boost": 2.0,
     "attribute_required_boost": 1.5,
-    "phrase_match_boost": 1.5,   # For multi-word phrase matches
+    "phrase_match_boost": 1.5,
 }
 
 ROUTING_MATRIX = {
@@ -46,6 +48,7 @@ ROUTING_MATRIX = {
             "importance": 0.10,
         },
         "workers": ["faiss", "attribute", "graph"],
+        "fusion_enabled": True,   # <-- NEW
         "graph_depth": 0,
         "fallback_pools": ["memories_relevance", "memories_semantic"],
         "entity_required": False,
@@ -56,7 +59,7 @@ ROUTING_MATRIX = {
             "keywords": ["what", "is", "definition", "means", "describe", "explain", "called"],
             "exclude": ["when", "where", "how to", "code", "function", "event", "happened"],
             "min_confidence": 0.5,
-            "exclude_penalty": 2.0,  # Override default exclude penalty
+            "exclude_penalty": 2.0,
             "boost": {
                 "entity_required": 0.2,
                 "attribute_required": 0.15,
@@ -76,6 +79,7 @@ ROUTING_MATRIX = {
             "attribute": 0.02,
         },
         "workers": ["faiss", "graph"],
+        "fusion_enabled": False,   # <-- NEW
         "graph_depth": 1,
         "fallback_pools": ["memories_relevance", "memories_semantic"],
         "entity_required": True,
@@ -106,6 +110,7 @@ ROUTING_MATRIX = {
             "subject": 0.00,
         },
         "workers": ["bm25", "attribute", "faiss"],
+        "fusion_enabled": False,   # <-- NEW
         "graph_depth": 0,
         "fallback_pools": ["memories_relevance", "memories_semantic"],
         "entity_required": False,
@@ -136,6 +141,7 @@ ROUTING_MATRIX = {
             "recency": 0.00,
         },
         "workers": ["bm25", "faiss"],
+        "fusion_enabled": False,   # <-- NEW
         "graph_depth": 0,
         "fallback_pools": ["memories_relevance", "memories_semantic"],
         "entity_required": False,
@@ -165,6 +171,7 @@ ROUTING_MATRIX = {
             "recency": 0.00,
         },
         "workers": ["faiss", "attribute", "graph"],
+        "fusion_enabled": False,   # <-- NEW
         "graph_depth": 0,
         "fallback_pools": ["memories_relevance", "memories_semantic"],
         "entity_required": True,
@@ -195,6 +202,7 @@ ROUTING_MATRIX = {
             "tfidf": 0.02,
         },
         "workers": ["faiss", "bm25", "graph", "attribute"],
+        "fusion_enabled": True,   # <-- NEW
         "graph_depth": 1,
         "fallback_pools": [],
         "entity_required": False,
@@ -245,34 +253,52 @@ def compute_detection_score(type_name: str, query: str, entities: list = None, a
     matched_keywords = []
     matched_excludes = []
     
-    # Keyword matches
     for kw in detection.get("keywords", []):
         if kw in query_lower:
             matched_keywords.append(kw)
     
-    # Exclude matches
     for ex in detection.get("exclude", []):
         if ex in query_lower:
             matched_excludes.append(ex)
     
-    # Base score
     score = len(matched_keywords) * weights["keyword_weight"]
     score += len(matched_excludes) * weights["exclude_penalty"]
     
-    # Entity boost
     if entities and config.get("entity_required", False):
         score += weights["entity_boost"]
     
-    # Attribute boost
     if attributes and config.get("attribute_required", False):
         score += weights["attribute_boost"]
     
-    # Convert to confidence (clamped 0-1)
-    # Raw range: roughly -10 to +20
     raw_confidence = (score + 10) / 30
     confidence = max(0.0, min(1.0, raw_confidence))
     
     return score, confidence, matched_keywords, matched_excludes
+
+
+# ========================
+# Worker helper
+# ========================
+
+def get_workers_for_type(type_name: str) -> list:
+    """
+    Return the list of workers for a type, with fusion applied if:
+    - USE_FUSION is True in config
+    - fusion_enabled is True for this type
+    - both faiss and bm25 are present in the original worker list
+    """
+    config = ROUTING_MATRIX.get(type_name, ROUTING_MATRIX["general"])
+    workers = config.get("workers", ["faiss", "bm25", "graph", "attribute"])
+
+    use_fusion = getattr(settings, "USE_FUSION", False)
+    fusion_enabled = config.get("fusion_enabled", False)
+
+    if use_fusion and fusion_enabled and "faiss" in workers and "bm25" in workers:
+        workers = ["fusion" if w in ("faiss", "bm25") else w for w in workers]
+        seen = set()
+        workers = [w for w in workers if not (w in seen or seen.add(w))]
+
+    return workers
 
 
 # ========================
@@ -282,28 +308,23 @@ def compute_detection_score(type_name: str, query: str, entities: list = None, a
 def validate_matrix(matrix):
     """
     Validate the routing matrix.
-    Raises ValueError if anything is invalid.
     """
     for type_name, config in matrix.items():
-        # Check required fields
         required_fields = ["pool", "signals", "workers", "graph_depth", 
                           "fallback_pools", "entity_required", "temporal_weight", 
-                          "description"]
+                          "description", "fusion_enabled"]   # <-- ADDED
         for field in required_fields:
             if field not in config:
                 raise ValueError(f"Missing required field '{field}' in {type_name}")
         
-        # Check signals sum to 1.0 (within tolerance)
         total = sum(config["signals"].values())
         if abs(total - 1.0) > 0.001:
             raise ValueError(f"{type_name} signals sum to {total:.4f}, not 1.0")
         
-        # Check workers are valid
         for worker in config["workers"]:
             if worker not in VALID_WORKERS:
                 raise ValueError(f"Unknown worker '{worker}' in {type_name}")
         
-        # Check pools are valid
         if config["pool"] not in VALID_POOLS:
             raise ValueError(f"Unknown pool '{config['pool']}' in {type_name}")
         
@@ -311,23 +332,18 @@ def validate_matrix(matrix):
             if pool not in VALID_POOLS:
                 raise ValueError(f"Unknown fallback pool '{pool}' in {type_name}")
         
-        # Check graph_depth is non-negative
         if config["graph_depth"] < 0:
             raise ValueError(f"graph_depth must be >= 0 in {type_name}")
         
-        # Check temporal_weight is between 0 and 1
         if not 0 <= config["temporal_weight"] <= 1:
             raise ValueError(f"temporal_weight must be between 0 and 1 in {type_name}")
         
-        # Check entity_required is bool
         if not isinstance(config["entity_required"], bool):
             raise ValueError(f"entity_required must be boolean in {type_name}")
         
-        # Check attribute_required is bool (new field, optional)
         if "attribute_required" not in config:
             config["attribute_required"] = False
         
-        # Check detection field exists and has required keys
         if "detection" not in config:
             raise ValueError(f"Missing 'detection' field in {type_name}")
         detection = config["detection"]
@@ -342,19 +358,14 @@ def validate_matrix(matrix):
         if "boost" not in detection:
             detection["boost"] = {}
 
-# Validate on import
 validate_matrix(ROUTING_MATRIX)
 
-# ========================
-# Helper Functions
-# ========================
 
 def get_type_config(type_name: str):
-    """Get the routing config for a type, falling back to general if not found."""
     return ROUTING_MATRIX.get(type_name, ROUTING_MATRIX["general"])
 
+
 def get_signal_definitions(type_name: str):
-    """Get signal definitions for a type."""
     config = get_type_config(type_name)
     signals = config.get("signals", {})
     return {signal: SIGNAL_DEFINITIONS.get(signal, f"Unknown signal: {signal}") 

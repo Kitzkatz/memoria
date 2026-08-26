@@ -282,12 +282,22 @@ def main():
                 print(f" failed ({e}), rebuilding", end="", flush=True)
                 skip_db_insert = False
 
+        # ---- Load FAISS cache (always load if exists) ----
+        if faiss_cache_exists:
+            print(f"\n    Loading cached FAISS for {q_id}...", end="", flush=True)
+            try:
+                controller.system.vector_store.load_from_file(str(faiss_cache_path))
+                skip_embedding_build = True
+                print(" loaded", end="", flush=True)
+            except Exception as e:
+                print(f" failed ({e}), rebuilding", end="", flush=True)
+                skip_embedding_build = False
+
         # ---- Build FAISS if needed (when DB loaded but FAISS missing) ----
         faiss_built = False
         if not args.skip_embedding and not faiss_cache_exists and skip_db_insert:
             print(f"\n    Building FAISS for {q_id}...", end="", flush=True)
             try:
-                # Fetch memory IDs from DB (they should be in insertion order)
                 rows = controller.system.db.fetch_all()
                 mem_ids = [row['id'] for row in rows]
                 if len(mem_ids) == len(texts):
@@ -297,7 +307,6 @@ def main():
                     skip_embedding_build = True
                     print(" built and saved", end="", flush=True)
                 else:
-                    # Mismatch: fallback to full rebuild
                     print(f" ID count mismatch: {len(mem_ids)} vs {len(texts)}, rebuilding DB+FAISS", end="", flush=True)
                     skip_db_insert = False
             except Exception as e:
@@ -320,7 +329,6 @@ def main():
             )
             store_time = time.perf_counter() - store_start
 
-            # Save caches
             if not args.rebuild_cache:
                 print(f"\n    Saving DB cache for {q_id}...", end="", flush=True)
                 try:
@@ -337,13 +345,10 @@ def main():
                     except Exception as e:
                         print(f" failed ({e})", end="", flush=True)
         else:
-            # DB was loaded, count is haystack_mem_count
             count = haystack_mem_count
             if faiss_built:
-                # Already saved FAISS
                 pass
             elif not faiss_cache_exists and not args.skip_embedding:
-                # This case should be rare, but if it happens we warn
                 print(f"\n    FAISS missing and could not build; consider --rebuild-cache")
 
         # ---- Query ----
@@ -378,7 +383,6 @@ def main():
 
         print(f", inserted {count} in {store_time:.2f}s, queried in {query_time:.2f}s", end="", flush=True)
 
-        # ---- Clear DB (only if we built it) ----
         if not skip_db_insert:
             clear_db_fast(controller)
         else:
@@ -391,7 +395,6 @@ def main():
 
     output = build_output(records, question_count=len(questions))
 
-    # Determine output path
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)

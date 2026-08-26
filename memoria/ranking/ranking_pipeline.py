@@ -65,7 +65,10 @@ class RankingPipeline:
             lambda_param=0.5,
             enabled=getattr(settings, "MMR_ENABLED", True)
         )
-        self.finalizer = finalizer or ScoreFinalizer()
+        self.finalizer = finalizer or ScoreFinalizer(
+            use_sigmoid=getattr(settings, "FINALIZER_USE_SIGMOID", True),
+            sigmoid_scale=getattr(settings, "FINALIZER_SIGMOID_SCALE", 1.0)
+        )
 
         # --- BM25 Setup ---
         self.bm25 = None
@@ -191,24 +194,37 @@ class RankingPipeline:
         t_context = (time.perf_counter() - t0) * 1000
         debug(f"[Pipeline] context_builder: {t_context:.2f}ms, {len(candidates)} candidates")
 
-        # --- MMR ---
-        t0 = time.perf_counter()
-        before_mmr = [c.memory.id for c in candidates]
-        candidates = self.mmr.rerank(
-            candidates,
-            k=self.context_builder.max_memories
-        )
-        t_mmr = (time.perf_counter() - t0) * 1000
-        debug(f"[Pipeline] mmr: {t_mmr:.2f}ms")
+        # --- MMR (Conditional via settings.MMR_ENABLED) ---
+        # FIX (2026-08-24): MMR was destroying Recall@5 by forcing diversity.
+        # Toggled via settings.MMR_ENABLED (default: False in config).
+        if getattr(settings, "MMR_ENABLED", False):
+            t0 = time.perf_counter()
+            before_mmr = [c.memory.id for c in candidates]
+            candidates = self.mmr.rerank(
+                candidates,
+                k=self.context_builder.max_memories
+            )
+            t_mmr = (time.perf_counter() - t0) * 1000
+            debug(f"[Pipeline] mmr: {t_mmr:.2f}ms")
+            after_mmr = [c.memory.id for c in candidates]
 
-        after_mmr = [c.memory.id for c in candidates]
+            diagnostics["before_mmr"] = before_mmr
+            diagnostics["after_mmr"] = after_mmr
+            diagnostics["mmr_changed"] = before_mmr != after_mmr
+            diagnostics["mmr_moves"] = sum(
+                1 for a, b in zip(before_mmr, after_mmr) if a != b
+            )
+        else:
+            # MMR explicitly disabled via config - keep diagnostics clean
+            t_mmr = 0
+            before_mmr = [c.memory.id for c in candidates]
+            diagnostics["before_mmr"] = before_mmr
+            diagnostics["after_mmr"] = before_mmr  # No change
+            diagnostics["mmr_changed"] = False
+            diagnostics["mmr_moves"] = 0
+            debug("[Pipeline] mmr: skipped (disabled via settings)")
 
-        diagnostics["before_mmr"] = before_mmr
-        diagnostics["after_mmr"] = after_mmr
-        diagnostics["mmr_changed"] = before_mmr != after_mmr
-        diagnostics["mmr_moves"] = sum(
-            1 for a, b in zip(before_mmr, after_mmr) if a != b
-        )
+        # Always populate MMR top diagnostics (runs regardless of enabled state)
         diagnostics["mmr_top"] = [
             {"id": c.memory.id, "score": c.final_score}
             for c in candidates[:5]

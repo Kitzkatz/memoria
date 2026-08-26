@@ -27,6 +27,7 @@ from retrieval.retrieval_engine import RetrievalEngine
 from retrieval.query_processor import QueryProcessor
 from retrieval.shard_manager import ShardManager
 from retrieval.inverted_index import InvertedIndex
+from retrieval.query_expander import QueryExpander   # <-- NEW IMPORT
 
 from graph.search import GraphSearch
 from graph.edge_store import EdgeStore
@@ -40,7 +41,7 @@ from blackboard.consolidator import Consolidator
 from blackboard.core import Blackboard
 from blackboard.scheduler import Scheduler
 from blackboard.workers import (
-    FAISSWorker, BM25Worker, GraphWorker, PhraseWorker, AttributeWorker,
+    FAISSWorker, BM25Worker, GraphWorker, PhraseWorker, AttributeWorker, FusionWorker,
 )
 
 from routing import Router
@@ -58,6 +59,7 @@ def initialize_components(system, db, vector_store, embedder, entity_store, llm=
     system.scorer = ImportanceScorer()
     system.embedding_cache = EmbeddingCache()
     system.query_processor = QueryProcessor()
+    system.query_expander = QueryExpander()   # <-- NEW: query expansion
     system.router = Router()
     debug(f"Router initialized with {len(system.router.list_types())} memory types")
 
@@ -105,7 +107,7 @@ def initialize_components(system, db, vector_store, embedder, entity_store, llm=
     system.feedback = FeedbackLoop(
         db,
         persist_path=getattr(settings, "FEEDBACK_PERSIST_PATH", "feedback_data.json"),
-        plugin_manager=getattr(system, 'plugin_manager', None),  # <-- ADDED
+        plugin_manager=getattr(system, 'plugin_manager', None),
     )
     system.query_history = QueryHistory(
         max_history=getattr(settings, "QUERY_HISTORY_MAX", 1000),
@@ -194,12 +196,13 @@ def _init_blackboard(system, db, vector_store):
         inverted_index = InvertedIndex(db)
         inverted_index.build()
 
-    # Create workers
+    # Create base workers
     faiss_worker = FAISSWorker(vector_store)
     bm25_worker = BM25Worker(bm25_ranker, inverted_index) if bm25_ranker else None
     graph_worker = GraphWorker(system.numpy_graph)
     attribute_worker = AttributeWorker(db)
 
+    # Register base workers
     scheduler.register_worker("attribute", attribute_worker.process)
     scheduler.register_worker("faiss", faiss_worker.process)
     if bm25_worker:
@@ -209,6 +212,16 @@ def _init_blackboard(system, db, vector_store):
     if getattr(settings, "USE_INVERTED_INDEX", False) and inverted_index:
         phrase_worker = PhraseWorker(inverted_index)
         scheduler.register_worker("phrase", phrase_worker.process)
+
+    # ---- Fusion worker (if enabled) ----
+    use_fusion = getattr(settings, "USE_FUSION", False)
+    if use_fusion and bm25_worker:
+        semantic_weight = getattr(settings, "FUSION_SEMANTIC_WEIGHT", 0.5)
+        fusion_worker = FusionWorker(faiss_worker, bm25_worker, semantic_weight)
+        scheduler.register_worker("fusion", fusion_worker.process)
+        debug(f"FusionWorker registered (semantic_weight={semantic_weight})")
+    elif use_fusion:
+        debug("FusionWorker skipped: BM25 is not available")
 
     system.blackboard = blackboard
     system.scheduler = scheduler
