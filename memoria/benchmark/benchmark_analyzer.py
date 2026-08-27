@@ -671,7 +671,117 @@ class BenchmarkAnalyzer:
             f"[Analyzer] Summary exported to {output_path}",
             category="benchmark",
         )
+    def _print_official_metrics(self):
+        """Print official session/turn metrics from the adapter's 'metrics' field."""
+        records = self.records()
+        if not records:
+            return
 
+        # Check if any record has the new 'metrics' field
+        has_metrics = any("metrics" in rec for rec in records)
+        if not has_metrics:
+            return
+
+        print("\n[OFFICIAL SESSION/TURN METRICS]")
+
+        # Aggregate across evaluable records
+        k_values = (1, 3, 5, 10, 30, 50)
+        session_recall_any = {k: 0 for k in k_values}
+        session_recall_all = {k: 0 for k in k_values}
+        session_ndcg_any = {k: 0.0 for k in k_values}
+        turn_recall_any = {k: 0 for k in k_values}
+        turn_recall_all = {k: 0 for k in k_values}
+        turn_ndcg_any = {k: 0.0 for k in k_values}
+        evaluable_count = 0
+
+        for rec in records:
+            if rec.get("abstention", False):
+                continue
+            metrics = rec.get("metrics", {})
+            if not metrics:
+                continue
+
+            evaluable_count += 1
+
+            sess = metrics.get("session", {})
+            turn = metrics.get("turn", {})
+
+            for k in k_values:
+                session_recall_any[k] += 1 if sess.get("recall_any", {}).get(k, False) else 0
+                session_recall_all[k] += 1 if sess.get("recall_all", {}).get(k, False) else 0
+                session_ndcg_any[k] += sess.get("ndcg_any", {}).get(k, 0.0)
+                turn_recall_any[k] += 1 if turn.get("recall_any", {}).get(k, False) else 0
+                turn_recall_all[k] += 1 if turn.get("recall_all", {}).get(k, False) else 0
+                turn_ndcg_any[k] += turn.get("ndcg_any", {}).get(k, 0.0)
+
+        if evaluable_count == 0:
+            print("  No evaluable records found.")
+            return
+
+        print(f"  Evaluable questions: {evaluable_count}")
+
+        print("\n  SESSION-LEVEL:")
+        for k in k_values:
+            print(
+                f"    K={k:>2}: recall_any={session_recall_any[k]/evaluable_count*100:>5.1f}%  "
+                f"recall_all={session_recall_all[k]/evaluable_count*100:>5.1f}%  "
+                f"ndcg_any={session_ndcg_any[k]/evaluable_count:.4f}"
+            )
+
+        print("\n  TURN-LEVEL:")
+        for k in k_values:
+            print(
+                f"    K={k:>2}: recall_any={turn_recall_any[k]/evaluable_count*100:>5.1f}%  "
+                f"recall_all={turn_recall_all[k]/evaluable_count*100:>5.1f}%  "
+                f"ndcg_any={turn_ndcg_any[k]/evaluable_count:.4f}"
+            )
+        @staticmethod
+    def compare_ablations(filepaths: list):
+        """Compare multiple ablation runs (dense, bm25, rrf, full)."""
+        print("\n" + "=" * 70)
+        print("[ABLATION COMPARISON]")
+        print("=" * 70)
+        print(f"{'Mode':<12} {'R@1':>8} {'R@3':>8} {'R@5':>8} {'R@10':>8} {'NDCG@10':>10}")
+        print("-" * 70)
+
+        results = {}
+        for fp in filepaths:
+            analyzer = BenchmarkAnalyzer(fp)
+            if not analyzer.load():
+                continue
+            records = analyzer.records()
+            # Compute aggregated recall from metrics
+            k_values = (1, 3, 5, 10)
+            recall_any = {k: 0 for k in k_values}
+            ndcg_any = {k: 0.0 for k in k_values}
+            evaluable = 0
+            for rec in records:
+                if rec.get("abstention"):
+                    continue
+                metrics = rec.get("metrics", {})
+                if not metrics:
+                    continue
+                evaluable += 1
+                sess = metrics.get("session", {})
+                for k in k_values:
+                    recall_any[k] += 1 if sess.get("recall_any", {}).get(k, False) else 0
+                    ndcg_any[k] += sess.get("ndcg_any", {}).get(k, 0.0)
+
+            if evaluable:
+                mode = Path(fp).stem
+                results[mode] = {
+                    "r1": recall_any[1]/evaluable*100,
+                    "r3": recall_any[3]/evaluable*100,
+                    "r5": recall_any[5]/evaluable*100,
+                    "r10": recall_any[10]/evaluable*100,
+                    "ndcg10": ndcg_any[10]/evaluable,
+                }
+
+        for mode, vals in results.items():
+            print(
+                f"{mode:<12} {vals['r1']:>7.1f}% {vals['r3']:>7.1f}% "
+                f"{vals['r5']:>7.1f}% {vals['r10']:>7.1f}% {vals['ndcg10']:>9.4f}"
+            )
 
 def analyze_all(results_dir=DEFAULT_RESULTS_DIR):
     dir_path = Path(results_dir)

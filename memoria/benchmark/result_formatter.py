@@ -33,29 +33,66 @@ def build_record(
     candidates: Optional[List[Dict[str, Any]]] = None,
     runtime_ms: float = 0.0,
     diagnostics: Optional[Dict[str, Any]] = None,
+    # NEW: official evaluation fields
+    gold_session_ids: Optional[List[str]] = None,
+    gold_turn_ids: Optional[List[str]] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+    abstention: bool = False,
+    question_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build a single record in the standard format.
+
+    Args:
+        query: The query text.
+        expected: The expected answer text.
+        expected_ids: List of expected session/turn IDs.
+        expected_rank: The rank of the first expected candidate, or None.
+        retrieved: Whether any expected candidate was retrieved.
+        candidates: List of raw candidates from the system.
+        runtime_ms: Query runtime in milliseconds.
+        diagnostics: Additional diagnostics from the system.
+        gold_session_ids: Official gold session IDs for evaluation.
+        gold_turn_ids: Official gold turn IDs for evaluation.
+        metrics: Precomputed per‑question metrics (session/turn recall/NDCG).
+        abstention: Whether this is an abstention question.
+        question_id: Optional question ID for traceability.
     """
     if candidates is None:
         candidates = []
     if diagnostics is None:
         diagnostics = {}
+    if expected_ids is None:
+        expected_ids = []
+    if gold_session_ids is None:
+        gold_session_ids = []
+    if gold_turn_ids is None:
+        gold_turn_ids = []
 
     formatted_candidates = [
         format_candidate(c, idx + 1) for idx, c in enumerate(candidates)
     ]
 
-    return {
+    record = {
         "query": query,
         "expected": expected,
-        "expected_ids": expected_ids or [],
+        "expected_ids": expected_ids,
         "expected_rank": expected_rank,
         "retrieved": retrieved,
         "candidates": formatted_candidates,
         "runtime_ms": runtime_ms,
-        "diagnostics": diagnostics
+        "diagnostics": diagnostics,
+        # NEW fields
+        "gold_session_ids": gold_session_ids,
+        "gold_turn_ids": gold_turn_ids,
+        "metrics": metrics,
+        "abstention": abstention,
     }
+
+    if question_id is not None:
+        record["question_id"] = question_id
+
+    return record
 
 
 def build_output(
@@ -63,9 +100,17 @@ def build_output(
     question_count: int = None,
     started: Optional[str] = None,
     finished: Optional[str] = None,
+    # NEW: optional metadata fields
+    dataset_hash: Optional[str] = None,
+    embedder: Optional[str] = None,
+    retrieval_mode: Optional[str] = None,
+    commit: Optional[str] = None,
+    settings_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Assemble the final output dict, compatible with benchmark_writer.
+
+    Now includes optional metadata for reproducibility.
     """
     if started is None:
         started = datetime.now(timezone.utc).isoformat()
@@ -74,12 +119,26 @@ def build_output(
     if question_count is None:
         question_count = len(records)
 
-    return {
+    output = {
         "started": started,
         "finished": finished,
         "question_count": question_count,
         "records": records
     }
+
+    # Add optional metadata if provided
+    if dataset_hash is not None:
+        output["dataset_hash"] = dataset_hash
+    if embedder is not None:
+        output["embedder"] = embedder
+    if retrieval_mode is not None:
+        output["retrieval_mode"] = retrieval_mode
+    if commit is not None:
+        output["commit"] = commit
+    if settings_snapshot is not None:
+        output["settings"] = settings_snapshot
+
+    return output
 
 
 def write_output(output_dict: Dict[str, Any], filepath: str):
