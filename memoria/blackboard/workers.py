@@ -1,270 +1,1017 @@
 import time
-from typing import Dict, Any, List, Optional
-from cache.config import settings
+from typing import Dict, Any
 
+from cache.config import settings
 from core.logger import debug
 
 
-def _shard_filter(items, key_fn, shard_id, num_shards):
-    """Filter a list of items to only those belonging to this shard."""
-    if num_shards <= 1:
-        return items
-    return [item for item in items if key_fn(item) % num_shards == shard_id]
+# ----------------------------------------------------------------------
+# Sharding helpers
+# ----------------------------------------------------------------------
 
+def _get_shard_config(payload: Dict[str, Any]):
+    """Resolve shard configuration from the task payload/settings."""
+    shard_id = int(payload.get("shard_id", 0))
+    num_shards = int(
+        payload.get(
+            "num_shards",
+            getattr(settings, "NUM_SHARDS", 1),
+        )
+    )
+
+    if num_shards < 1:
+        num_shards = 1
+
+    if shard_id < 0 or shard_id >= num_shards:
+        raise ValueError(
+            f"Invalid shard_id={shard_id} for num_shards={num_shards}"
+        )
+
+    return shard_id, num_shards
+
+
+def _memory_id(value):
+    """
+    Normalize a memory/document ID to the integer identity used by
+    Memoria's SQLite-backed retrieval indexes.
+
+    Returns None for invalid IDs.
+    """
+    if value is None:
+        return None
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _belongs_to_shard(memory_id, shard_id, num_shards):
+    """Return whether a memory ID belongs to this shard."""
+    memory_id = _memory_id(memory_id)
+
+    if memory_id is None:
+        return False
+
+    if num_shards <= 1:
+        return True
+
+    return memory_id % num_shards == shard_id
+
+
+def _shard_filter(
+    items,
+    key_fn,
+    shard_id,
+    num_shards,
+):
+    """
+    Filter retrieval results to the deterministic memory-ID shard.
+
+    The identity used for sharding is always the real memory/document ID,
+    never a corpus position or result-list position.
+    """
+    if num_shards <= 1:
+        return list(items)
+
+    filtered = []
+
+    for item in items:
+        memory_id = _memory_id(key_fn(item))
+
+        if memory_id is None:
+            continue
+
+        if _belongs_to_shard(
+            memory_id,
+            shard_id,
+            num_shards,
+        ):
+            filtered.append(item)
+
+    return filtered
+
+
+def _dedupe_candidates(candidates):
+    """
+    Deduplicate candidate tuples by real memory ID.
+
+    Keeps the highest score encountered for each memory.
+    """
+    unique = {}
+
+    for memory_id, score in candidates:
+        memory_id = _memory_id(memory_id)
+
+        if memory_id is None:
+            continue
+
+        score = float(score)
+
+        previous = unique.get(memory_id)
+
+        if previous is None or score > previous:
+            unique[memory_id] = score
+
+    return list(unique.items())
+
+
+# ----------------------------------------------------------------------
+# Base worker
+# ----------------------------------------------------------------------
 
 class Worker:
-    """Base class for all workers."""
-    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Base class for all retrieval workers."""
+
+    def process(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
         raise NotImplementedError
 
 
+# ----------------------------------------------------------------------
+# FAISS
+# ----------------------------------------------------------------------
+
 class FAISSWorker(Worker):
-    """Worker that performs FAISS vector search with shard support."""
+    """Worker that performs FAISS vector search with deterministic sharding."""
+
     def __init__(self, vector_store):
         self.vector_store = vector_store
 
-    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def process(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
         start = time.perf_counter()
+
         query_vec = payload.get("vector")
-        top_k = payload.get("top_k", settings.TOP_K)
-        shard_id = payload.get("shard_id", 0)
-        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
+        top_k = payload.get(
+            "top_k",
+            settings.TOP_K,
+        )
+
+        shard_id, num_shards = _get_shard_config(
+            payload
+        )
+
+        try:
+            top_k = int(top_k)
+        except (TypeError, ValueError):
+            top_k = int(settings.TOP_K)
+
+        if top_k <= 0:
+            return {
+                "source": "faiss",
+                "candidates": [],
+                "count": 0,
+            }
 
         if query_vec is None:
-            return {"error": "No vector provided", "source": "faiss", "candidates": []}
+            return {
+                "error": "No vector provided",
+                "source": "faiss",
+                "candidates": [],
+                "count": 0,
+            }
 
-        ids, distances = self.vector_store.search(query_vec, k=top_k * num_shards)
-        candidates = list(zip(ids, distances))
+        # ------------------------------------------------------------------
+        # Global over-fetch.
+        #
+        # We need enough global neighbors for deterministic ID-based shard
+        # filtering. This is an over-fetch strategy, not an independent
+        # per-shard FAISS index.
+        # ------------------------------------------------------------------
 
-        candidates = _shard_filter(candidates, lambda c: c[0], shard_id, num_shards)
+        search_k = (
+            top_k * num_shards
+            if num_shards > 1
+            else top_k
+        )
+
+        ids, distances = self.vector_store.search(
+            query_vec,
+            k=search_k,
+        )
+
+        candidates = []
+
+        for memory_id, distance in zip(
+            ids,
+            distances,
+        ):
+            memory_id = _memory_id(memory_id)
+
+            if memory_id is None:
+                continue
+
+            candidates.append(
+                (
+                    memory_id,
+                    float(distance),
+                )
+            )
+
+        candidates = _dedupe_candidates(
+            candidates
+        )
+
+        candidates = _shard_filter(
+            candidates,
+            lambda candidate: candidate[0],
+            shard_id,
+            num_shards,
+        )
+
+        # FAISS distances are already ordered by the vector store.
         candidates = candidates[:top_k]
 
-        search_time = (time.perf_counter() - start) * 1000
-        debug(f"FAISSWorker (shard {shard_id}): search={search_time:.2f}ms, count={len(candidates)}")
+        search_time = (
+            time.perf_counter() - start
+        ) * 1000
+
+        debug(
+            f"FAISSWorker "
+            f"(shard {shard_id}/{num_shards}): "
+            f"search={search_time:.2f}ms, "
+            f"count={len(candidates)}"
+        )
+
         return {
             "source": "faiss",
             "candidates": candidates,
-            "count": len(candidates)
+            "count": len(candidates),
+            "diagnostics": {
+                "search_k": search_k,
+                "requested_k": top_k,
+                "shard_id": shard_id,
+                "num_shards": num_shards,
+            },
         }
 
 
+# ----------------------------------------------------------------------
+# BM25
+# ----------------------------------------------------------------------
+
 class BM25Worker(Worker):
-    """Worker that performs BM25 lexical search with shard support."""
-    def __init__(self, bm25_ranker, inverted_index):
+    """
+    Worker that performs BM25 lexical retrieval with deterministic sharding.
+
+    BM25 owns the mapping between real memory IDs and internal corpus
+    positions. This worker never treats a memory ID as a corpus position.
+    """
+
+    def __init__(
+        self,
+        bm25_ranker,
+        inverted_index,
+    ):
         self.bm25_ranker = bm25_ranker
         self.inverted_index = inverted_index
 
-    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def process(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
         start = time.perf_counter()
-        query_tokens = payload.get("tokens", [])
-        limit = payload.get("limit", settings.TOP_K)
-        shard_id = payload.get("shard_id", 0)
-        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
 
-        if not isinstance(limit, int):
-            limit = int(limit) if limit else settings.TOP_K
+        query_tokens = payload.get(
+            "tokens",
+            [],
+        )
+
+        limit = payload.get(
+            "limit",
+            settings.TOP_K,
+        )
+
+        shard_id, num_shards = _get_shard_config(
+            payload
+        )
+
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = int(settings.TOP_K)
+
+        if limit <= 0:
+            return {
+                "source": "bm25",
+                "candidates": [],
+                "count": 0,
+            }
 
         if not query_tokens:
-            return {"error": "No tokens provided", "source": "bm25", "candidates": []}
+            return {
+                "error": "No tokens provided",
+                "source": "bm25",
+                "candidates": [],
+                "count": 0,
+            }
+
+        if self.bm25_ranker is None:
+            return {
+                "error": "BM25 ranker not available",
+                "source": "bm25",
+                "candidates": [],
+                "count": 0,
+            }
 
         if not self.inverted_index:
-            return {"error": "Inverted index not available", "source": "bm25", "candidates": []}
+            return {
+                "error": "Inverted index not available",
+                "source": "bm25",
+                "candidates": [],
+                "count": 0,
+            }
+
+        # ------------------------------------------------------------------
+        # Candidate generation.
+        #
+        # The inverted index returns real memory IDs.
+        # ------------------------------------------------------------------
 
         candidate_ids = set()
+
         for token in query_tokens:
-            candidate_ids.update(self.inverted_index.search(token))
-        candidate_ids = [int(x) for x in candidate_ids if x is not None]
+            ids = self.inverted_index.search(token)
 
-        if not candidate_ids:
-            return {"error": "No candidates found", "source": "bm25", "candidates": []}
+            if ids:
+                candidate_ids.update(ids)
 
-        # Filter by shard BEFORE scoring — don't spend time scoring
-        # candidates this shard is going to throw away anyway.
-        candidate_ids = _shard_filter(candidate_ids, lambda cid: cid, shard_id, num_shards)
-
-        candidates = [
-            (doc_id, self.bm25_ranker.score(query_tokens, doc_id))
-            for doc_id in candidate_ids
+        candidate_ids = [
+            memory_id
+            for memory_id in (
+                _memory_id(value)
+                for value in candidate_ids
+            )
+            if memory_id is not None
         ]
 
-        candidates.sort(key=lambda x: x[1], reverse=True)
+        if not candidate_ids:
+            return {
+                "error": "No candidates found",
+                "source": "bm25",
+                "candidates": [],
+                "count": 0,
+            }
+
+        # ------------------------------------------------------------------
+        # Shard before scoring.
+        #
+        # This is safe because BM25's document identity is the real memory
+        # ID, and shard ownership is deterministic from that ID.
+        # ------------------------------------------------------------------
+
+        candidate_ids = [
+            memory_id
+            for memory_id in candidate_ids
+            if _belongs_to_shard(
+                memory_id,
+                shard_id,
+                num_shards,
+            )
+        ]
+
+        if not candidate_ids:
+            return {
+                "source": "bm25",
+                "candidates": [],
+                "count": 0,
+                "diagnostics": {
+                    "candidate_count": 0,
+                    "shard_id": shard_id,
+                    "num_shards": num_shards,
+                },
+            }
+
+        # ------------------------------------------------------------------
+        # Score all surviving IDs through BM25's explicit ID mapping.
+        #
+        # This computes the retrieval score once. The score is carried
+        # forward with the candidate and should not be recomputed later by
+        # the ranking pipeline.
+        # ------------------------------------------------------------------
+
+        scores = self.bm25_ranker.score_ids(
+            query_tokens,
+            candidate_ids,
+        )
+
+        candidates = [
+            (
+                memory_id,
+                float(scores.get(memory_id, 0.0)),
+            )
+            for memory_id in candidate_ids
+        ]
+
+        candidates.sort(
+            key=lambda item: (
+                -item[1],
+                item[0],
+            )
+        )
+
         candidates = candidates[:limit]
 
-        build_time = (time.perf_counter() - start) * 1000
-        debug(f"BM25Worker (shard {shard_id}): build={build_time:.2f}ms, count={len(candidates)}")
+        build_time = (
+            time.perf_counter() - start
+        ) * 1000
+
+        debug(
+            f"BM25Worker "
+            f"(shard {shard_id}/{num_shards}): "
+            f"score={build_time:.2f}ms, "
+            f"count={len(candidates)}"
+        )
+
         return {
             "source": "bm25",
             "candidates": candidates,
-            "count": len(candidates)
+            "count": len(candidates),
+            "diagnostics": {
+                "candidate_count": len(candidate_ids),
+                "scored_count": len(candidates),
+                "shard_id": shard_id,
+                "num_shards": num_shards,
+            },
         }
 
 
+# ----------------------------------------------------------------------
+# Graph
+# ----------------------------------------------------------------------
+
 class GraphWorker(Worker):
-    """Worker that performs graph-based retrieval using Numpy graph with shard support."""
+    """
+    Worker that performs graph-based retrieval using the numpy graph.
+
+    Graph scores remain source-specific. The worker returns the graph
+    candidate identity; downstream ranking decides how that signal is used.
+    """
+
     def __init__(self, numpy_graph):
         self.numpy_graph = numpy_graph
 
-    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def process(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
         start = time.perf_counter()
-        entities = payload.get("entities", [])
-        depth = payload.get("depth", 2)
-        limit = payload.get("limit", settings.GRAPH_TOP_K)
-        shard_id = payload.get("shard_id", 0)
-        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
 
-        if not entities or not self.numpy_graph:
-            return {"error": "No entities or graph", "source": "graph", "candidates": []}
+        entities = payload.get(
+            "entities",
+            [],
+        )
 
-        memory_ids = self.numpy_graph.multi_hop_search(entities, depth=depth, limit=limit * num_shards)
-        memory_ids = [int(x) for x in memory_ids if x is not None]
+        depth = payload.get(
+            "depth",
+            2,
+        )
 
-        memory_ids = _shard_filter(memory_ids, lambda mid: mid, shard_id, num_shards)
+        limit = payload.get(
+            "limit",
+            settings.GRAPH_TOP_K,
+        )
+
+        shard_id, num_shards = _get_shard_config(
+            payload
+        )
+
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = int(settings.GRAPH_TOP_K)
+
+        if limit <= 0:
+            return {
+                "source": "graph",
+                "candidates": [],
+                "count": 0,
+            }
+
+        if not entities or self.numpy_graph is None:
+            return {
+                "error": "No entities or graph",
+                "source": "graph",
+                "candidates": [],
+                "count": 0,
+            }
+
+        search_limit = (
+            limit * num_shards
+            if num_shards > 1
+            else limit
+        )
+
+        memory_ids = self.numpy_graph.multi_hop_search(
+            entities,
+            depth=depth,
+            limit=search_limit,
+        )
+
+        memory_ids = [
+            memory_id
+            for memory_id in (
+                _memory_id(value)
+                for value in memory_ids
+            )
+            if memory_id is not None
+        ]
+
+        # Preserve graph traversal order while removing duplicates.
+        seen = set()
+        memory_ids = [
+            memory_id
+            for memory_id in memory_ids
+            if not (
+                memory_id in seen
+                or seen.add(memory_id)
+            )
+        ]
+
+        memory_ids = [
+            memory_id
+            for memory_id in memory_ids
+            if _belongs_to_shard(
+                memory_id,
+                shard_id,
+                num_shards,
+            )
+        ]
+
         memory_ids = memory_ids[:limit]
 
-        candidates = [(mem_id, 0.0) for mem_id in memory_ids]
-        search_time = (time.perf_counter() - start) * 1000
+        candidates = [
+            (
+                memory_id,
+                0.0,
+            )
+            for memory_id in memory_ids
+        ]
 
-        debug(f"GraphWorker (shard {shard_id}): search={search_time:.2f}ms, count={len(candidates)}")
+        search_time = (
+            time.perf_counter() - start
+        ) * 1000
+
+        debug(
+            f"GraphWorker "
+            f"(shard {shard_id}/{num_shards}): "
+            f"search={search_time:.2f}ms, "
+            f"count={len(candidates)}"
+        )
+
         return {
             "source": "graph",
             "candidates": candidates,
-            "count": len(candidates)
+            "count": len(candidates),
+            "diagnostics": {
+                "search_limit": search_limit,
+                "requested_limit": limit,
+                "shard_id": shard_id,
+                "num_shards": num_shards,
+            },
         }
 
 
+# ----------------------------------------------------------------------
+# Phrase
+# ----------------------------------------------------------------------
+
 class PhraseWorker(Worker):
-    """Worker that performs phrase search using the inverted index with shard support."""
+    """Worker that performs phrase retrieval using the inverted index."""
+
     def __init__(self, inverted_index):
         self.inverted_index = inverted_index
 
-    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def process(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
         start = time.perf_counter()
-        phrases = payload.get("phrases", [])
-        shard_id = payload.get("shard_id", 0)
-        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
+
+        phrases = payload.get(
+            "phrases",
+            [],
+        )
+
+        shard_id, num_shards = _get_shard_config(
+            payload
+        )
 
         if not phrases or not self.inverted_index:
-            return {"error": "No phrases or inverted index missing", "source": "phrase", "candidates": []}
-
-        results = []
-        for phrase_tokens in phrases:
-            doc_ids = self.inverted_index.phrase_search(phrase_tokens)
-            for doc_id in doc_ids:
-                results.append((doc_id, 1.0))
+            return {
+                "error": (
+                    "No phrases or inverted index missing"
+                ),
+                "source": "phrase",
+                "candidates": [],
+                "count": 0,
+            }
 
         unique = {}
-        for doc_id, score in results:
-            if doc_id not in unique or score > unique[doc_id]:
-                unique[doc_id] = score
 
-        candidates = list(unique.items())
-        candidates.sort(key=lambda x: x[1], reverse=True)
+        for phrase_tokens in phrases:
+            doc_ids = self.inverted_index.phrase_search(
+                phrase_tokens
+            )
 
-        candidates = _shard_filter(candidates, lambda c: c[0], shard_id, num_shards)
+            for doc_id in doc_ids:
+                doc_id = _memory_id(doc_id)
+
+                if doc_id is None:
+                    continue
+
+                if not _belongs_to_shard(
+                    doc_id,
+                    shard_id,
+                    num_shards,
+                ):
+                    continue
+
+                # Phrase match is currently binary.
+                # Preserve the highest source score if multiple phrases
+                # produce the same document.
+                previous = unique.get(
+                    doc_id,
+                    0.0,
+                )
+
+                unique[doc_id] = max(
+                    previous,
+                    1.0,
+                )
+
+        candidates = list(
+            unique.items()
+        )
+
+        candidates.sort(
+            key=lambda item: (
+                -item[1],
+                item[0],
+            )
+        )
+
+        # Keep existing phrase-worker ceiling.
         candidates = candidates[:100]
 
-        phrase_time = (time.perf_counter() - start) * 1000
-        debug(f"PhraseWorker (shard {shard_id}): phrase_time={phrase_time:.2f}ms, count={len(candidates)}")
+        phrase_time = (
+            time.perf_counter() - start
+        ) * 1000
+
+        debug(
+            f"PhraseWorker "
+            f"(shard {shard_id}/{num_shards}): "
+            f"phrase_time={phrase_time:.2f}ms, "
+            f"count={len(candidates)}"
+        )
+
         return {
             "source": "phrase",
             "candidates": candidates,
-            "count": len(candidates)
+            "count": len(candidates),
+            "diagnostics": {
+                "shard_id": shard_id,
+                "num_shards": num_shards,
+            },
         }
 
 
+# ----------------------------------------------------------------------
+# Attribute
+# ----------------------------------------------------------------------
+
 class AttributeWorker(Worker):
-    """Worker that performs attribute-based retrieval with shard support."""
+    """Worker that performs attribute-based retrieval."""
+
     def __init__(self, db):
         self.db = db
 
-    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def process(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
         start = time.perf_counter()
-        subject = payload.get("subject")
-        attribute = payload.get("attribute")
-        shard_id = payload.get("shard_id", 0)
-        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
+
+        subject = payload.get(
+            "subject"
+        )
+
+        attribute = payload.get(
+            "attribute"
+        )
+
+        shard_id, num_shards = _get_shard_config(
+            payload
+        )
 
         if not subject or not attribute:
-            return {"error": "No subject or attribute", "source": "attribute", "candidates": []}
+            return {
+                "error": "No subject or attribute",
+                "source": "attribute",
+                "candidates": [],
+                "count": 0,
+            }
 
-        rows = self.db.search_attribute(subject, attribute)
-        candidates = [(row["id"], 0.0) for row in rows if row["id"] is not None]
+        rows = self.db.search_attribute(
+            subject,
+            attribute,
+        )
 
-        candidates = _shard_filter(candidates, lambda c: c[0], shard_id, num_shards)
+        candidates = []
 
-        attr_time = (time.perf_counter() - start) * 1000
-        debug(f"AttributeWorker (shard {shard_id}): attr_time={attr_time:.2f}ms, count={len(candidates)}")
+        for row in rows:
+            memory_id = _memory_id(
+                row.get("id")
+            )
+
+            if memory_id is None:
+                continue
+
+            if not _belongs_to_shard(
+                memory_id,
+                shard_id,
+                num_shards,
+            ):
+                continue
+
+            candidates.append(
+                (
+                    memory_id,
+                    0.0,
+                )
+            )
+
+        attr_time = (
+            time.perf_counter() - start
+        ) * 1000
+
+        debug(
+            f"AttributeWorker "
+            f"(shard {shard_id}/{num_shards}): "
+            f"attr_time={attr_time:.2f}ms, "
+            f"count={len(candidates)}"
+        )
+
         return {
             "source": "attribute",
             "candidates": candidates,
-            "count": len(candidates)
+            "count": len(candidates),
+            "diagnostics": {
+                "shard_id": shard_id,
+                "num_shards": num_shards,
+            },
         }
 
 
-
+# ----------------------------------------------------------------------
+# Fusion
+# ----------------------------------------------------------------------
 
 class FusionWorker(Worker):
     """
-    Fuses FAISS (semantic) and BM25 (lexical) results using min‑max normalization
-    and a weighted sum. Scores are normalized to [0,1] before fusion.
+    Retrieval-level fusion of FAISS and BM25 using Reciprocal Rank Fusion.
+
+    Despite the historical class name/documentation, this worker does NOT
+    perform min-max score normalization or weighted-score fusion.
+
+    It performs RRF:
+
+        RRF(d) = sum(1 / (k + rank_i(d)))
+
+    A document appearing in both sources therefore receives contributions
+    from both rankings.
+
+    This worker is retained as an explicit retrieval-level fusion primitive.
+    The normal V4 router may instead submit FAISS/BM25 independently and
+    perform fusion downstream.
     """
-    def __init__(self, faiss_worker, bm25_worker, semantic_weight=0.5):
+
+    def __init__(
+        self,
+        faiss_worker,
+        bm25_worker,
+        semantic_weight=0.5,
+    ):
         self.faiss_worker = faiss_worker
         self.bm25_worker = bm25_worker
-        self.semantic_weight = semantic_weight  # 0.0 = BM25 only, 1.0 = FAISS only
 
-    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        # Retained for backwards compatibility with callers that provide it.
+        # RRF itself does not use a semantic_weight.
+        self.semantic_weight = semantic_weight
+
+    def process(
+        self,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
         start = time.perf_counter()
-        top_k = payload.get("top_k", settings.TOP_K)
-        shard_id = payload.get("shard_id", 0)
-        num_shards = payload.get("num_shards", getattr(settings, "NUM_SHARDS", 1))
 
-        # 1. Run FAISS and BM25
+        top_k = payload.get(
+            "top_k",
+            settings.TOP_K,
+        )
+
+        shard_id, num_shards = _get_shard_config(
+            payload
+        )
+
+        try:
+            top_k = int(top_k)
+        except (TypeError, ValueError):
+            top_k = int(settings.TOP_K)
+
+        if top_k <= 0:
+            return {
+                "source": "fusion",
+                "candidates": [],
+                "count": 0,
+            }
+
+        # ------------------------------------------------------------------
+        # Over-fetch both retrieval sources.
+        #
+        # We fuse rankings, not raw scores, so source-specific score scales
+        # do not need normalization.
+        # ------------------------------------------------------------------
+
+        source_limit = top_k * 2
+
         faiss_result = self.faiss_worker.process({
             "vector": payload.get("vector"),
-            "top_k": top_k * 2,
+            "top_k": source_limit,
             "shard_id": shard_id,
-            "num_shards": num_shards
+            "num_shards": num_shards,
         })
+
         bm25_result = self.bm25_worker.process({
             "tokens": payload.get("tokens", []),
-            "limit": top_k * 2,
+            "limit": source_limit,
             "shard_id": shard_id,
-            "num_shards": num_shards
+            "num_shards": num_shards,
         })
 
-        faiss_candidates = faiss_result.get("candidates", [])   # list of (mem_id, distance)
-        bm25_candidates = bm25_result.get("candidates", [])     # list of (mem_id, score)
+        faiss_candidates = (
+            faiss_result.get(
+                "candidates",
+                [],
+            )
+        )
 
-        # 2. Build rank dictionaries (1‑indexed, lower rank = better)
-        faiss_rank = {mem_id: idx+1 for idx, (mem_id, _) in enumerate(faiss_candidates)}
-        bm25_rank   = {mem_id: idx+1 for idx, (mem_id, _) in enumerate(bm25_candidates)}
+        bm25_candidates = (
+            bm25_result.get(
+                "candidates",
+                [],
+            )
+        )
 
-        # 3. RRF fusion
-        k = getattr(settings, "RRF_K", 60)  # configurable
+        # ------------------------------------------------------------------
+        # Build 1-indexed source rankings.
+        #
+        # Candidate lists are already deduplicated by their workers, but
+        # enumerate unique IDs defensively here so fusion cannot assign
+        # multiple ranks to one memory.
+        # ------------------------------------------------------------------
+
+        faiss_rank = {}
+        faiss_score = {}
+
+        for memory_id, distance in faiss_candidates:
+            memory_id = _memory_id(memory_id)
+
+            if memory_id is None:
+                continue
+
+            if memory_id not in faiss_rank:
+                faiss_rank[memory_id] = (
+                    len(faiss_rank) + 1
+                )
+                faiss_score[memory_id] = float(
+                    distance
+                )
+
+        bm25_rank = {}
+        bm25_score = {}
+
+        for memory_id, score in bm25_candidates:
+            memory_id = _memory_id(memory_id)
+
+            if memory_id is None:
+                continue
+
+            if memory_id not in bm25_rank:
+                bm25_rank[memory_id] = (
+                    len(bm25_rank) + 1
+                )
+                bm25_score[memory_id] = float(
+                    score
+                )
+
+        # ------------------------------------------------------------------
+        # Reciprocal Rank Fusion.
+        # ------------------------------------------------------------------
+
+        rrf_k = int(
+            getattr(
+                settings,
+                "RRF_K",
+                60,
+            )
+        )
+
+        if rrf_k < 0:
+            rrf_k = 60
+
+        all_ids = (
+            set(faiss_rank)
+            | set(bm25_rank)
+        )
+
         rrf_scores = {}
-        all_ids = set(faiss_rank.keys()) | set(bm25_rank.keys())
 
-        for mem_id in all_ids:
-            faiss_r = faiss_rank.get(mem_id, float('inf'))  # missing = infinity
-            bm25_r   = bm25_rank.get(mem_id, float('inf'))
-            # RRF: 1/(rank + k) – missing ranks get 0
+        for memory_id in all_ids:
             score = 0.0
-            if faiss_r != float('inf'):
-                score += 1.0 / (faiss_r + k)
-            if bm25_r != float('inf'):
-                score += 1.0 / (bm25_r + k)
-            rrf_scores[mem_id] = score
 
-        # 4. Sort and truncate
-        sorted_candidates = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-        top_candidates = sorted_candidates[:top_k]
+            rank = faiss_rank.get(
+                memory_id
+            )
 
-        fusion_time = (time.perf_counter() - start) * 1000
-        debug(f"FusionWorker (RRF, k={k}): fusion={fusion_time:.2f}ms, count={len(top_candidates)}")
+            if rank is not None:
+                score += 1.0 / (
+                    rank + rrf_k
+                )
+
+            rank = bm25_rank.get(
+                memory_id
+            )
+
+            if rank is not None:
+                score += 1.0 / (
+                    rank + rrf_k
+                )
+
+            rrf_scores[memory_id] = score
+
+        sorted_candidates = sorted(
+            rrf_scores.items(),
+            key=lambda item: (
+                -item[1],
+                item[0],
+            ),
+        )
+
+        top_candidates = sorted_candidates[
+            :top_k
+        ]
+
+        fusion_time = (
+            time.perf_counter() - start
+        ) * 1000
+
+        debug(
+            f"FusionWorker "
+            f"(RRF, k={rrf_k}): "
+            f"fusion={fusion_time:.2f}ms, "
+            f"count={len(top_candidates)}"
+        )
 
         return {
             "source": "fusion",
             "candidates": top_candidates,
-            "count": len(top_candidates)
+            "count": len(top_candidates),
+            "diagnostics": {
+                "rrf_k": rrf_k,
+                "source_limit": source_limit,
+                "faiss_count": len(faiss_rank),
+                "bm25_count": len(bm25_rank),
+                "overlap_count": len(
+                    set(faiss_rank)
+                    & set(bm25_rank)
+                ),
+                "shard_id": shard_id,
+                "num_shards": num_shards,
+                "source_scores": {
+                    str(memory_id): {
+                        "faiss_rank": faiss_rank.get(
+                            memory_id
+                        ),
+                        "faiss_distance": faiss_score.get(
+                            memory_id
+                        ),
+                        "bm25_rank": bm25_rank.get(
+                            memory_id
+                        ),
+                        "bm25_score": bm25_score.get(
+                            memory_id
+                        ),
+                    }
+                    for memory_id in (
+                        memory_id
+                        for memory_id, _ in top_candidates
+                    )
+                },
+            },
         }
