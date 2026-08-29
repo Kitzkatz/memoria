@@ -1,4 +1,4 @@
-# Memoria V4.5
+# Memoria V4.5.1
 
 **Local-first, LLM-agnostic memory system with parallel hybrid retrieval, multi-signal ranking, declarative type routing, and a plugin-based architecture.**
 
@@ -128,7 +128,9 @@ For each question it can:
 * reuse cached embeddings across runs
 * execute the query
 * identify expected answer sessions
+* identify expected answer turns
 * compare retrieved memories against expected IDs
+* record session-level and turn-level retrieval metrics
 * record retrieval and ranking diagnostics
 * record per-stage timing
 
@@ -136,33 +138,71 @@ The adapter is designed to make repeated evaluation practical even on constraine
 
 On a **4GB RAM CPU-only laptop**, caching the embeddings for the 500-question evaluation took roughly **one minute**. Subsequent evaluation runs against the cached embeddings take roughly **2–3 minutes**.
 
-### Current LongMemEval Retrieval Result
+### Evaluation Scope
 
-**500-question LongMemEval-S run**
+The benchmark contains **500 questions**.
 
-> **Important:** These numbers measure **retrieval performance only**. They evaluate whether the expected memory/session was retrieved and where it appeared in the candidate ranking. They are **not end-to-end answer-generation accuracy**.
+The current metric aggregation reports **470 evaluable questions**. Abstained/non-evaluable records are excluded from the official session- and turn-level metric aggregation.
 
-```text
-Questions:     500
-Retrieved:     497 (99.40%)
-Failed:          3
+The metrics below describe **retrieval performance only**. They measure whether expected sessions or turns appear within the retrieved candidate set and how they are ranked.
 
-Recall@1:       79.40%
-Recall@3:       87.20%
-Recall@5:       90.20%
-Recall@10:      93.60%
+They do **not** measure:
 
-Average query:  219.9 ms
-Embedding:       48.7 ms
-Retrieval:       80.3 ms
-Ranking:          0.3 ms
-```
+* end-to-end answer-generation accuracy
+* LLM answer quality
+* factual correctness of a generated response
+* conversational quality
 
-The current run uses a fusion-based retrieval configuration with FAISS/semantic retrieval combined with additional retrieval sources where routed.
+### Current LongMemEval Retrieval Metrics
 
-The remaining failures are primarily **retrieval coverage failures**, while retrieved-but-not-top-ranked cases are tracked separately for further tuning.
+The current fusion configuration produced the following stored official metrics over the 470 evaluable questions:
 
-These results are from an ongoing evaluation and should not be interpreted as a claim of state-of-the-art performance without matching the evaluation protocol and comparison conditions of other systems.
+|  K | Session Recall Any | Session Recall All | Session NDCG | Turn Recall Any | Turn Recall All | Turn NDCG |
+| -: | -----------------: | -----------------: | -----------: | --------------: | --------------: | --------: |
+|  1 |              89.6% |              31.7% |       0.8957 |           26.4% |            7.4% |    0.2638 |
+|  3 |              96.2% |              80.4% |       0.8993 |           48.7% |           19.4% |    0.3021 |
+|  5 |              97.7% |              86.4% |       0.9095 |           60.6% |           30.9% |    0.3551 |
+| 10 |              98.7% |              93.2% |       0.9236 |           75.3% |           47.4% |    0.4156 |
+| 30 |              99.4% |              98.5% |       0.9319 |           87.2% |           67.9% |    0.4664 |
+| 50 |              99.4% |              98.5% |       0.9319 |           91.1% |           77.9% |    0.4824 |
+
+**Recall Any** indicates whether at least one expected item was retrieved within K.
+
+**Recall All** indicates whether all expected items were retrieved within K.
+
+**NDCG** measures the ranking of expected items within the retrieved results.
+
+Session-level metrics evaluate retrieval of the expected answer session. Turn-level metrics evaluate retrieval of the specific expected answer turn.
+
+### Retrieval Ablation
+
+The LongMemEval adapter also supports retrieval configuration ablations.
+
+The following results were produced using the same evaluation dataset and retrieval metric definitions:
+
+| Configuration |       R@1 |       R@3 |       R@5 |      R@10 |    NDCG@10 |
+| ------------- | --------: | --------: | --------: | --------: | ---------: |
+| Dense         |     87.0% |     94.0% |     97.2% |     98.5% |     0.9083 |
+| BM25          |     81.1% |     91.5% |     93.6% |     96.8% |     0.8540 |
+| Raw           |     62.8% |     72.8% |     74.7% |     77.2% |     0.5720 |
+| **Fusion**    | **89.6%** | **96.2%** | **97.7%** | **98.7%** | **0.9236** |
+| Full          |     34.0% |     49.6% |     55.7% |     63.6% |     0.3649 |
+
+These values represent the retrieval evaluation for each configuration. They are not end-to-end LongMemEval answer-generation scores.
+
+### Independent Desktop Run
+
+The fusion configuration was also evaluated on a second system:
+
+| Configuration |       R@1 |       R@3 |       R@5 |      R@10 |    NDCG@10 |
+| ------------- | --------: | --------: | --------: | --------: | ---------: |
+| Dense         |     87.0% |     94.0% |     97.2% |     98.5% |     0.9083 |
+| BM25          |     81.1% |     91.5% |     93.6% |     96.8% |     0.8540 |
+| Raw           |     62.8% |     72.8% |     74.7% |     77.2% |     0.5720 |
+| **Fusion**    | **89.8%** | **96.4%** | **97.9%** | **98.9%** | **0.9257** |
+| Full          |     34.0% |     49.6% |     55.7% |     63.6% |     0.3649 |
+
+The second run is included as a separate measurement rather than being combined with the primary run.
 
 ---
 
