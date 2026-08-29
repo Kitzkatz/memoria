@@ -154,6 +154,7 @@ They do **not** measure:
 * conversational quality
 
 ### Current LongMemEval Retrieval Metrics
+## using longmemeval_s_cleaned.json
 
 The current fusion configuration produced the following stored official metrics over the 470 evaluable questions:
 
