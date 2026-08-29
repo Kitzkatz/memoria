@@ -359,40 +359,9 @@ class BM25Worker(Worker):
             }
 
         # ------------------------------------------------------------------
-        # Shard before scoring.
+        # Score ALL candidate IDs first (before shard filtering)
         #
-        # This is safe because BM25's document identity is the real memory
-        # ID, and shard ownership is deterministic from that ID.
-        # ------------------------------------------------------------------
-
-        candidate_ids = [
-            memory_id
-            for memory_id in candidate_ids
-            if _belongs_to_shard(
-                memory_id,
-                shard_id,
-                num_shards,
-            )
-        ]
-
-        if not candidate_ids:
-            return {
-                "source": "bm25",
-                "candidates": [],
-                "count": 0,
-                "diagnostics": {
-                    "candidate_count": 0,
-                    "shard_id": shard_id,
-                    "num_shards": num_shards,
-                },
-            }
-
-        # ------------------------------------------------------------------
-        # Score all surviving IDs through BM25's explicit ID mapping.
-        #
-        # This computes the retrieval score once. The score is carried
-        # forward with the candidate and should not be recomputed later by
-        # the ranking pipeline.
+        # BM25 scores are computed once and carried forward with the candidate.
         # ------------------------------------------------------------------
 
         scores = self.bm25_ranker.score_ids(
@@ -407,6 +376,20 @@ class BM25Worker(Worker):
             )
             for memory_id in candidate_ids
         ]
+
+        # ------------------------------------------------------------------
+        # Filter by shard AFTER scoring.
+        #
+        # This ensures we have scores for all IDs before shard filtering,
+        # not just the ones that happen to belong to this shard.
+        # ------------------------------------------------------------------
+
+        candidates = _shard_filter(
+            candidates,
+            lambda candidate: candidate[0],
+            shard_id,
+            num_shards,
+        )
 
         candidates.sort(
             key=lambda item: (

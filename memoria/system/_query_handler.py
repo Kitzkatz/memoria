@@ -720,10 +720,10 @@ def _handle_query_blackboard(
             elif source == "bm25":
                 for mem_id, score in result_candidates:
                     mem_ids.add(mem_id)
-
+                    # Use raw BM25 score directly (higher is better)
                     source_map[mem_id] = (
                         "bm25",
-                        1.0 / (score + 1e-6),
+                        float(score),
                         False,
                     )
 

@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 """
 LongMemEval-S adapter.
@@ -26,6 +25,7 @@ import sys
 import time
 import shutil
 import subprocess
+import pickle
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -133,14 +133,25 @@ def get_expected_text(question, questions_data):
 
 
 def is_abstention(question, questions_data=None):
-    """Determine whether this question is an abstention case."""
-
+    """
+    LongMemEval uses '_abs' as the abstention marker.
+    """
+    # Check for explicit abstention marker
+    if question.get("_abs", False):
+        return True
+    
+    # Check expected text
     expected = get_expected_text(question, questions_data)
-
-    return (
-        bool(expected)
-        and expected.strip().lower() == "i don't know"
-    )
+    if expected and "don't know" in expected.lower():
+        return True
+    
+    # Check if expected IDs contain '_abs'
+    expected_ids = question.get("answer_session_ids", [])
+    for eid in expected_ids:
+        if "_abs" in str(eid):
+            return True
+    
+    return False
 
 
 # ----------------------------------------------------------------------
@@ -240,6 +251,7 @@ def build_texts_and_metadata(
         #
         # We deliberately do not make every turn in an answer session
         # relevant. The expected answer should identify the actual turn.
+        # If expected_text is unavailable, we fall back to the first turn.
         # --------------------------------------------------------------
 
         answer_turn_indices = set()
@@ -282,13 +294,22 @@ def build_texts_and_metadata(
 
             texts.append(content)
 
+            # Determine if this is a gold turn
+            is_gold = False
+            if expected_text:
+                # Use the text-matching method
+                is_gold = turn_idx in answer_turn_indices
+            elif has_answer_session:
+                # Fallback: mark the first turn of any answer session as gold
+                is_gold = (turn_idx == 0)
+
             metadatas.append({
                 "session_id": session_id,
                 "turn_id": turn_id,
                 "turn_index": turn_idx,
                 "role": role,
                 "has_answer_session": has_answer_session,
-                "is_gold_turn": turn_idx in answer_turn_indices,
+                "is_gold_turn": is_gold,
             })
 
     return texts, metadatas
@@ -451,7 +472,7 @@ def evaluate_retrieval(
         metrics[mode] = {
             "recall_any": recall_any,
             "recall_all": recall_all,
-            "ndcg": ndcg,
+            "ndcg_any": ndcg,
         }
 
     return metrics
@@ -712,6 +733,56 @@ def rebuild_indices_from_db(system):
             )
 
 
+def rebuild_bm25_from_db(system):
+    """Build BM25 from current DB (no caching)."""
+    if not hasattr(system, "bm25_ranker") or system.bm25_ranker is None:
+        return
+
+    rows = system.db.fetch_all()
+    bm25_rows = [row for row in rows if row.get("tokens")]
+
+    if bm25_rows:
+        corpus_tokens = [row["tokens"] for row in bm25_rows]
+        memory_ids = [row["id"] for row in bm25_rows]
+        system.bm25_ranker.build(corpus_tokens, doc_ids=memory_ids)
+        debug(f"[BM25] Built on {len(corpus_tokens)} memories")
+    else:
+        system.bm25_ranker.build([], doc_ids=[])
+
+
+def save_bm25_cache(bm25_ranker, cache_path):
+    """Save BM25 index to disk."""
+    with open(cache_path, "wb") as f:
+        pickle.dump({
+            "corpus_tokens": bm25_ranker.corpus,
+            "doc_ids": bm25_ranker.doc_ids,
+            "idf": bm25_ranker.idf,
+            "avg_doc_length": bm25_ranker.avg_doc_length,
+            "k1": bm25_ranker.k1,
+            "b": bm25_ranker.b,
+        }, f)
+
+
+def load_bm25_cache(bm25_ranker, cache_path):
+    """Load BM25 index from disk."""
+    if not Path(cache_path).exists():
+        return False
+    try:
+        with open(cache_path, "rb") as f:
+            data = pickle.load(f)
+        bm25_ranker.corpus = data["corpus_tokens"]
+        bm25_ranker.doc_ids = data["doc_ids"]
+        bm25_ranker.idf = data["idf"]
+        bm25_ranker.avg_doc_length = data["avg_doc_length"]
+        if "k1" in data:
+            bm25_ranker.k1 = data["k1"]
+        if "b" in data:
+            bm25_ranker.b = data["b"]
+        return True
+    except Exception as e:
+        print(f"BM25 cache load error: {e}")
+        return False
+
 def build_faiss_from_texts(
     controller,
     texts,
@@ -778,15 +849,22 @@ def configure_retrieval_mode(mode):
         ]
         settings.RANKING_ENABLED = False
 
-    elif mode == "fusion":
+    elif mode == "raw":
         settings.WORKERS_TO_USE = [
             "faiss",
             "bm25",
-            "graph",
-            "phrase",
-            "attribute",
+            
         ]
         settings.RANKING_ENABLED = False
+
+    elif mode == "fusion":
+        # FusionWorker runs FAISS + BM25 internally and applies RRF
+        settings.WORKERS_TO_USE = ["fusion"]
+        settings.RANKING_ENABLED = False
+        # Ensure RRF is enabled via the fusion worker
+        if hasattr(settings, "RRF_K"):
+            settings.RRF_K = 10  # Optimal value from your tuning
+        
 
     elif mode == "full":
         settings.WORKERS_TO_USE = [
@@ -883,6 +961,7 @@ def main():
         choices=[
             "dense",
             "bm25",
+            "raw",
             "fusion",
             "full",
         ],
@@ -1095,6 +1174,12 @@ def main():
             )
         )
 
+        # Ensure BM25 ranker exists before caching
+        if not hasattr(controller.system, "bm25_ranker") or controller.system.bm25_ranker is None:
+            from ranking.bm25_ranker import BM25
+            controller.system.bm25_ranker = BM25()
+            print("\n    BM25 ranker created", end="", flush=True)
+
         db_cache_exists = (
             db_cache_path.exists()
             and not args.rebuild_cache
@@ -1110,10 +1195,7 @@ def main():
         skip_embedding_build = False
         skip_db_insert = False
 
-        # ----------------------------------------------------------
-        # Load DB
-        # ----------------------------------------------------------
-
+        # ---- Load DB cache ----
         if db_cache_exists:
             print(
                 f"\n    Loading cached DB "
@@ -1169,6 +1251,26 @@ def main():
                 controller.system.embedding_cache.clear()
                 skip_embedding_build = False
                 faiss_cache_exists = False
+
+        # ---- BM25 Cache ----
+        bm25_cache_path = cache_dir / f"bm25_{q_id}.pkl"
+        skip_bm25_build = False
+
+        # Load BM25 cache if DB was loaded from cache and BM25 cache exists
+        if skip_db_insert and bm25_cache_path.exists() and not args.rebuild_cache and cache_valid:
+            if load_bm25_cache(controller.system.bm25_ranker, bm25_cache_path):
+                skip_bm25_build = True
+                print("\n    BM25 cache loaded", end="", flush=True)
+            else:
+                # Cache exists but failed to load — rebuild
+                rebuild_bm25_from_db(controller.system)
+                save_bm25_cache(controller.system.bm25_ranker, bm25_cache_path)
+                print("\n    BM25 cache rebuilt (load failed)", end="", flush=True)
+        elif skip_db_insert and not bm25_cache_path.exists():
+            # No cache exists, build from loaded DB
+            rebuild_bm25_from_db(controller.system)
+            save_bm25_cache(controller.system.bm25_ranker, bm25_cache_path)
+            print("\n    BM25 cache built (first time)", end="", flush=True)
 
         # ----------------------------------------------------------
         # Load FAISS
@@ -1311,6 +1413,12 @@ def main():
                 time.perf_counter()
                 - store_start
             )
+
+            # Build and save BM25 cache from newly inserted data
+            if not args.rebuild_cache and controller.system.bm25_ranker:
+                rebuild_bm25_from_db(controller.system)
+                save_bm25_cache(controller.system.bm25_ranker, bm25_cache_path)
+                print("\n    BM25 cache built from insert", end="", flush=True)
 
             # ------------------------------------------------------
             # Save DB cache
@@ -1830,4 +1938,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```

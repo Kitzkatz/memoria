@@ -171,6 +171,7 @@ class BenchmarkAnalyzer:
             self._analyze_record(record, metrics, timing_keys, show_mmr_details)
 
         self._print_analysis(metrics)
+        self._print_official_metrics() 
 
         summary = self._build_summary(metrics)
 
@@ -677,14 +678,12 @@ class BenchmarkAnalyzer:
         if not records:
             return
 
-        # Check if any record has the new 'metrics' field
         has_metrics = any("metrics" in rec for rec in records)
         if not has_metrics:
             return
 
         print("\n[OFFICIAL SESSION/TURN METRICS]")
 
-        # Aggregate across evaluable records
         k_values = (1, 3, 5, 10, 30, 50)
         session_recall_any = {k: 0 for k in k_values}
         session_recall_all = {k: 0 for k in k_values}
@@ -707,12 +706,33 @@ class BenchmarkAnalyzer:
             turn = metrics.get("turn", {})
 
             for k in k_values:
-                session_recall_any[k] += 1 if sess.get("recall_any", {}).get(k, False) else 0
-                session_recall_all[k] += 1 if sess.get("recall_all", {}).get(k, False) else 0
-                session_ndcg_any[k] += sess.get("ndcg_any", {}).get(k, 0.0)
-                turn_recall_any[k] += 1 if turn.get("recall_any", {}).get(k, False) else 0
-                turn_recall_all[k] += 1 if turn.get("recall_all", {}).get(k, False) else 0
-                turn_ndcg_any[k] += turn.get("ndcg_any", {}).get(k, 0.0)
+                # Handle both int and string keys
+                session_recall_any[k] += 1 if (
+                    sess.get("recall_any", {}).get(k, False) or 
+                    sess.get("recall_any", {}).get(str(k), False)
+                ) else 0
+                session_recall_all[k] += 1 if (
+                    sess.get("recall_all", {}).get(k, False) or 
+                    sess.get("recall_all", {}).get(str(k), False)
+                ) else 0
+                session_ndcg_any[k] += (
+                    sess.get("ndcg_any", {}).get(k, 0.0) or 
+                    sess.get("ndcg_any", {}).get(str(k), 0.0) or 
+                    0.0
+                )
+                turn_recall_any[k] += 1 if (
+                    turn.get("recall_any", {}).get(k, False) or 
+                    turn.get("recall_any", {}).get(str(k), False)
+                ) else 0
+                turn_recall_all[k] += 1 if (
+                    turn.get("recall_all", {}).get(k, False) or 
+                    turn.get("recall_all", {}).get(str(k), False)
+                ) else 0
+                turn_ndcg_any[k] += (
+                    turn.get("ndcg_any", {}).get(k, 0.0) or 
+                    turn.get("ndcg_any", {}).get(str(k), 0.0) or 
+                    0.0
+                )
 
         if evaluable_count == 0:
             print("  No evaluable records found.")
@@ -735,13 +755,13 @@ class BenchmarkAnalyzer:
                 f"recall_all={turn_recall_all[k]/evaluable_count*100:>5.1f}%  "
                 f"ndcg_any={turn_ndcg_any[k]/evaluable_count:.4f}"
             )
-        @staticmethod
+    @staticmethod
     def compare_ablations(filepaths: list):
-        """Compare multiple ablation runs (dense, bm25, rrf, full)."""
+        """Compare multiple ablation runs (dense, bm25, raw, fusion, full)."""
         print("\n" + "=" * 70)
         print("[ABLATION COMPARISON]")
         print("=" * 70)
-        print(f"{'Mode':<12} {'R@1':>8} {'R@3':>8} {'R@5':>8} {'R@10':>8} {'NDCG@10':>10}")
+        print(f"{'Mode':<20} {'R@1':>8} {'R@3':>8} {'R@5':>8} {'R@10':>8} {'NDCG@10':>10}")
         print("-" * 70)
 
         results = {}
@@ -750,22 +770,28 @@ class BenchmarkAnalyzer:
             if not analyzer.load():
                 continue
             records = analyzer.records()
-            # Compute aggregated recall from metrics
+            
             k_values = (1, 3, 5, 10)
             recall_any = {k: 0 for k in k_values}
             ndcg_any = {k: 0.0 for k in k_values}
             evaluable = 0
+            
             for rec in records:
-                if rec.get("abstention"):
+                if rec.get("abstention", False):
                     continue
                 metrics = rec.get("metrics", {})
                 if not metrics:
                     continue
                 evaluable += 1
                 sess = metrics.get("session", {})
+                recall_dict = sess.get("recall_any", {})
+                ndcg_dict = sess.get("ndcg_any", {})
                 for k in k_values:
-                    recall_any[k] += 1 if sess.get("recall_any", {}).get(k, False) else 0
-                    ndcg_any[k] += sess.get("ndcg_any", {}).get(k, 0.0)
+                    # Try int key, then string key
+                    recall_any[k] += 1 if (
+                        recall_dict.get(k, False) or recall_dict.get(str(k), False)
+                    ) else 0
+                    ndcg_any[k] += ndcg_dict.get(k, 0.0) or ndcg_dict.get(str(k), 0.0)
 
             if evaluable:
                 mode = Path(fp).stem
@@ -777,9 +803,10 @@ class BenchmarkAnalyzer:
                     "ndcg10": ndcg_any[10]/evaluable,
                 }
 
+        print()
         for mode, vals in results.items():
             print(
-                f"{mode:<12} {vals['r1']:>7.1f}% {vals['r3']:>7.1f}% "
+                f"{mode:<20} {vals['r1']:>7.1f}% {vals['r3']:>7.1f}% "
                 f"{vals['r5']:>7.1f}% {vals['r10']:>7.1f}% {vals['ndcg10']:>9.4f}"
             )
 
@@ -811,6 +838,7 @@ if __name__ == "__main__":
         print("Usage:")
         print("  python benchmark_analyzer.py file.json [--questions questions.json] [--explain N] [--export summary.json]")
         print("  python benchmark_analyzer.py --all [--export summary.json]")
+        print("  python benchmark_analyzer.py --compare file1.json file2.json ...")
         sys.exit(1)
 
     if sys.argv[1] == "--all":
@@ -818,7 +846,16 @@ if __name__ == "__main__":
         print(json.dumps(results, indent=2))
         sys.exit(0)
 
-    # Parse arguments manually (no argparse to avoid breaking existing)
+    # NEW: Compare mode
+    if sys.argv[1] == "--compare":
+        files = sys.argv[2:]
+        if not files:
+            print("Error: --compare requires at least one file")
+            sys.exit(1)
+        BenchmarkAnalyzer.compare_ablations(files)
+        sys.exit(0)
+
+    # Parse arguments manually for single file analysis
     filepath = sys.argv[1]
     questions_path = None
     explain_limit = None
