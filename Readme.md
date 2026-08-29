@@ -136,7 +136,7 @@ For each question it can:
 
 The adapter is designed to make repeated evaluation practical even on constrained hardware.
 
-On a **4GB RAM CPU-only laptop**, caching the embeddings for the 500-question evaluation took roughly **one minute**. Subsequent evaluation runs against the cached embeddings take roughly **2–3 minutes**.
+On a **4GB RAM CPU-only laptop**, caching the embeddings for the 500-question evaluation took roughly **a few hours on 4gbs**. Subsequent evaluation runs against the cached embeddings take roughly **3-4 minutes**.
 
 ### Evaluation Scope
 
