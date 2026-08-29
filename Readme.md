@@ -225,7 +225,7 @@ Avg query latency: 122.3 ms
 Hardware:           4GB RAM, CPU-only
 ```
 
-The synthetic benchmark is primarily used for architectural regression testing, retrieval/ranking experiments, and performance analysis.
+The synthetic benchmark is primarily used for architectural regression testing, retrieval/ranking experiments, and performance analysis. **this is legacy results before stablizing retrieval.
 
 The LongMemEval adapter provides a separate evaluation path using a real-world conversational-memory benchmark.
 
