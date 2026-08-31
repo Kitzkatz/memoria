@@ -38,30 +38,6 @@ class Settings(BaseModel):
     LLM_STOP_TOKENS: List[str] = Field(default_factory=lambda: ["<|eot_id|>"])
 
     # -------------------------
-    # Paths
-    # -------------------------
-
-    DB_PATH: str = "memory.db"
-    VECTOR_INDEX_PATH: str = "memory.index"
-    CACHE_PATH: str = "cache/embedding_cache.pkl"
-
-    # -------------------------
-    # Models
-    # -------------------------
-
-    EMBEDDING_MODEL: str = "memory/models/all-MiniLM-L6-v2"
-    CHAT_TEMPLATE_DIR: str = "chat_templates"
-    CHAT_TEMPLATE_FILE: str = "llama3.txt"
-    VECTOR_DIM: int = 384
-    CHAT_MODEL: str = "mistral"
-    LLM_URL: str = "http://localhost:8080"
-    LLM_ENDPOINT: str = "/v1/completions"
-    LLM_MAX_TOKENS: int = 256
-    LLM_TEMPERATURE: float = 0.7
-    LLM_TIMEOUT: int = 600
-    LLM_STOP_TOKENS: List[str] = Field(default_factory=lambda: ["<|eot_id|>"])
-
-    # -------------------------
     # Retrieval
     # -------------------------
 
@@ -83,10 +59,7 @@ class Settings(BaseModel):
     USE_PHRASE_SEARCH: bool = True
     USE_BM25: bool = True
     USE_FUSION: bool = True
-    # FIX (2026-08-24): Rolled back to neutral 0.5. Your upstream retriever was starving.
     FUSION_SEMANTIC_WEIGHT: float = 0.5
-    # CRITICAL FIX: The benchmark IGNORED this flag last time and forced MMR ON.
-    # To guarantee it's off, you MUST pass MEMORY_MMR_ENABLED=False as an ENV var.
     RRF_K: int = 10
 
     MMR_ENABLED: bool = False
@@ -97,7 +70,28 @@ class Settings(BaseModel):
     # Retrieval Workers
     # -------------------------
 
-    WORKERS_TO_USE: List[str] = ["fusion"]  # exclude "graph", "attribute"
+    WORKERS_TO_USE: List[str] = ["fusion"]
+
+    # -------------------------
+    # Temporal Worker
+    # -------------------------
+
+    USE_TEMPORAL_WORKER: bool = True
+    TEMPORAL_INDEX_PATH: str = "cache/temporal_index.json"
+
+    # Temporal scoring weights (for standalone temporal retrieval)
+    TEMPORAL_EXACT_MATCH_BOOST: float = 1.5
+    TEMPORAL_ADJACENT_BOOST: float = 0.8
+    TEMPORAL_RECENCY_SCALE: float = 7.0
+    TEMPORAL_CONVERSATIONAL_BOOST: float = 0.5
+
+    # Temporal resolution config
+    TEMPORAL_USE_SPARSE_RESOLUTION: bool = True
+    TEMPORAL_FALLBACK_TO_ARITHMETIC: bool = True
+
+    # Legacy mixing weights (kept for compatibility, not used in standalone)
+    RETRIEVAL_WEIGHT: float = 0.7
+    TEMPORAL_WEIGHT: float = 0.3
 
     # -------------------------
     # Cross-Encoder
@@ -122,9 +116,8 @@ class Settings(BaseModel):
     # -------------------------
     # Ranking
     # -------------------------
-    
 
-    RANKING_ENABLED: bool = False   # Set to False to skip ranking and use raw retrieval scores
+    RANKING_ENABLED: bool = False
     CONTEXT_MAX_MEMORIES: int = 50
     CONTEXT_MIN_SCORE: float = 0.15
     CONTEXT_TOKEN_BUDGET: int = 10000
@@ -150,9 +143,6 @@ class Settings(BaseModel):
     # -------------------------
 
     FINALIZER_USE_SIGMOID: bool = False
-    # FIX (2026-08-24): Scale was 0.015 (brick wall). Changed to 3.0.
-    # Since your scores average ~4.7, sigmoid(4.7/3.0) = sigmoid(1.57) = 0.82.
-    # This gives a healthy spread between #1 and #5 without collapsing to 1.0.
     FINALIZER_SIGMOID_SCALE: float = 0.5
 
     # -------------------------
@@ -192,6 +182,7 @@ class Settings(BaseModel):
     # -------------------------
     # Ranking Weights (from backup)
     # -------------------------
+
     SIGNAL_REGISTRY_PATH: str = "ranking/signal_registry.json"
     ENABLE_SIGNAL_REGISTRY: bool = True
 
@@ -206,7 +197,6 @@ class Settings(BaseModel):
     RANKING_TFIDF: float = 0.15
     RANKING_BM25: float = 0.15
 
-
     # -------------------------
     # Score Normalizer
     # -------------------------
@@ -214,11 +204,9 @@ class Settings(BaseModel):
     SCORE_NORMALIZER_METHOD: str = "zscore"  # Options: "zscore" or "minmax"
 
     # -------------------------
-    # Finalizer Weights (REBALANCED)
+    # Finalizer Weights
     # -------------------------
 
-    # FIX (2026-08-24): Restored Attribute to 0.40 and BM25 to 0.10.
-    # Your Attribute booster was holding the ranking together.
     FINALIZER_RELEVANCE: float = 1.0
     FINALIZER_IMPORTANCE: float = 0.0
     FINALIZER_RECENCY: float = 0.0
@@ -266,7 +254,10 @@ class Settings(BaseModel):
     CLI_SHOW_SCORES: bool = True
     CLI_TABLE_WIDTH: int = 80
 
-    # ---- Plugin System ----
+    # -------------------------
+    # Plugin System
+    # -------------------------
+
     PLUGIN_ENABLED: bool = True
     PLUGIN_DIR: str = "plugins"
     PLUGIN_AUTO_LOAD: bool = True

@@ -998,3 +998,126 @@ class FusionWorker(Worker):
                 },
             },
         }
+
+
+##class TemporalWorker(Worker):
+##    """
+##    Worker that retrieves memories based on temporal constraints.
+##    
+##    Parses query for temporal expressions:
+##    - before, after, during, between, since, until
+##    - most recent, first, last, previous, next
+##    - how long, how many times, in the past N days
+##    """
+##
+##    def __init__(self, db):
+##        self.db = db
+##
+##    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+##        start = time.perf_counter()
+##        query_text = payload.get("query_text", "")
+##        query_tokens = payload.get("tokens", [])
+##        shard_id, num_shards = _get_shard_config(payload)
+##
+##        # 1. Parse temporal constraints
+##        constraints = self._parse_temporal(query_text, query_tokens)
+##
+##        if not constraints:
+##            return {"source": "temporal", "candidates": [], "count": 0}
+##
+##        # 2. Query DB for memories that satisfy temporal constraints
+##        candidates = self.db.search_temporal(constraints)
+##
+##        # 3. Score candidates by how well they satisfy constraints
+##        scored = self._score_temporal(candidates, constraints)
+##
+##        # 4. Filter by shard
+##        scored = _shard_filter(scored, lambda c: c[0], shard_id, num_shards)
+##        scored.sort(key=lambda x: x[1], reverse=True)
+##
+##        temporal_time = (time.perf_counter() - start) * 1000
+##        debug(f"TemporalWorker: {temporal_time:.2f}ms, count={len(scored)}")
+##
+##        return {
+##            "source": "temporal",
+##            "candidates": scored,
+##            "count": len(scored),
+##            "diagnostics": {"constraints": constraints},
+##        }
+##
+##    def _parse_temporal(self, query_text, query_tokens):
+##        """Extract temporal constraints from query."""
+##        constraints = {}
+##
+##        # Pattern matching for temporal expressions
+##        if "before" in query_text:
+##            constraints["before"] = self._extract_date(query_text, "before")
+##        if "after" in query_text:
+##            constraints["after"] = self._extract_date(query_text, "after")
+##        if "between" in query_text:
+##            constraints["between"] = self._extract_range(query_text)
+##        if "most recent" in query_text or "last" in query_text:
+##            constraints["most_recent"] = True
+##        if "first" in query_text:
+##            constraints["first"] = True
+##        if "how long" in query_text or "how many times" in query_text:
+##            constraints["aggregation"] = True
+##
+##        return constraints
+##
+##    def _score_temporal(self, candidates, constraints):
+##        """Score candidates by temporal constraint satisfaction."""
+##        scored = []
+##        for memory_id, _ in candidates:
+##            score = 0.0
+##            # Apply temporal scoring logic
+##            scored.append((memory_id, score))
+##        return scored
+
+
+class ContradictionWorker(Worker):
+    """
+    Worker that detects and resolves contradictory facts across turns.
+    
+    Identifies same entity, same attribute, different value across memories.
+    Returns candidates with contradiction metadata.
+    """
+
+    def __init__(self, db, entity_store):
+        self.db = db
+        self.entity_store = entity_store
+
+    def process(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        start = time.perf_counter()
+        query_text = payload.get("query_text", "")
+        query_tokens = payload.get("tokens", [])
+        shard_id, num_shards = _get_shard_config(payload)
+
+        # 1. Extract entities from query
+        entities = self._extract_entities(query_text)
+
+        # 2. Find memories with those entities
+        candidates = self.db.search_entities(entities)
+
+        # 3. Detect contradictions
+        contradictions = self._detect_contradictions(candidates)
+
+        # 4. Score and resolve
+        scored = self._resolve_contradictions(candidates, contradictions)
+
+        scored = _shard_filter(scored, lambda c: c[0], shard_id, num_shards)
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        return {
+            "source": "contradiction",
+            "candidates": scored,
+            "count": len(scored),
+            "diagnostics": {"contradictions": contradictions},
+        }
+
+    def _detect_contradictions(self, candidates):
+        """Detect conflicting facts across candidates."""
+        # Group by entity + attribute
+        # Look for different values
+        # Track temporal ordering
+        pass
