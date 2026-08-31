@@ -1,23 +1,26 @@
 class AttributeBooster:
     """
-    Boosts candidates based on query attributes and entity overlap.
+    Boosts candidates based on query attributes, subject, and entity overlap.
 
-    Two-stage boosting:
+    Three-stage boosting:
     1. Entity overlap: Boosts based on shared entities between query and memory
     2. Attribute mapping: Boosts based on attribute_map configuration
+    3. Subject match: Boosts based on subject metadata match (moved from MemoryRanker)
 
-    Entity and attribute boosts are stored separately in diagnostics.
+    Entity, attribute, and subject boosts are stored separately in diagnostics.
     """
 
-    def __init__(self, attribute_map=None, boost_value=0.15, entity_boost=0.10):
+    def __init__(self, attribute_map=None, boost_value=0.15, entity_boost=0.10, subject_boost=0.10):
         """
         Args:
             attribute_map: Optional dict mapping attributes to boost values
             boost_value: Default boost for attribute matches
             entity_boost: Boost per matching entity
+            subject_boost: Boost for subject match
         """
         self.boost_value = boost_value
         self.entity_boost = entity_boost
+        self.subject_boost = subject_boost
         self.attribute_map = attribute_map or {}
         self.alias_index = self._build_alias_index()
 
@@ -110,6 +113,35 @@ class AttributeBooster:
             list(overlap),
         )
 
+    def _subject_match_score(self, query_metadata, memory_metadata):
+        """
+        Calculate subject match score.
+        Moved from MemoryRanker to AttributeBooster for signal ownership.
+        """
+        if not query_metadata or not memory_metadata:
+            return 0.0
+
+        query_subject = query_metadata.get("subject")
+        mem_subject = memory_metadata.get("subject")
+
+        if not query_subject or not mem_subject:
+            return 0.0
+
+        # Exact match (case-insensitive)
+        if str(query_subject).lower() == str(mem_subject).lower():
+            return self.subject_boost
+
+        # Partial match (if subjects are strings with multiple words)
+        query_parts = set(str(query_subject).lower().split())
+        mem_parts = set(str(mem_subject).lower().split())
+        overlap = query_parts & mem_parts
+
+        if overlap:
+            # Partial overlap gives proportional boost
+            return self.subject_boost * (len(overlap) / max(len(query_parts), 1))
+
+        return 0.0
+
     def _matches_metadata(
         self,
         metadata,
@@ -140,32 +172,40 @@ class AttributeBooster:
 
     def boost(self, query, candidates):
         """
-        Apply attribute and entity-based boosting to candidates.
+        Apply attribute, subject, and entity-based boosting to candidates.
 
-        Stores entity and attribute contributions separately in
+        Stores entity, attribute, and subject contributions separately in
         candidate diagnostics.
         """
         if not candidates:
             return candidates
 
         query_entities = query.entities
+        query_metadata = query.metadata
         detected_attributes = self._detect_attributes(query)
 
         for candidate in candidates:
             entity_score = 0.0
             attribute_score = 0.0
+            subject_score = 0.0
             overlap_entities = []
 
-            # Entity overlap boost
+            # ---- Entity overlap boost ----
             if query_entities:
                 entity_score, overlap = self._entity_overlap_score(
                     query_entities,
                     candidate.memory.entities,
                 )
-
                 overlap_entities = overlap
 
-            # Attribute boost
+            # ---- Subject match boost (moved from MemoryRanker) ----
+            if query_metadata:
+                subject_score = self._subject_match_score(
+                    query_metadata,
+                    candidate.memory.metadata or {},
+                )
+
+            # ---- Attribute boost ----
             if detected_attributes:
                 memory_type = candidate.memory.memory_type
                 metadata = candidate.memory.metadata or {}
@@ -184,10 +224,12 @@ class AttributeBooster:
                     ):
                         attribute_score += boost_value * 0.5
 
-            total_boost = entity_score + attribute_score
+            total_boost = entity_score + attribute_score + subject_score
 
+            # ---- Diagnostics ----
             candidate.diagnostics["entity_boost"] = entity_score
             candidate.diagnostics["attribute_boost"] = attribute_score
+            candidate.diagnostics["subject_boost"] = subject_score
             candidate.diagnostics["total_boost"] = total_boost
             candidate.diagnostics["attribute_overlap"] = overlap_entities
             candidate.diagnostics["detected_attributes"] = list(

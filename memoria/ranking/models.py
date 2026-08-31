@@ -34,6 +34,9 @@ class CandidateRecord(BaseModel):
     mmr_score: float = 0.0
     final_score: float = 0.0
 
+    temporal_score: float = 0.0
+    temporal_matches: List[str] = Field(default_factory=list)
+
     # BM25 score
     bm25_score: float = 0.0
 
