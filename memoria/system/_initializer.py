@@ -28,6 +28,8 @@ from retrieval.query_processor import QueryProcessor
 from retrieval.shard_manager import ShardManager
 from retrieval.inverted_index import InvertedIndex
 from retrieval.query_expander import QueryExpander   # <-- NEW IMPORT
+from temporality.temporal_index import TemporalIndex
+from blackboard.temporal_worker import TemporalWorker
 
 from graph.search import GraphSearch
 from graph.edge_store import EdgeStore
@@ -222,6 +224,26 @@ def _init_blackboard(system, db, vector_store):
         debug(f"FusionWorker registered (semantic_weight={semantic_weight})")
     elif use_fusion:
         debug("FusionWorker skipped: BM25 is not available")
+
+    # ---- Temporal Worker (NEW) ----
+    if getattr(settings, "USE_TEMPORAL_WORKER", False):
+        
+
+        # Initialize temporal index
+        temporal_index = TemporalIndex(
+            db,
+            cache_path=getattr(settings, "TEMPORAL_INDEX_PATH", "cache/temporal_index.json")
+        )
+        temporal_index.load()
+        temporal_index.build()
+
+        # Create and register temporal worker
+        temporal_worker = TemporalWorker(db, temporal_index)
+        scheduler.register_worker("temporal", temporal_worker.process)
+        debug("TemporalWorker registered")
+
+        # Store on system for cleanup/saving
+        system.temporal_index = temporal_index
 
     system.blackboard = blackboard
     system.scheduler = scheduler

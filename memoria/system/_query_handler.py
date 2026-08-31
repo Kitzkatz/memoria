@@ -32,10 +32,48 @@ from routing.matrix import get_workers_for_type
 # How many candidates to keep before expensive ranking.
 RANKING_CANDIDATE_LIMIT = 200
 
+# ---------------------------------------------------------------------------
+# Temporal detection
+# ---------------------------------------------------------------------------
+
+def _detect_temporal(text: str) -> bool:
+    temporal_keywords = [
+    # Session references (most important for LoCoMo)
+    "session", "sessions", "conv", "conversation",
+    "previous session", "next session", "last session", "first session",
+    
+    # Explicit temporal phrases (specific, not single words)
+    "sessions ago", "minutes ago", "hours ago", "days ago", "weeks ago",
+    "last week", "last month", "last time",
+    "next week", "next month", "next time",
+    "today", "yesterday", "tomorrow",
+    
+    # Relational temporal (phrases, not single words)
+    "before that", "after that", "since then", "until then",
+    "prior to", "following that", "subsequently",
+    "over the last",
+    
+    # Recency markers
+    "most recent", "latest", "newest",
+    "recently", "recent", "earlier", "later",
+    "from now", "in the past",
+    
+    # Temporal question markers
+    "when did", "when was", "when were", "what happened",
+    "how long ago", "how many times",
+    
+    # Order/sequence (phrases, not single words)
+    "eventually", "finally", "initially", "originally",
+    "consequently", "afterwards", "previously",
+]
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in temporal_keywords)
+
 
 # ---------------------------------------------------------------------------
 # Helper: Sort candidates by retrieval score (skip ranking)
 # ---------------------------------------------------------------------------
+
 
 def _sort_candidates_by_retrieval_score(candidates):
     """
@@ -228,8 +266,27 @@ def _handle_query_blackboard(
 
     if getattr(settings, "USE_ROUTING", True) and hasattr(system, "router") and system.router:
         route = system.router.route(memory_type_hint)
-        # ---- USE FUSION-AWARE WORKER LIST ----
-        workers_to_use = getattr(settings, "WORKERS_TO_USE", get_workers_for_type(memory_type_hint))
+        
+        # ---- Base workers from config/routing ----
+        base_workers = getattr(settings, "WORKERS_TO_USE", get_workers_for_type(memory_type_hint))
+        
+        # ---- Detect temporal signals ----
+        temporal_needed = _detect_temporal(query.text)
+        debug(f"[MemorySystem] Temporal detected: {temporal_needed} for query: {query.text[:60]}...")
+        
+        # ---- Build final worker list ----
+        # TEMPORAL IS A STANDALONE PATH. IF DETECTED, ONLY RUN TEMPORAL.
+        # DO NOT MIX WITH RETRIEVAL WORKERS.
+        if temporal_needed and getattr(settings, "USE_TEMPORAL_WORKER", False):
+            workers_to_use = ["temporal"]
+            query.metadata["_temporal_detected"] = True
+            query.metadata["_fallback_allowed"] = True
+            debug(f"[MemorySystem] Temporal query: routing to temporal ONLY")
+        else:
+            workers_to_use = list(base_workers)
+            query.metadata["_temporal_detected"] = False
+            query.metadata["_fallback_allowed"] = False
+        
         graph_depth = route.get("graph_depth", getattr(settings, "GRAPH_DEPTH", 2))
         signals = route.get("signals", {})
         pool = route.get("pool", "memories")
@@ -239,8 +296,10 @@ def _handle_query_blackboard(
             f"[MemorySystem] Routing: "
             f"type='{memory_type_hint}', "
             f"workers={workers_to_use}, "
+            f"temporal={temporal_needed} (standalone), "
             f"depth={graph_depth}"
         )
+
 
     else:
         # ---- FALLBACK: use general fusion-aware workers ----
@@ -249,6 +308,8 @@ def _handle_query_blackboard(
         signals = {}
         pool = "memories"
         fallback_pools = []
+        query.metadata["_temporal_detected"] = False
+        query.metadata["_fallback_allowed"] = False
 
     # Keep this available for future routing diagnostics without changing
     # current behavior.
@@ -376,8 +437,6 @@ def _handle_query_blackboard(
             "(skipping workers)"
         )
 
-        # No workers were submitted, so skip scheduler hooks.
-        # We still call pre/post retrieval hooks to allow plugins to modify candidates.
         # ---- Plugin hook: pre-retrieval (with empty list) ----
         if system.plugin_manager:
             try:
@@ -590,8 +649,36 @@ def _handle_query_blackboard(
                 task_source_map[task_id] = "fusion"
                 submitted_sources.add("fusion")
 
-        debug(f"[Fusion] task_ids: {task_ids}")
-        debug(f"[Fusion] submitted_sources: {submitted_sources}")
+            # ----------------------------------------------------------
+            # Temporal (STANDALONE)
+            # ----------------------------------------------------------
+            if "temporal" in workers_to_use:
+                # Get temporal context from system
+                temporal_context = {}
+                if hasattr(system, '_temporal_context'):
+                    temporal_context = system._temporal_context
+                elif hasattr(system.db, '_temporal_context'):
+                    temporal_context = system.db._temporal_context
+                
+                task_id = system.scheduler.submit(
+                    "temporal",
+                    {
+                        "query_text": query.text,
+                        "tokens": query.tokens,
+                        "limit": top_k_per_shard,
+                        "shard_id": shard_id,
+                        "num_shards": num_shards,
+                        "current_session": temporal_context.get("current_session", 0),
+                        "total_sessions": temporal_context.get("total_sessions", None),
+                        "reference_time": temporal_context.get("reference_time", None),
+                    }
+                )
+                task_ids.append(task_id)
+                task_source_map[task_id] = "temporal"
+                submitted_sources.add("temporal")
+
+        debug(f"[MemorySystem] task_ids: {task_ids}")
+        debug(f"[MemorySystem] submitted_sources: {submitted_sources}")
 
         debug(
             f"[MemorySystem] Submitted retrieval sources: "
@@ -756,10 +843,16 @@ def _handle_query_blackboard(
                         float(dist),
                         False,
                     )
+
             elif source == "fusion":
                 for mem_id, score in result_candidates:
                     mem_ids.add(mem_id)
                     source_map[mem_id] = ("fusion", float(score), False)
+
+            elif source == "temporal":
+                for mem_id, score in result_candidates:
+                    mem_ids.add(mem_id)
+                    source_map[mem_id] = ("temporal", float(score), False)
 
         # ---- Plugin hook: pre-retrieval ----
         if system.plugin_manager:
@@ -844,14 +937,17 @@ def _handle_query_blackboard(
 
             # ---- Set base_score based on retrieval source ----
             if source == "fusion":
-                # dist is already a similarity score from fusion worker
                 candidate.base_score = dist if dist is not None else 0.0
-            elif source == "faiss":
-                # Convert distance to similarity (lower distance = higher similarity)
-                candidate.base_score = 1.0 / (1.0 + dist) if dist is not None else 0.0
+            
             elif source == "bm25":
-                # dist is already inverted (1/(score+epsilon)) in source_map
                 candidate.base_score = dist if dist is not None else 0.0
+
+            elif source == "temporal":
+                # Temporal worker returns similarity scores directly
+                candidate.base_score = dist if dist is not None else 0.0
+                # Also store the temporal evidence for diagnostics
+                candidate.temporal_score = dist if dist is not None else 0.0
+
             else:
                 # For graph, attribute, phrase – auxiliary, set to 0
                 candidate.base_score = 0.0
@@ -893,6 +989,65 @@ def _handle_query_blackboard(
                 system.plugin_manager.memoria_retrieval_post(query, candidates)
             except Exception as e:
                 debug(f"[Plugin] retrieval_post error: {e}")
+
+    # ================================================================
+    # FALLBACK: If temporal returned empty, try fusion
+    # This runs AFTER the main retrieval path, for BOTH cases
+    # ================================================================
+    if (query.metadata.get("_temporal_detected", False) and 
+        query.metadata.get("_fallback_allowed", False) and
+        len(candidates) == 0):
+        
+        debug("[MemorySystem] Temporal returned empty, falling back to fusion")
+        
+        # Re-submit fusion task
+        fusion_task_id = system.scheduler.submit(
+            "fusion",
+            {
+                "vector": vec,
+                "tokens": query.tokens,
+                "top_k": top_k_per_shard if 'top_k_per_shard' in locals() else settings.TOP_K_PER_SHARD,
+                "shard_id": 0,
+                "num_shards": 1,
+            }
+        )
+        
+        fusion_policy = _build_retrieval_policy({"fusion"})
+        fusion_execution = system.scheduler.execute(
+            [fusion_task_id],
+            policy=fusion_policy,
+            deadline=retrieval_deadline,
+            cancel_pending=False,
+        )
+        
+        fusion_mem_ids = set()
+        fusion_source_map = {}
+        for result in fusion_execution.results:
+            if result and result.get("source") == "fusion":
+                for mem_id, score in result.get("candidates", []):
+                    fusion_mem_ids.add(mem_id)
+                    fusion_source_map[mem_id] = ("fusion", float(score), False)
+        
+        if fusion_mem_ids:
+            fusion_rows = system.db.fetch_many(list(fusion_mem_ids))
+            fallback_candidates = []
+            for mem_id in fusion_mem_ids:
+                row = fusion_rows.get(mem_id)
+                if row:
+                    memory = system.retrieval._build_memory_record(row)
+                    embedding = system.embedding_cache.get(mem_id) or system.vector_store.get(mem_id)
+                    source, dist, graph_hit = fusion_source_map.get(mem_id, (None, 0.0, False))
+                    candidate = CandidateRecord(
+                        memory=memory,
+                        distance=dist,
+                        embedding=embedding,
+                        graph_hit=graph_hit,
+                    )
+                    candidate.base_score = dist if dist is not None else 0.0
+                    fallback_candidates.append(candidate)
+            
+            candidates = fallback_candidates
+            debug(f"[MemorySystem] Fallback fusion returned {len(candidates)} candidates")
 
     # ==================================================================
     # CROSS-ENCODER RERANKER (optional, configurable)
@@ -1181,8 +1336,6 @@ def _handle_query_blackboard(
             "ranking_skipped": not getattr(settings, "RANKING_ENABLED", True),
         },
     }
-
-
 # ---------------------------------------------------------------------------
 # V3 fallback
 # ---------------------------------------------------------------------------

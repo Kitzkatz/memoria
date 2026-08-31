@@ -60,6 +60,25 @@ class ScoreFinalizer:
         self.sigmoid_scale = sigmoid_scale
         self.use_sigmoid = use_sigmoid
 
+    def _squash_positive(self, x: float, scale: float = 1.0) -> float:
+        """
+        Squash positive values to [0, 1), keeping 0 → 0.
+        Uses sigmoid but shifted so 0 maps to 0.
+        
+        For x >= 0: returns 1 - exp(-x * scale)
+        For x < 0: returns 0 (clamped)
+        """
+        if x <= 0:
+            return 0.0
+        return 1.0 - math.exp(-x * scale)
+
+    def _squash_centered(self, x: float, scale: float = 1.0) -> float:
+        """
+        Standard sigmoid for centered values (can be negative).
+        0 → 0.5, negative → <0.5, positive → >0.5
+        """
+        return 1.0 / (1.0 + math.exp(-x / max(scale, 1e-6)))
+
     def finalize(self, candidates, weights=None):
         """
         Combine ranking signals into final_score.
@@ -86,13 +105,9 @@ class ScoreFinalizer:
             # --------------------------------------------------
 
             if self.use_sigmoid:
-                scale = max(self.sigmoid_scale, 1e-6)
-
-                relevance = 1.0 / (
-                    1.0
-                    + math.exp(
-                        -candidate.normalized_score / scale
-                    )
+                relevance = self._squash_centered(
+                    candidate.normalized_score,
+                    self.sigmoid_scale
                 )
             else:
                 relevance = max(
@@ -104,7 +119,7 @@ class ScoreFinalizer:
                 )
 
             # --------------------------------------------------
-            # Core signals
+            # Core signals (already in [0,1] range)
             # --------------------------------------------------
 
             importance = candidate.importance_score
@@ -124,6 +139,8 @@ class ScoreFinalizer:
             #
             # AttributeBooster now stores this in diagnostics.
             # Do NOT read candidate.attribute_score directly.
+            #
+            # FIXED: Positive-only squashing, 0 → 0
             # --------------------------------------------------
 
             if use_attribute:
@@ -132,8 +149,10 @@ class ScoreFinalizer:
                     0.0,
                 )
 
-                attribute_squashed = 1.0 / (
-                    1.0 + math.exp(-attribute * 2.0)
+                # Positive-only squash: 0 → 0, >0 → approaches 1
+                attribute_squashed = self._squash_positive(
+                    attribute,
+                    scale=2.0  # Steeper curve for attribute
                 )
             else:
                 attribute = 0.0
@@ -141,6 +160,8 @@ class ScoreFinalizer:
 
             # --------------------------------------------------
             # BM25
+            #
+            # FIXED: Positive-only squashing, 0 → 0
             # --------------------------------------------------
 
             if use_bm25:
@@ -150,8 +171,10 @@ class ScoreFinalizer:
                     0.0,
                 )
 
-                bm25_squashed = 1.0 / (
-                    1.0 + math.exp(-bm25)
+                # Positive-only squash: 0 → 0, >0 → approaches 1
+                bm25_squashed = self._squash_positive(
+                    bm25,
+                    scale=1.0
                 )
 
                 candidate.diagnostics["bm25_raw"] = bm25
