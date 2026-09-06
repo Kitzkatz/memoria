@@ -238,7 +238,7 @@ def _init_blackboard(system, db, vector_store):
         temporal_index.build()
 
         # Create and register temporal worker
-        temporal_worker = TemporalWorker(db, temporal_index)
+        temporal_worker = TemporalWorker(db, temporal_index, embedder=system.embedder, vector_store=vector_store,)
         scheduler.register_worker("temporal", temporal_worker.process)
         debug("TemporalWorker registered")
 

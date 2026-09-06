@@ -36,6 +36,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import re
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,12 @@ from ranking.adaptive_weighter import adaptive_weighter_pipeline
 
 # Increment only when cached DB/index structures become incompatible.
 CACHE_VERSION = 1
+
+# ================================================================
+# TOGGLE EVIDENCE CORRECTION
+# ================================================================
+
+APPLY_EVIDENCE_CORRECTIONS = False   # Set to True to enable broken‑question fixing
 
 
 # ================================================================
@@ -179,6 +186,34 @@ _TEMPORAL_KEYWORDS = (
     "conversation",
     "turn",
 )
+
+# ================================================================
+# ABSTENTION / ADVERSARIAL DETECTION
+# ================================================================
+
+def is_category_5_abstention(question: Dict[str, Any]) -> bool:
+    """
+    Detect LoCoMo Category 5 adversarial questions.
+
+    Category 5 questions are unanswerable by design. The official
+    evaluation excludes them entirely.
+
+    Returns True if this question should be skipped.
+    """
+    # Primary: check category field
+    if question.get("category") == 5:
+        return True
+
+    # Fallback: check for _abs marker (if present)
+    if question.get("_abs", False):
+        return True
+
+    # Fallback: check answer text for abstention markers
+    answer = question.get("answer", "")
+    if isinstance(answer, str) and "don't know" in answer.lower():
+        return True
+
+    return False
 
 
 def is_temporal_query(query_text: str) -> bool:
@@ -658,6 +693,49 @@ def configure_workers_for_query(
 
 
 # ================================================================
+# RECORD BUILDER WITH CATEGORY FIELDS
+# ================================================================
+
+def build_record_with_metadata(
+    query: str,
+    expected: str,
+    expected_ids: List[str],
+    expected_rank: Optional[int],
+    retrieved: bool,
+    candidates: List[Dict],
+    runtime_ms: float,
+    diagnostics: Dict,
+    category: Optional[int] = None,
+    category_name: Optional[str] = None,
+    question_id: Optional[str] = None,
+    is_adversarial: bool = False,
+    is_broken: bool = False,
+    excluded_reason: Optional[str] = None,
+) -> Dict:
+    """
+    Build a record with all metadata fields including category and exclusion info.
+    """
+    record = {
+        "query": query,
+        "expected": expected,
+        "expected_ids": expected_ids,
+        "expected_rank": expected_rank,
+        "retrieved": retrieved,
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "runtime_ms": runtime_ms,
+        "diagnostics": diagnostics,
+        "category": category,
+        "category_name": category_name,
+        "question_id": question_id,
+        "is_adversarial": is_adversarial,
+        "is_broken": is_broken,
+        "excluded_reason": excluded_reason,
+    }
+    return record
+
+
+# ================================================================
 # MAIN
 # ================================================================
 
@@ -731,6 +809,14 @@ def main():
         type=str,
     )
 
+    # ---- NEW: category filter ----
+    parser.add_argument(
+        "--category",
+        type=int,
+        default=None,
+        help="Filter questions by category (1-5). If not set, all categories are run.",
+    )
+
     args = parser.parse_args()
 
     # ------------------------------------------------------------
@@ -771,6 +857,58 @@ def main():
         "[LoCoMo] Dataset checksum: "
         f"{compute_checksum(dataset_path)}"
     )
+
+    # ============================================================
+    # LOAD EVIDENCE CORRECTIONS FROM ERRORS.JSON
+    # ============================================================
+
+    errors_path = Path("errors.json")
+    evidence_corrections = {}  # cited_evidence -> correct_evidence
+    broken_question_ids = set()
+    if APPLY_EVIDENCE_CORRECTIONS and errors_path.exists():
+        try:
+            with open(errors_path, "r") as f:
+                errors_data = json.load(f)
+                for error in errors_data:
+                    cited = error.get("cited_evidence", [])
+                    correct = error.get("correct_evidence", [])
+                    qid = error.get("question_id")
+
+                    # ONLY track questions where cited != correct (real broken)
+                    if cited != correct and qid:
+                        broken_question_ids.add(qid)
+
+                        # Map each cited evidence to correct evidence for this question
+                        # Handle cases where cited is a string with semicolon
+                        if isinstance(cited, str) and ';' in cited:
+                            cited = [c.strip() for c in cited.split(';')]
+                        if isinstance(correct, str) and ';' in correct:
+                            correct = [c.strip() for c in correct.split(';')]
+
+                        # Ensure both are lists
+                        if not isinstance(cited, list):
+                            cited = [cited]
+                        if not isinstance(correct, list):
+                            correct = [correct]
+
+                        # Map each cited to the corresponding correct
+                        for i, ev in enumerate(cited):
+                            if i < len(correct):
+                                evidence_corrections[ev] = correct[i]
+                            elif correct:
+                                evidence_corrections[ev] = correct[0]
+
+            print(f"[LoCoMo] Loaded {len(evidence_corrections)} evidence corrections from errors.json")
+            print(f"[LoCoMo] {len(broken_question_ids)} real broken questions identified")
+            print(f"[LoCoMo] Sample corrections: {list(evidence_corrections.items())[:10]}")
+        except Exception as e:
+            print(f"[LoCoMo] Warning: Could not load errors.json: {e}")
+    elif APPLY_EVIDENCE_CORRECTIONS:
+        print("[LoCoMo] Warning: errors.json not found — no evidence corrections applied")
+    else:
+        print("[LoCoMo] Evidence corrections disabled by APPLY_EVIDENCE_CORRECTIONS")
+
+    # ============================================================
 
     # Large benchmark context budget.
     settings.CONTEXT_TOKEN_BUDGET = 10000
@@ -833,6 +971,8 @@ def main():
     retrieval_hits = 0
     total_memories = 0
     temporal_questions = 0
+    adversarial_skipped = 0
+    corrected_count = 0
 
     start_time = time.perf_counter()
 
@@ -949,7 +1089,7 @@ def main():
         count = 0
 
         # ========================================================
-        # LOAD DB CACHE
+        # LOAD DB CACHE (CORRECT CONNECTION HANDLING)
         # ========================================================
 
         if db_cache_exists:
@@ -962,32 +1102,30 @@ def main():
             )
 
             try:
+                db = controller.system.db
 
-                if hasattr(
-                    controller.system.db,
-                    "_conn",
-                ):
-                    controller.system.db._conn.close()
+                # Close existing connection if possible (direct _conn)
+                if hasattr(db, '_conn') and db._conn is not None:
+                    db._conn.close()
 
+                # Copy the cache file
                 shutil.copy2(
                     str(db_cache_path),
                     settings.DB_PATH,
                 )
 
-                from db.connection import (
-                    DBConnection,
-                )
+                # Reconnect using DBConnection (as in LongMemEval)
+                from db.connection import DBConnection
+                db._conn = DBConnection()
 
-                controller.system.db._conn = (
-                    DBConnection()
-                )
+                # Rebuild indices and vector store
+                rebuild_indices_from_db(controller.system)
 
-                rebuild_indices_from_db(
-                    controller.system
-                )
+                # Rebuild temporal index (if present)
+                if hasattr(controller.system, 'temporal_index'):
+                    controller.system.temporal_index.build()
 
                 controller.system.vector_store.reset()
-
                 skip_db_insert = True
 
                 print(
@@ -1283,8 +1421,80 @@ def main():
                 "",
             )
 
+            question_id = q_item.get(
+                "question_id",
+                f"q_{qi}"
+            )
+
+            category = q_item.get("category")
+            category_name = q_item.get("category_name")
+
+            # ---- Category filter ----
+            if args.category is not None and category != args.category:
+                continue
+
             if not question_text:
                 continue
+
+            # ---- SKIP CATEGORY 5 ADVERSARIAL QUESTIONS ----
+            if is_category_5_abstention(q_item):
+                adversarial_skipped += 1
+                # Add record with exclusion metadata
+                record = build_record_with_metadata(
+                    query=question_text,
+                    expected=evidence_ids[0] if evidence_ids else "",
+                    expected_ids=evidence_ids,
+                    expected_rank=None,
+                    retrieved=False,
+                    candidates=[],
+                    runtime_ms=0.0,
+                    diagnostics={"skipped": "adversarial"},
+                    category=category,
+                    category_name=category_name,
+                    question_id=question_id,
+                    is_adversarial=True,
+                    is_broken=False,
+                    excluded_reason="adversarial",
+                )
+                records.append(record)
+                continue
+            # --------------------------------------------------
+
+            # ---- CORRECT REAL BROKEN QUESTIONS (cited != correct) ----
+            # Only run if APPLY_EVIDENCE_CORRECTIONS is True
+            if APPLY_EVIDENCE_CORRECTIONS:
+                is_corrected = False
+                needs_correction = False
+
+                # Check if any evidence in this question needs correction
+                for ev in evidence_ids:
+                    if ev in evidence_corrections:
+                        needs_correction = True
+                        break
+
+                if needs_correction:
+                    corrected_evidence = []
+                    for ev in evidence_ids:
+                        if ev in evidence_corrections:
+                            corrected_ev = evidence_corrections[ev]
+                            if corrected_ev and corrected_ev != ev:
+                                corrected_evidence.append(corrected_ev)
+                                is_corrected = True
+                            else:
+                                corrected_evidence.append(ev)
+                        else:
+                            corrected_evidence.append(ev)
+
+                    evidence_to_use = corrected_evidence if corrected_evidence else evidence_ids
+
+                    if is_corrected:
+                        corrected_count += 1
+                else:
+                    evidence_to_use = evidence_ids
+            else:
+                # Skip correction entirely
+                evidence_to_use = evidence_ids
+            # --------------------------------------------------
 
             total_questions += 1
 
@@ -1344,13 +1554,20 @@ def main():
             # ----------------------------------------------------
             # Determine which session the query is about
             # ----------------------------------------------------
-            
+
             # Try to extract session number from the question text
             # This handles "session 4", "session #4", etc.
-            import re
+            #
+            # NOTE: session_idx is zero-indexed everywhere else in
+            # this file (see build_haystack_texts_and_metadata's
+            # enumerate(session_keys)). A question referring to
+            # "session 4" almost certainly means the 4th session,
+            # i.e. index 3 — so the parsed number is adjusted down
+            # by one to match. Verify against real question/session
+            # pairs in your dataset before fully trusting this.
             session_match = re.search(r'session\s*#?\s*(\d+)', question_text, re.IGNORECASE)
             if session_match:
-                current_session = int(session_match.group(1))
+                current_session = max(0, int(session_match.group(1)) - 1)
             else:
                 # For "previous session", "3 sessions ago", etc. we need the current session
                 # For LoCoMo, each question is asked in the context of the last session
@@ -1441,9 +1658,16 @@ def main():
 
                 print(
                     f"    [DEBUG] "
-                    f"Expected evidence IDs: "
+                    f"Original evidence IDs: "
                     f"{evidence_ids}"
                 )
+
+                if APPLY_EVIDENCE_CORRECTIONS and is_corrected:
+                    print(
+                        f"    [DEBUG] "
+                        f"CORRECTED evidence IDs: "
+                        f"{evidence_to_use}"
+                    )
 
                 for idx, result in enumerate(
                     response["results"][:3]
@@ -1475,37 +1699,41 @@ def main():
                         )
 
             # ----------------------------------------------------
-            # Evaluation
+            # Evaluation (use corrected evidence)
             # ----------------------------------------------------
 
             found, rank = check_retrieval(
                 response,
-                evidence_ids,
+                evidence_to_use,
                 answer_text,
             )
 
             if found:
                 retrieval_hits += 1
 
-            record = build_record(
+            # Build diagnostics with correction info
+            diagnostics = response.get("diagnostics", {})
+            if APPLY_EVIDENCE_CORRECTIONS and is_corrected:
+                diagnostics["evidence_corrected"] = True
+                diagnostics["original_evidence"] = evidence_ids
+                diagnostics["corrected_evidence"] = evidence_to_use
+
+            # Use our custom record builder with metadata
+            record = build_record_with_metadata(
                 query=question_text,
-                expected=(
-                    evidence_ids[0]
-                    if evidence_ids
-                    else ""
-                ),
-                expected_ids=evidence_ids,
+                expected=evidence_to_use[0] if evidence_to_use else "",
+                expected_ids=evidence_to_use,
                 expected_rank=rank,
                 retrieved=found,
-                candidates=response.get(
-                    "results",
-                    [],
-                ),
+                candidates=response.get("results", []),
                 runtime_ms=query_time,
-                diagnostics=response.get(
-                    "diagnostics",
-                    {},
-                ),
+                diagnostics=diagnostics,
+                category=category,
+                category_name=category_name,
+                question_id=question_id,
+                is_adversarial=False,
+                is_broken=False,
+                excluded_reason=None,
             )
 
             records.append(record)
@@ -1545,6 +1773,25 @@ def main():
         records,
         question_count=total_questions,
     )
+
+    # ---- INJECT DATASET NOTES ----
+    output["notes"] = {
+        "dataset": str(dataset_path),
+        "timestamp": datetime.now().isoformat(),
+        "limit_hit": args.limit,
+        "conversations": len(data),
+        "total_questions": total_questions,
+        "total_memories": total_memories,
+        "temporal_questions": temporal_questions,
+        "adversarial_skipped": adversarial_skipped,
+        "evidence_corrected": corrected_count,
+        "broken_question_ids": list(broken_question_ids),
+        "cache_version": CACHE_VERSION,
+        "temporal_enabled": temporal_enabled,
+        "workers_used": original_workers,
+        "applied_evidence_corrections": APPLY_EVIDENCE_CORRECTIONS,
+    }
+    # ---------------------------------
 
     if args.output:
 
@@ -1605,6 +1852,16 @@ def main():
     print(
         f"Total questions: "
         f"{total_questions}"
+    )
+
+    print(
+        f"Adversarial skipped (Cat 5): "
+        f"{adversarial_skipped}"
+    )
+
+    print(
+        f"Evidence corrected: "
+        f"{corrected_count}"
     )
 
     print(

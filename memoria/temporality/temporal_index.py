@@ -428,6 +428,39 @@ class TemporalIndex:
     def __len__(self) -> int:
         return len(self._index)
 
+    def search_by_session(
+        self,
+        session_id: int,
+    ) -> List[int]:
+        """
+        Return memory IDs that belong to a specific session.
+
+        Looks for session_id in:
+            - top-level 'session_id' field
+            - metadata.session_idx
+            - metadata.session_id
+        """
+        results = []
+
+        for memory_id, data in self._index.items():
+            metadata = data.get("metadata") or {}
+
+            # Check top-level
+            if data.get("session_id") == session_id:
+                results.append(memory_id)
+                continue
+
+            # Check metadata
+            if metadata.get("session_idx") == session_id:
+                results.append(memory_id)
+                continue
+
+            if metadata.get("session_id") == session_id:
+                results.append(memory_id)
+                continue
+
+        return results
+
     # ================================================================
     # DATETIME NORMALIZATION
     # ================================================================

@@ -112,28 +112,226 @@ class BenchmarkAnalyzer:
 
         self.data["records"] = records
 
-    # ------------------------------------------------------------------
-    # All methods below are unchanged from the original analyzer.
-    # They remain exactly as you had them.
-    # ------------------------------------------------------------------
+    # ================================================================
+    # Core metric computation
+    # ================================================================
 
-    def analyze(self, show_mmr_details: bool = False) -> dict:
-        records = self.records()
+    def _compute_metrics_for_records(self, records: list) -> dict:
+        """Compute standard metrics for a set of records."""
         total = len(records)
-
         if not total:
-            info("[Analyzer] No records to analyze", category="benchmark")
-            return {"total": 0}
-
-        # ---- Plugin hook: pre-analysis ----
-        if self.plugin_manager:
-            try:
-                self.plugin_manager.memoria_analysis_pre(records, {})
-            except Exception as e:
-                error(f"[Plugin] analysis_pre error: {e}", category="benchmark")
+            return {
+                "total": 0,
+                "retrieved": 0,
+                "top1": 0,
+                "top3": 0,
+                "recall_counts": {1: 0, 3: 0, 5: 0, 10: 0},
+                "rank_distribution": Counter(),
+            }
 
         metrics = {
             "total": total,
+            "retrieved": 0,
+            "top1": 0,
+            "top3": 0,
+            "recall_counts": {1: 0, 3: 0, 5: 0, 10: 0},
+            "rank_distribution": Counter(),
+        }
+
+        for record in records:
+            rank = record.get("expected_rank")
+            if rank:
+                metrics["retrieved"] += 1
+                metrics["rank_distribution"][rank] += 1
+                if rank == 1:
+                    metrics["top1"] += 1
+                if rank <= 3:
+                    metrics["top3"] += 1
+                for k in metrics["recall_counts"]:
+                    if rank <= k:
+                        metrics["recall_counts"][k] += 1
+
+        return metrics
+
+    def _compute_category_metrics(self, records: list) -> dict:
+        """
+        Compute per-category metrics from records.
+        Returns dict with category as key and metrics dict as value.
+        Only includes non-excluded records (answerable questions).
+        """
+        # Filter to answerable records only
+        answerable = [r for r in records if not r.get("excluded_reason")]
+
+        # Group by category
+        by_cat = {}
+        for rec in answerable:
+            cat = rec.get("category")
+            # If no category, skip or group as "unknown"
+            if cat is None:
+                cat = "unknown"
+            if cat not in by_cat:
+                by_cat[cat] = []
+            by_cat[cat].append(rec)
+
+        # Compute metrics per category
+        category_metrics = {}
+        for cat, recs in by_cat.items():
+            metrics = self._compute_metrics_for_records(recs)
+            # Get category name from first record (if available)
+            name = recs[0].get("category_name") if recs else None
+            if not name:
+                name = f"Category {cat}" if cat != "unknown" else "Unknown"
+
+            category_metrics[cat] = {
+                "name": name,
+                "total": metrics["total"],
+                "retrieved": metrics["retrieved"],
+                "recall@1": metrics["recall_counts"][1] / metrics["total"] * 100 if metrics["total"] else 0,
+                "recall@3": metrics["recall_counts"][3] / metrics["total"] * 100 if metrics["total"] else 0,
+                "recall@5": metrics["recall_counts"][5] / metrics["total"] * 100 if metrics["total"] else 0,
+                "recall@10": metrics["recall_counts"][10] / metrics["total"] * 100 if metrics["total"] else 0,
+            }
+
+        return category_metrics
+
+    def _compute_exclusions(self, records: list) -> dict:
+        """Count exclusions from records."""
+        adversarial = [r for r in records if r.get("is_adversarial", False)]
+        broken = [r for r in records if r.get("is_broken", False)]
+        answerable = [r for r in records if not r.get("excluded_reason")]
+
+        return {
+            "adversarial": len(adversarial),
+            "broken": len(broken),
+            "answerable": len(answerable),
+            "total_excluded": len(adversarial) + len(broken),
+            "adversarial_ids": [r.get("question_id", "unknown") for r in adversarial[:5]],
+            "broken_ids": [r.get("question_id", "unknown") for r in broken[:5]],
+        }
+
+    def _build_category_map(self, records: list) -> dict:
+        """Build category name map from records."""
+        cat_map = {}
+        for rec in records:
+            cat = rec.get("category")
+            if cat is not None and cat not in cat_map:
+                name = rec.get("category_name")
+                if not name:
+                    name = f"Category {cat}"
+                cat_map[cat] = name
+        return cat_map
+
+    # ================================================================
+    # Print methods
+    # ================================================================
+
+    def _print_score_section(self, metrics: dict, title: str, extra_info: str = ""):
+        """Print a formatted score section."""
+        total = metrics["total"]
+        retrieved = metrics["retrieved"]
+
+        print("\n" + "=" * 60)
+        print(f"[{title}]")
+        print("=" * 60)
+
+        if total == 0:
+            print("  No records in this set.")
+            return
+
+        print(f"\n  Total Questions:  {total}")
+        if extra_info:
+            print(f"  {extra_info}")
+        print(f"  Retrieved:        {retrieved} ({self._pct(retrieved, total):.2f}%)")
+        print(f"  Top 1:            {metrics['top1']} ({self._pct(metrics['top1'], total):.2f}%)")
+        print(f"  Top 3:            {metrics['top3']} ({self._pct(metrics['top3'], total):.2f}%)")
+
+        print("\n  [RECALL@K]")
+        for k in (1, 3, 5, 10):
+            count = metrics["recall_counts"].get(k, 0)
+            print(f"    Recall@{k}: {count} ({self._pct(count, total):.2f}%)")
+
+        print("=" * 60)
+
+    def _print_category_breakdown(self, category_metrics: dict, title: str = "CATEGORY BREAKDOWN"):
+        """Print category breakdown from discovered categories."""
+        if not category_metrics:
+            print("\n[No categories found in data]")
+            return
+
+        # Calculate totals across all categories
+        total_all = sum(m["total"] for m in category_metrics.values())
+        retrieved_all = sum(m["retrieved"] for m in category_metrics.values())
+        r1_all = sum(m["recall@1"] * m["total"] / 100 for m in category_metrics.values())
+        r3_all = sum(m["recall@3"] * m["total"] / 100 for m in category_metrics.values())
+        r10_all = sum(m["recall@10"] * m["total"] / 100 for m in category_metrics.values())
+
+        print("\n" + "=" * 60)
+        print(f"[{title}]")
+        print("=" * 60)
+        print(f"{'Category':<25} {'Total':>6} {'Retrieved':>10} {'R@1':>8} {'R@3':>8} {'R@10':>9}")
+        print("-" * 75)
+
+        # Sort by category key (int or string)
+        for cat, m in sorted(category_metrics.items(), key=lambda x: str(x[0])):
+            name = m["name"]
+            total = m["total"]
+            retrieved = m["retrieved"]
+            r1 = m["recall@1"]
+            r3 = m["recall@3"]
+            r10 = m["recall@10"]
+
+            print(
+                f"{name:<25} "
+                f"{total:>6} "
+                f"{retrieved:>10} "
+                f"{r1:>7.1f}% "
+                f"{r3:>7.1f}% "
+                f"{r10:>8.1f}%"
+            )
+
+        # Print total row
+        print("-" * 75)
+        print(
+            f"{'TOTAL':<25} "
+            f"{total_all:>6} "
+            f"{retrieved_all:>10} "
+            f"{(r1_all/total_all*100 if total_all else 0):>7.1f}% "
+            f"{(r3_all/total_all*100 if total_all else 0):>7.1f}% "
+            f"{(r10_all/total_all*100 if total_all else 0):>8.1f}%"
+        )
+        print("=" * 60)
+
+    def _print_exclusions(self, exclusions: dict):
+        """Print exclusions summary."""
+        if exclusions["total_excluded"] == 0:
+            return
+
+        print("\n" + "=" * 60)
+        print("[EXCLUSIONS]")
+        print("=" * 60)
+
+        if exclusions["adversarial"]:
+            print(f"\n  Adversarial (Category 5): {exclusions['adversarial']}")
+            if exclusions["adversarial_ids"]:
+                print(f"    Example IDs: {', '.join(exclusions['adversarial_ids'])}")
+
+        if exclusions["broken"]:
+            print(f"\n  Broken Questions (ground truth errors): {exclusions['broken']}")
+            if exclusions["broken_ids"]:
+                print(f"    Example IDs: {', '.join(exclusions['broken_ids'])}")
+
+        print(f"\n  Total Excluded: {exclusions['total_excluded']}")
+        print(f"  Answerable:     {exclusions['answerable']}")
+        print("=" * 60)
+
+    # ================================================================
+    # Legacy methods (kept for backward compatibility)
+    # ================================================================
+
+    def _build_legacy_metrics(self, records: list) -> dict:
+        """Build the legacy metrics dict from records."""
+        metrics = {
+            "total": len(records),
             "retrieved": 0,
             "top1": 0,
             "top3": 0,
@@ -168,10 +366,58 @@ class BenchmarkAnalyzer:
         )
 
         for record in records:
-            self._analyze_record(record, metrics, timing_keys, show_mmr_details)
+            self._analyze_record(record, metrics, timing_keys, False)
 
+        return metrics
+
+    # ================================================================
+    # Main analyze()
+    # ================================================================
+
+    def analyze(self, show_mmr_details: bool = False) -> dict:
+        records = self.records()
+        total = len(records)
+
+        if not total:
+            info("[Analyzer] No records to analyze", category="benchmark")
+            return {"total": 0}
+
+        # ---- Plugin hook: pre-analysis ----
+        if self.plugin_manager:
+            try:
+                self.plugin_manager.memoria_analysis_pre(records, {})
+            except Exception as e:
+                error(f"[Plugin] analysis_pre error: {e}", category="benchmark")
+
+        # ---- Split records ----
+        adversarial = [r for r in records if r.get("is_adversarial", False)]
+        broken = [r for r in records if r.get("is_broken", False)]
+        answerable = [r for r in records if not r.get("excluded_reason")]
+
+        # ---- OFFICIAL SCORE: All answerable questions ----
+        # Broken questions are included but count as failures
+        official_metrics = self._compute_metrics_for_records(answerable)
+
+        # ---- Category breakdown: All answerable questions ----
+        category_metrics = self._compute_category_metrics(answerable)
+
+        # ---- Exclusions ----
+        exclusions = self._compute_exclusions(records)
+
+        # ---- Print sections ----
+        official_title = f"OFFICIAL SCORE — All Answerable Questions ({len(answerable)})"
+        self._print_score_section(official_metrics, official_title)
+        if len(broken) > 0:
+            print(f"\n  Broken questions included as failures: {len(broken)}")
+
+        self._print_exclusions(exclusions)
+        self._print_category_breakdown(category_metrics, "CATEGORY BREAKDOWN — Answerable Questions")
+
+        # ---- Legacy output (kept for backward compatibility) ----
+        # Use answerable records for legacy metrics so broken aren't counted as failures
+        metrics = self._build_legacy_metrics(answerable)
         self._print_analysis(metrics)
-        self._print_official_metrics() 
+        self._print_official_metrics()
 
         summary = self._build_summary(metrics)
 
@@ -185,7 +431,14 @@ class BenchmarkAnalyzer:
         return {
             "metrics": metrics,
             "summary": summary,
+            "official_metrics": official_metrics,
+            "category_metrics": category_metrics,
+            "exclusions": exclusions,
         }
+
+    # ================================================================
+    # All existing methods below are unchanged
+    # ================================================================
 
     def _analyze_record(self, record, metrics, timing_keys, show_mmr_details):
         rank = record.get("expected_rank")
@@ -469,6 +722,34 @@ class BenchmarkAnalyzer:
 
         print("-" * 40)
 
+    def _print_notes(self):
+        """Print dataset notes if present. Called explicitly via --notes flag."""
+        if not self.data:
+            print("[Analyzer] No data loaded.")
+            return
+        
+        notes = self.data.get("notes", {})
+        if not notes:
+            print("[Analyzer] No notes found in this file.")
+            return
+        
+        print("\n" + "=" * 60)
+        print("[DATASET NOTES]")
+        print("=" * 60)
+        
+        for key, value in notes.items():
+            if isinstance(value, dict):
+                print(f"\n{key}:")
+                for k, v in value.items():
+                    if isinstance(v, list):
+                        print(f"  {k}: {', '.join(str(x) for x in v)}")
+                    else:
+                        print(f"  {k}: {v}")
+            elif isinstance(value, list):
+                print(f"\n{key}: {', '.join(str(x) for x in value)}")
+            else:
+                print(f"\n{key}: {value}")
+
     def _build_summary(self, metrics):
         total = metrics["total"]
         retrieved = metrics["retrieved"]
@@ -672,6 +953,7 @@ class BenchmarkAnalyzer:
             f"[Analyzer] Summary exported to {output_path}",
             category="benchmark",
         )
+
     def _print_official_metrics(self):
         """Print official session/turn metrics from the adapter's 'metrics' field."""
         records = self.records()
@@ -755,6 +1037,7 @@ class BenchmarkAnalyzer:
                 f"recall_all={turn_recall_all[k]/evaluable_count*100:>5.1f}%  "
                 f"ndcg_any={turn_ndcg_any[k]/evaluable_count:.4f}"
             )
+
     @staticmethod
     def compare_ablations(filepaths: list):
         """Compare multiple ablation runs (dense, bm25, raw, fusion, full)."""
@@ -810,6 +1093,7 @@ class BenchmarkAnalyzer:
                 f"{vals['r5']:>7.1f}% {vals['r10']:>7.1f}% {vals['ndcg10']:>9.4f}"
             )
 
+
 def analyze_all(results_dir=DEFAULT_RESULTS_DIR):
     dir_path = Path(results_dir)
 
@@ -836,7 +1120,7 @@ def analyze_all(results_dir=DEFAULT_RESULTS_DIR):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python benchmark_analyzer.py file.json [--questions questions.json] [--explain N] [--export summary.json]")
+        print("  python benchmark_analyzer.py file.json [--questions questions.json] [--explain N] [--export summary.json] [--notes]")
         print("  python benchmark_analyzer.py --all [--export summary.json]")
         print("  python benchmark_analyzer.py --compare file1.json file2.json ...")
         sys.exit(1)
@@ -846,7 +1130,6 @@ if __name__ == "__main__":
         print(json.dumps(results, indent=2))
         sys.exit(0)
 
-    # NEW: Compare mode
     if sys.argv[1] == "--compare":
         files = sys.argv[2:]
         if not files:
@@ -855,11 +1138,12 @@ if __name__ == "__main__":
         BenchmarkAnalyzer.compare_ablations(files)
         sys.exit(0)
 
-    # Parse arguments manually for single file analysis
+    # Parse arguments
     filepath = sys.argv[1]
     questions_path = None
     explain_limit = None
     export_path = None
+    show_notes = False
 
     i = 2
     while i < len(sys.argv):
@@ -872,6 +1156,9 @@ if __name__ == "__main__":
         elif sys.argv[i] == "--export" and i+1 < len(sys.argv):
             export_path = sys.argv[i+1]
             i += 2
+        elif sys.argv[i] == "--notes":
+            show_notes = True
+            i += 1
         else:
             i += 1
 
@@ -879,6 +1166,10 @@ if __name__ == "__main__":
 
     if not analyzer.load():
         sys.exit(1)
+
+    # Only print notes if --notes flag was passed
+    if show_notes:
+        analyzer._print_notes()
 
     analyzer.analyze()
 

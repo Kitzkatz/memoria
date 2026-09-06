@@ -12,6 +12,7 @@ import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+import re
 
 from cache.config import settings
 from core.logger import debug
@@ -42,11 +43,13 @@ class TemporalWorker(Worker):
         - mix with other retrieval sources
     """
 
-    def __init__(self, db, temporal_index=None, enable_diagnostics=None):
+    def __init__(self, db, temporal_index=None, enable_diagnostics=None, embedder=None, vector_store=None):
         self.db = db
         self.temporal_index = temporal_index
         self.parser = TemporalParser()
         self.enable_diagnostics = enable_diagnostics if enable_diagnostics is not None else settings.DEBUG
+        self.embedder = embedder
+        self.vector_store = vector_store
 
     # ================================================================
     # SESSION CONTEXT HELPERS
@@ -124,6 +127,107 @@ class TemporalWorker(Worker):
         return result
 
     # ================================================================
+    # TEMPORAL INTENT HELPERS
+    # ================================================================
+
+    def _has_temporal_intent(self, query_text: str) -> bool:
+        """Check if query has temporal intent but no explicit constraint."""
+        temporal_intent_keywords = [
+            "when did", "when was", "when were", "when will",
+            "when would", "when could", "when should",
+            "what time", "what day", "what year",
+        ]
+        query_lower = query_text.lower()
+        return any(kw in query_lower for kw in temporal_intent_keywords)
+
+    def _semantic_retrieval(self, query_text: str, limit: int) -> List[Tuple[int, float]]:
+        """Perform semantic retrieval to find relevant events."""
+        if self.embedder is None or self.vector_store is None:
+            return []
+        
+        try:
+            vec = self.embedder.embed(query_text)
+            search_limit = max(limit * 5, 1000) 
+            ids, distances = self.vector_store.search(vec, k=search_limit)
+            # Convert distances to similarities (1 / (1 + distance))
+            return [(id, 1.0 / (1.0 + dist)) for id, dist in zip(ids, distances)]
+        except Exception as e:
+            debug(f"[Temporal] Semantic retrieval error: {e}")
+            return []
+
+    def _score_temporal_event_query(
+        self,
+        candidates: List[Tuple[int, float]],
+        query_text: str,
+        reference_time: Optional[datetime],
+        current_session: int,
+    ) -> List[Tuple[int, float]]:
+        """Score event-time query candidates by temporal relevance."""
+        scored = []
+        
+        if not candidates:
+            return scored
+        
+        # Extract entity from query (e.g., "Melanie")
+        
+        entity_match = re.search(r'\b([A-Z][a-z]+)\b', query_text)
+        entity_name = entity_match.group(1).lower() if entity_match else None
+        
+        # Fetch all memories in one batch
+        memory_ids = [mem_id for mem_id, _ in candidates]
+        rows = self.db.fetch_many(memory_ids)
+        
+        for memory_id, semantic_score in candidates:
+            row = rows.get(memory_id)
+            if not row:
+                continue
+            
+            text = row.get("text", "").lower()
+            created_at = row.get("created_at")
+            if not created_at:
+                continue
+            
+            dt = self._parse_datetime(created_at)
+            if dt is None:
+                continue
+            
+            # ---- ENTITY BOOST: Check text AND metadata ----
+            entity_boost = 1.0
+            if entity_name:
+                # Check text
+                if entity_name in text:
+                    entity_boost = 2.0
+                # Check metadata (speaker, subject, entities)
+                else:
+                    metadata = row.get("metadata", {})
+                    # Check speaker
+                    if metadata.get("speaker", "").lower() == entity_name:
+                        entity_boost = 2.0
+                    # Check subject
+                    elif metadata.get("subject", "").lower() == entity_name:
+                        entity_boost = 2.0
+                    # Check entities list
+                    elif entity_name in [e.lower() for e in metadata.get("entities", [])]:
+                        entity_boost = 2.0
+                    # Check dia_id (sometimes contains entity)
+                    elif entity_name in metadata.get("dia_id", "").lower():
+                        entity_boost = 1.5
+            
+            # Calculate temporal relevance based on recency (only if reference_time is provided)
+            if reference_time is not None:
+                age_days = max(0, (reference_time - dt).days)
+                recency_score = math.exp(-age_days / 30.0)
+            else:
+                recency_score = 0.0
+            
+            # Combine scores: entity boost + semantic + recency
+            final_score = (semantic_score * 0.4) + (recency_score * 0.3) + (entity_boost * 0.3)
+            
+            scored.append((memory_id, final_score))
+        
+        return scored
+
+    # ================================================================
     # STANDALONE RETRIEVAL
     # ================================================================
 
@@ -160,7 +264,7 @@ class TemporalWorker(Worker):
         current_session = context["current_session"]
         total_sessions = context["total_sessions"]
 
-        debug(f"[DEBUG] process: current_session={current_session}, total_sessions={total_sessions}")  # <-- DEBUG
+        debug(f"[DEBUG] process: current_session={current_session}, total_sessions={total_sessions}")
 
         debug(f"[Temporal] Processing: '{query_text[:60]}...' session={current_session}/{total_sessions or '?'}")
 
@@ -171,23 +275,102 @@ class TemporalWorker(Worker):
 
         # ---- Get all sessions for sparse resolution ----
         all_sessions = self._get_all_sessions()
-        debug(f"[DEBUG] process: all_sessions={all_sessions}")  # <-- DEBUG
+        debug(f"[DEBUG] process: all_sessions={all_sessions}")
 
         # ---- Resolve session constraints with sparse session support ----
         if parsed.get("has_session_constraint", False):
-            debug(f"[DEBUG] process: resolving session constraints")  # <-- DEBUG
+            debug(f"[DEBUG] process: resolving session constraints")
             debug(f"[DEBUG] Before resolve: constraints[0].target = {constraints[0].target}")
             constraints = resolve_session_constraints(
                 constraints,
                 current_session,
                 total_sessions,
-                all_sessions,  # <-- Pass sparse session list
+                all_sessions,
             )
             debug(f"[DEBUG] After resolve: constraints[0].target = {constraints[0].target}")
             if self.enable_diagnostics:
                 for c in constraints:
                     if c.metadata.get("requires_session_resolution", False):
                         debug(f"[Temporal] Resolved: {c.metadata.get('session_type')} -> {c.target}")
+
+        # ---- Event-time query handling ----
+        # If no constraints but has temporal intent -> event-time query
+        has_temporal_intent = self._has_temporal_intent(query_text)
+        
+        if not constraints and has_temporal_intent:
+            debug(f"[Temporal] Event-time query detected: '{query_text[:60]}...'")
+            debug(f"[Temporal] No explicit constraints, using semantic + temporal metadata")
+            
+            # Use semantic retrieval to find the event
+            semantic_results = self._semantic_retrieval(query_text, limit)
+            if not semantic_results:
+                debug(f"[Temporal] Semantic retrieval returned no candidates for event-time query")
+                return {
+                    "source": "temporal",
+                    "candidates": [],
+                    "count": 0,
+                    "diagnostics": {
+                        "expressions": parsed.get("expressions", []),
+                        "constraints": [],
+                        "has_temporal_constraint": False,
+                        "has_session_constraint": parsed.get("has_session_constraint", False),
+                        "has_temporal_intent": True,
+                        "reference_time": (
+                            reference_time.isoformat()
+                            if reference_time
+                            else None
+                        ),
+                    },
+                }
+            
+            # Filter and score candidates by temporal relevance
+            scored = self._score_temporal_event_query(
+                semantic_results,
+                query_text,
+                reference_time,
+                current_session,
+            )
+            
+            # Apply shard filter
+            scored = _shard_filter(
+                scored,
+                lambda c: c[0],
+                shard_id,
+                num_shards,
+            )
+            
+            # Re-sort by score
+            scored.sort(key=lambda x: x[1], reverse=True)
+            scored = scored[:limit]
+            
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            debug(
+                f"[TemporalWorker] Event-time query "
+                f"(shard {shard_id}/{num_shards}): "
+                f"temporal={elapsed_ms:.2f}ms, "
+                f"candidates={len(scored)}"
+            )
+            
+            return {
+                "source": "temporal",
+                "candidates": scored,
+                "count": len(scored),
+                "diagnostics": {
+                    "expressions": parsed.get("expressions", []),
+                    "constraints": [],
+                    "has_temporal_constraint": False,
+                    "has_session_constraint": parsed.get("has_session_constraint", False),
+                    "has_temporal_intent": True,
+                    "reference_time": (
+                        reference_time.isoformat()
+                        if reference_time
+                        else None
+                    ),
+                    "scored_count": len(scored),
+                    "shard_id": shard_id,
+                    "num_shards": num_shards,
+                },
+            }
 
         # ---- No constraints -> return empty ----
         if not constraints:
@@ -209,10 +392,11 @@ class TemporalWorker(Worker):
                 },
             }
 
-        # ---- Retrieve candidates ----
+        # ---- OVERFETCH: Retrieve more candidates per shard (same as FusionWorker) ----
+        overfetch_limit = limit * 2 if num_shards > 1 else limit
         candidates = self._retrieve_temporal_candidates(
             constraints,
-            limit,
+            overfetch_limit,
         )
 
         # ---- Score candidates ----
@@ -231,6 +415,8 @@ class TemporalWorker(Worker):
             num_shards,
         )
 
+        # ---- RE-SORT by score after shard filter (same as FusionWorker) ----
+        scored.sort(key=lambda x: x[1], reverse=True)
         scored = scored[:limit]
 
         elapsed_ms = (time.perf_counter() - start) * 1000
@@ -266,35 +452,27 @@ class TemporalWorker(Worker):
     # REFERENCE TIME
     # ================================================================
 
-    def _get_reference_time(
-        self,
-        payload: Dict[str, Any],
-    ) -> datetime:
+    def _get_reference_time(self, payload: Dict[str, Any]) -> Optional[datetime]:
         """
         Obtain the temporal anchor for relative expressions.
+        Returns None if no reference time is provided in payload.
         """
-
         value = (
             payload.get("reference_time")
             or payload.get("query_time")
             or payload.get("conversation_time")
         )
-
         if value is None:
-            return datetime.now(timezone.utc)
-
+            return None   # No fallback – caller must supply explicit reference
         if isinstance(value, datetime):
             return value
-
         if isinstance(value, str):
             try:
                 return datetime.fromisoformat(value)
             except ValueError:
-                debug(
-                    f"TemporalWorker: invalid reference_time={value!r}"
-                )
-
-        return datetime.now(timezone.utc)
+                debug(f"TemporalWorker: invalid reference_time={value!r}")
+                return None
+        return None
 
     def _parser_for(
         self,
@@ -303,7 +481,6 @@ class TemporalWorker(Worker):
         """
         Create a parser anchored to the supplied reference time.
         """
-
         return TemporalParser(
             reference_time=reference_time,
         )
@@ -475,7 +652,7 @@ class TemporalWorker(Worker):
         self,
         candidates: List[Tuple[int, float]],
         constraints: List[Any],
-        reference_time: datetime,
+        reference_time: Optional[datetime],
         current_session: int = 0,
     ) -> List[Tuple[int, float]]:
         debug(f"[DEBUG] _score_temporal: constraints[0].target = {constraints[0].target if constraints else 'empty'}")
@@ -545,7 +722,7 @@ class TemporalWorker(Worker):
         self,
         dt: datetime,
         constraints: List[Any],
-        reference_time: datetime,
+        reference_time: Optional[datetime],
         current_session: int = 0,
         memory_session: Optional[int] = None,
     ) -> Tuple[float, List[str]]:
@@ -554,7 +731,8 @@ class TemporalWorker(Worker):
         matched = []
 
         dt = self._normalize_datetime(dt)
-        reference_time = self._normalize_datetime(reference_time)
+        if reference_time is not None:
+            reference_time = self._normalize_datetime(reference_time)
 
         # Load configurable weights from settings with safe fallbacks
         # If settings don't have these attributes, use hardcoded defaults
@@ -672,15 +850,14 @@ class TemporalWorker(Worker):
             # --------------------------------------------------------
 
             elif relation == TemporalRelation.MOST_RECENT:
-
-                age_days = max(
-                    0.0,
-                    (reference_time - dt).total_seconds() / 86400.0,
-                )
-
-                recency = math.exp(-age_days / recency_scale)
-                score += recency * conv_boost
-                matched.append("most_recent")
+                if reference_time is not None:
+                    age_days = max(
+                        0.0,
+                        (reference_time - dt).total_seconds() / 86400.0,
+                    )
+                    recency = math.exp(-age_days / recency_scale)
+                    score += recency * conv_boost
+                    matched.append("most_recent")
 
             # --------------------------------------------------------
             # CONVERSATIONAL RECENCY
@@ -688,20 +865,20 @@ class TemporalWorker(Worker):
 
             if constraint.metadata.get("conversational"):
                 recency_level = constraint.metadata.get("recency_level")
-                age_days = max(
-                    0.0,
-                    (reference_time - dt).total_seconds() / 86400.0,
-                )
-
-                if recency_level == "very_recent" and age_days <= 2:
-                    score += conv_boost
-                    matched.append("very_recent")
-                elif recency_level == "recent" and age_days <= 7:
-                    score += conv_boost * 0.6
-                    matched.append("recent")
-                elif recency_level == "historical" and age_days > 30:
-                    score += conv_boost * 0.6
-                    matched.append("historical")
+                if reference_time is not None:
+                    age_days = max(
+                        0.0,
+                        (reference_time - dt).total_seconds() / 86400.0,
+                    )
+                    if recency_level == "very_recent" and age_days <= 2:
+                        score += conv_boost
+                        matched.append("very_recent")
+                    elif recency_level == "recent" and age_days <= 7:
+                        score += conv_boost * 0.6
+                        matched.append("recent")
+                    elif recency_level == "historical" and age_days > 30:
+                        score += conv_boost * 0.6
+                        matched.append("historical")
 
             # --------------------------------------------------------
             # FIRST / LAST - ordering constraints (not scored here)
@@ -821,9 +998,7 @@ class TemporalWorker(Worker):
             if reference_time is None:
                 reference_time = context.get("reference_time", None)
 
-        if reference_time is None:
-            reference_time = datetime.now(timezone.utc)
-
+        # No fallback to datetime.now() – rely on caller or context
         parser = self._parser_for(reference_time)
         parsed = parser.parse(query_text)
         constraints = parsed.get("constraints", [])

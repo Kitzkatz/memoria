@@ -339,17 +339,10 @@ class TemporalParser:
         """
         Configure a default temporal reference.
 
-        The default is wall-clock time for normal interactive use.
-
-        Benchmark callers should provide an explicit reference_time either
-        here or to parse().
+        IMPORTANT: No fallback to datetime.now() – callers must supply
+        a deterministic reference_time for reproducible results.
         """
-
-        self.reference_time = (
-            reference_time
-            if reference_time is not None
-            else datetime.now()
-        )
+        self.reference_time = reference_time  # may be None
 
     # ==================================================================
     # Public API
@@ -372,17 +365,16 @@ class TemporalParser:
 
                 If omitted, the parser's configured reference_time is used.
 
-                This is intentionally resolved per call so benchmark
-                adapters can supply conversation-specific reference times
-                without mutating parser state.
+                If both are None, relative expressions (today, X days ago, etc.)
+                will not be resolved to concrete datetimes.
 
         Returns:
             {
                 "expressions": List[TemporalExpression],
                 "constraints": List[TemporalConstraint],
                 "has_temporal_constraint": bool,
-                "has_session_constraint": bool,  # NEW
-                "has_conversational_recency": bool,  # NEW
+                "has_session_constraint": bool,
+                "has_conversational_recency": bool,
             }
         """
 
@@ -400,6 +392,9 @@ class TemporalParser:
             if reference_time is not None
             else self.reference_time
         )
+
+        # If ref_time is None, we will skip resolution of relative expressions.
+        # We'll still extract session constraints and explicit dates/years.
 
         expressions: List[TemporalExpression] = []
         constraints: List[TemporalConstraint] = []
@@ -490,186 +485,187 @@ class TemporalParser:
             )
 
         # --------------------------------------------------------------
-        # 3. today / yesterday / tomorrow
+        # 3. today / yesterday / tomorrow (only if ref_time is provided)
         # --------------------------------------------------------------
 
-        relative_day_values = {
-            "today": 0,
-            "yesterday": -1,
-            "tomorrow": 1,
-        }
+        if ref_time is not None:
+            relative_day_values = {
+                "today": 0,
+                "yesterday": -1,
+                "tomorrow": 1,
+            }
 
-        for match in self.RELATIVE_DAY_PATTERN.finditer(query_text):
-            word = match.group(1).lower()
+            for match in self.RELATIVE_DAY_PATTERN.finditer(query_text):
+                word = match.group(1).lower()
 
-            resolved = ref_time + timedelta(
-                days=relative_day_values[word]
-            )
-
-            expressions.append(
-                TemporalExpression(
-                    expression_type=TemporalExpressionType.RELATIVE,
-                    text=match.group(0),
-                    start=match.start(),
-                    end=match.end(),
-                    value=resolved,
-                    modifier=word,
-                    metadata={
-                        "reference_time": ref_time,
-                        "granularity": "day",
-                    },
+                resolved = ref_time + timedelta(
+                    days=relative_day_values[word]
                 )
-            )
 
-            constraints.append(
-                TemporalConstraint(
-                    relation=TemporalRelation.DURING,
-                    target=resolved,
-                    resolved=True,
-                    text=match.group(0),
-                    start=match.start(),
-                    end=match.end(),
-                    metadata={
-                        "modifier": word,
-                        "reference_time": ref_time,
-                        "granularity": "day",
-                    },
+                expressions.append(
+                    TemporalExpression(
+                        expression_type=TemporalExpressionType.RELATIVE,
+                        text=match.group(0),
+                        start=match.start(),
+                        end=match.end(),
+                        value=resolved,
+                        modifier=word,
+                        metadata={
+                            "reference_time": ref_time,
+                            "granularity": "day",
+                        },
+                    )
                 )
-            )
+
+                constraints.append(
+                    TemporalConstraint(
+                        relation=TemporalRelation.DURING,
+                        target=resolved,
+                        resolved=True,
+                        text=match.group(0),
+                        start=match.start(),
+                        end=match.end(),
+                        metadata={
+                            "modifier": word,
+                            "reference_time": ref_time,
+                            "granularity": "day",
+                        },
+                    )
+                )
 
         # --------------------------------------------------------------
-        # 4. last/next/this/past/previous/coming N units
+        # 4. last/next/this/past/previous/coming N units (only if ref_time)
         # --------------------------------------------------------------
 
-        for match in self.MODIFIER_PATTERN.finditer(query_text):
-            modifier = match.group(1).lower()
-            amount_text = match.group(2)
-            unit = match.group(3).lower()
+        if ref_time is not None:
+            for match in self.MODIFIER_PATTERN.finditer(query_text):
+                modifier = match.group(1).lower()
+                amount_text = match.group(2)
+                unit = match.group(3).lower()
 
-            amount = (
-                int(amount_text)
-                if amount_text
-                else 1
-            )
-
-            delta = self._duration(amount, unit)
-
-            if modifier in {
-                "last",
-                "previous",
-                "past",
-            }:
-                start = ref_time - delta
-                end = ref_time
-
-                relation = TemporalRelation.BETWEEN
-
-            elif modifier in {
-                "next",
-                "coming",
-            }:
-                start = ref_time
-                end = ref_time + delta
-
-                relation = TemporalRelation.BETWEEN
-
-            else:
-                # "this week/month/year".
-
-                start = ref_time - delta
-                end = ref_time + delta
-
-                relation = TemporalRelation.BETWEEN
-
-            resolved = (start, end)
-
-            expressions.append(
-                TemporalExpression(
-                    expression_type=TemporalExpressionType.RELATIVE,
-                    text=match.group(0),
-                    start=match.start(),
-                    end=match.end(),
-                    value=resolved,
-                    modifier=modifier,
-                    unit=unit,
-                    amount=amount,
-                    metadata={
-                        "reference_time": ref_time,
-                    },
+                amount = (
+                    int(amount_text)
+                    if amount_text
+                    else 1
                 )
-            )
 
-            constraints.append(
-                TemporalConstraint(
-                    relation=relation,
-                    target=start,
-                    target_end=end,
-                    resolved=True,
-                    text=match.group(0),
-                    start=match.start(),
-                    end=match.end(),
-                    metadata={
-                        "modifier": modifier,
-                        "unit": unit,
-                        "amount": amount,
-                        "reference_time": ref_time,
-                    },
+                delta = self._duration(amount, unit)
+
+                if modifier in {
+                    "last",
+                    "previous",
+                    "past",
+                }:
+                    start = ref_time - delta
+                    end = ref_time
+
+                    relation = TemporalRelation.BETWEEN
+
+                elif modifier in {
+                    "next",
+                    "coming",
+                }:
+                    start = ref_time
+                    end = ref_time + delta
+
+                    relation = TemporalRelation.BETWEEN
+
+                else:
+                    # "this week/month/year".
+                    start = ref_time - delta
+                    end = ref_time + delta
+
+                    relation = TemporalRelation.BETWEEN
+
+                resolved = (start, end)
+
+                expressions.append(
+                    TemporalExpression(
+                        expression_type=TemporalExpressionType.RELATIVE,
+                        text=match.group(0),
+                        start=match.start(),
+                        end=match.end(),
+                        value=resolved,
+                        modifier=modifier,
+                        unit=unit,
+                        amount=amount,
+                        metadata={
+                            "reference_time": ref_time,
+                        },
+                    )
                 )
-            )
+
+                constraints.append(
+                    TemporalConstraint(
+                        relation=relation,
+                        target=start,
+                        target_end=end,
+                        resolved=True,
+                        text=match.group(0),
+                        start=match.start(),
+                        end=match.end(),
+                        metadata={
+                            "modifier": modifier,
+                            "unit": unit,
+                            "amount": amount,
+                            "reference_time": ref_time,
+                        },
+                    )
+                )
+
+            # --------------------------------------------------------------
+            # 5. "3 days ago" / "2 weeks from now" (only if ref_time)
+            # --------------------------------------------------------------
+
+            for match in self.INTERVAL_PATTERN.finditer(query_text):
+                amount = int(match.group(1))
+                unit = match.group(2).lower()
+                direction = match.group(3).lower()
+
+                delta = self._duration(amount, unit)
+
+                if direction == "ago":
+                    resolved = ref_time - delta
+                    relation = TemporalRelation.BEFORE
+                else:
+                    resolved = ref_time + delta
+                    relation = TemporalRelation.AFTER
+
+                expressions.append(
+                    TemporalExpression(
+                        expression_type=TemporalExpressionType.DURATION,
+                        text=match.group(0),
+                        start=match.start(),
+                        end=match.end(),
+                        value=resolved,
+                        unit=unit,
+                        amount=amount,
+                        metadata={
+                            "direction": direction,
+                            "reference_time": ref_time,
+                        },
+                    )
+                )
+
+                constraints.append(
+                    TemporalConstraint(
+                        relation=relation,
+                        target=resolved,
+                        resolved=True,
+                        text=match.group(0),
+                        start=match.start(),
+                        end=match.end(),
+                        metadata={
+                            "amount": amount,
+                            "unit": unit,
+                            "direction": direction,
+                            "reference_time": ref_time,
+                        },
+                    )
+                )
 
         # --------------------------------------------------------------
-        # 5. "3 days ago" / "2 weeks from now"
-        # --------------------------------------------------------------
-
-        for match in self.INTERVAL_PATTERN.finditer(query_text):
-            amount = int(match.group(1))
-            unit = match.group(2).lower()
-            direction = match.group(3).lower()
-
-            delta = self._duration(amount, unit)
-
-            if direction == "ago":
-                resolved = ref_time - delta
-                relation = TemporalRelation.BEFORE
-            else:
-                resolved = ref_time + delta
-                relation = TemporalRelation.AFTER
-
-            expressions.append(
-                TemporalExpression(
-                    expression_type=TemporalExpressionType.DURATION,
-                    text=match.group(0),
-                    start=match.start(),
-                    end=match.end(),
-                    value=resolved,
-                    unit=unit,
-                    amount=amount,
-                    metadata={
-                        "direction": direction,
-                        "reference_time": ref_time,
-                    },
-                )
-            )
-
-            constraints.append(
-                TemporalConstraint(
-                    relation=relation,
-                    target=resolved,
-                    resolved=True,
-                    text=match.group(0),
-                    start=match.start(),
-                    end=match.end(),
-                    metadata={
-                        "amount": amount,
-                        "unit": unit,
-                        "direction": direction,
-                        "reference_time": ref_time,
-                    },
-                )
-            )
-
-        # --------------------------------------------------------------
-        # 6. BEFORE / AFTER / SINCE / UNTIL
+        # 6. BEFORE / AFTER / SINCE / UNTIL (do not require ref_time)
         # --------------------------------------------------------------
 
         for match in self.RELATION_PATTERN.finditer(query_text):
@@ -680,16 +676,18 @@ class TemporalParser:
                 relation_text
             )
 
-            target = self._parse_literal_temporal(
-                target_text,
-                reference_time=ref_time,
-            )
+            # Try to resolve literal temporal if ref_time is available
+            target = None
+            if ref_time is not None:
+                target = self._parse_literal_temporal(
+                    target_text,
+                    reference_time=ref_time,
+                )
 
             resolved = target is not None
 
             if not resolved:
                 # Preserve the event description for the postprocessor.
-
                 target = target_text
 
             expression_type = (
@@ -734,22 +732,24 @@ class TemporalParser:
             )
 
         # --------------------------------------------------------------
-        # 7. BETWEEN X AND Y
+        # 7. BETWEEN X AND Y (do not require ref_time for literal parsing)
         # --------------------------------------------------------------
 
         for match in self.BETWEEN_PATTERN.finditer(query_text):
             start_text = match.group(1).strip()
             end_text = match.group(2).strip()
 
-            start = self._parse_literal_temporal(
-                start_text,
-                reference_time=ref_time,
-            )
-
-            end = self._parse_literal_temporal(
-                end_text,
-                reference_time=ref_time,
-            )
+            start = None
+            end = None
+            if ref_time is not None:
+                start = self._parse_literal_temporal(
+                    start_text,
+                    reference_time=ref_time,
+                )
+                end = self._parse_literal_temporal(
+                    end_text,
+                    reference_time=ref_time,
+                )
 
             start_resolved = start is not None
             end_resolved = end is not None
@@ -800,22 +800,24 @@ class TemporalParser:
             )
 
         # --------------------------------------------------------------
-        # 8. FROM X TO Y
+        # 8. FROM X TO Y (similar)
         # --------------------------------------------------------------
 
         for match in self.RANGE_PATTERN.finditer(query_text):
             start_text = match.group(1).strip()
             end_text = match.group(2).strip()
 
-            start = self._parse_literal_temporal(
-                start_text,
-                reference_time=ref_time,
-            )
-
-            end = self._parse_literal_temporal(
-                end_text,
-                reference_time=ref_time,
-            )
+            start = None
+            end = None
+            if ref_time is not None:
+                start = self._parse_literal_temporal(
+                    start_text,
+                    reference_time=ref_time,
+                )
+                end = self._parse_literal_temporal(
+                    end_text,
+                    reference_time=ref_time,
+                )
 
             start_resolved = start is not None
             end_resolved = end is not None
@@ -1311,6 +1313,10 @@ class TemporalParser:
             else self.reference_time
         )
 
+        # If no reference time, we cannot resolve relative expressions.
+        if ref_time is None:
+            return None
+
         # --------------------------------------------------------------
         # ISO date
         # --------------------------------------------------------------
@@ -1469,7 +1475,6 @@ class TemporalParser:
 # ---------------------------------------------------------------------------
 
 
-
 def resolve_session_constraints(
     constraints: List[TemporalConstraint],
     current_session: int,
@@ -1549,6 +1554,11 @@ def resolve_session_constraints(
             )
 
             if target is not None:
+                # CRITICAL FIX: User says "session 4" (1-based), internal idx is 3 (0-based)
+                # Match the adapter's behavior exactly.
+                target = target - 1
+                if target < 0:
+                    target = 0  # clamp to first session if someone says "session 0" or "session 1"
                 resolved_constraint.target = target
                 resolved_constraint.resolved = True
                 resolved_metadata["resolved_session"] = target
@@ -1732,7 +1742,6 @@ def resolve_session_constraints(
     return resolved_constraints
 
 
-
 # ---------------------------------------------------------------------------
 # Compatibility helper
 # ---------------------------------------------------------------------------
@@ -1760,7 +1769,7 @@ def parse_with_session_context(
     current_session: int,
     total_sessions: Optional[int] = None,
     reference_time: Optional[datetime] = None,
-    all_sessions: Optional[List[int]] = None,  # <-- ADD THIS
+    all_sessions: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
     Parse temporal constraints and resolve session references.
@@ -1773,7 +1782,7 @@ def parse_with_session_context(
             result["constraints"],
             current_session,
             total_sessions,
-            all_sessions,  # <-- PASS THIS
+            all_sessions,
         )
 
     result["has_resolved_constraints"] = any(

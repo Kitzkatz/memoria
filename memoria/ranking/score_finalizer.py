@@ -18,6 +18,7 @@ class ScoreFinalizer:
         diversity_weight=None,
         attribute_weight=None,
         bm25_weight=None,
+        temporal_weight=None,
         debug=False,
         sigmoid_scale: float = 1.0,
         use_sigmoid: bool = True,
@@ -53,6 +54,11 @@ class ScoreFinalizer:
                 bm25_weight
                 if bm25_weight is not None
                 else getattr(settings, "FINALIZER_BM25", 0.10)
+            ),
+            "temporal": (  # <-- ADD THIS
+                temporal_weight
+                if temporal_weight is not None
+                else getattr(settings, "FINALIZER_TEMPORAL", 0.30)
             ),
         }
 
@@ -98,6 +104,7 @@ class ScoreFinalizer:
         use_bm25 = active_weights.get("bm25", 0.0) > 0.001
         use_attribute = active_weights.get("attribute", 0.0) > 0.001
         use_diversity = active_weights.get("diversity", 0.0) > 0.001
+        use_temporal = active_weights.get("temporal", 0.0) > 0.001  # <-- ADD THIS
 
         for candidate in candidates:
             # --------------------------------------------------
@@ -186,6 +193,22 @@ class ScoreFinalizer:
                 bm25_squashed = 0.0
 
             # --------------------------------------------------
+            # TEMPORAL (NEW)
+            # --------------------------------------------------
+
+            if use_temporal:
+                temporal = getattr(candidate, 'temporal_score', 0.0)
+                temporal_squashed = self._squash_positive(
+                    temporal,
+                    scale=2.0  # Steeper curve for temporal
+                )
+                candidate.diagnostics["temporal_raw"] = temporal
+                candidate.diagnostics["squashed_temporal"] = temporal_squashed
+            else:
+                temporal = 0.0
+                temporal_squashed = 0.0
+
+            # --------------------------------------------------
             # Final score
             # --------------------------------------------------
 
@@ -202,6 +225,8 @@ class ScoreFinalizer:
                 * active_weights["attribute"]
                 + bm25_squashed
                 * active_weights["bm25"]
+                + temporal_squashed
+                * active_weights["temporal"]  # <-- ADD THIS
             )
 
             candidate.final_score = final
@@ -258,6 +283,10 @@ class ScoreFinalizer:
                     "bm25": (
                         bm25_squashed
                         * active_weights["bm25"]
+                    ),
+                    "temporal": (  # <-- ADD THIS
+                        temporal_squashed
+                        * active_weights["temporal"]
                     ),
                 }
 

@@ -63,8 +63,12 @@ def build_response(results, limit: int = DEFAULT_RESULTS_LIMIT):
             "memory_type": candidate.memory.memory_type,
             "importance": _clean_value(candidate.memory.importance),
             "distance": _clean_value(candidate.distance),
-            "score": _clean_value(candidate.normalized_score),
+            "score": _clean_value(candidate.final_score),
             "final_score": _clean_value(candidate.final_score),
+            # ---- ADD TEMPORAL SCORE ----
+            "temporal_score": _clean_value(getattr(candidate, 'temporal_score', 0.0)),
+            "temporal_matches": _clean_value(getattr(candidate, 'temporal_matches', [])),
+            # ----------------------------
             "created_at": candidate.memory.created_at.isoformat(),
             "last_accessed": candidate.memory.last_accessed.isoformat(),
             "token_count": _clean_value(candidate.memory.token_count),

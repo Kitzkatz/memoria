@@ -47,6 +47,7 @@ class Settings(BaseModel):
     GRAPH_SEARCH_LIMIT: int = 200
     GRAPH_DEPTH: int = 3
     GRAPH_SEARCH_DEPTH: int = 1
+    QUERY_RETRIEVAL_DEADLINE_MS: int = 500   # increase from 100
 
     USE_QUERY_EXPANSION: bool = False
     SYNONYM_PATH: str = "retrieval/synonyms.json"
@@ -76,13 +77,13 @@ class Settings(BaseModel):
     # Temporal Worker
     # -------------------------
 
-    USE_TEMPORAL_WORKER: bool = True
+    USE_TEMPORAL_WORKER: bool = False
     TEMPORAL_INDEX_PATH: str = "cache/temporal_index.json"
 
     # Temporal scoring weights (for standalone temporal retrieval)
-    TEMPORAL_EXACT_MATCH_BOOST: float = 1.5
-    TEMPORAL_ADJACENT_BOOST: float = 0.8
-    TEMPORAL_RECENCY_SCALE: float = 7.0
+    TEMPORAL_EXACT_MATCH_BOOST: float = 3.0
+    TEMPORAL_ADJACENT_BOOST: float = 1.5
+    TEMPORAL_RECENCY_SCALE: float = 15.0
     TEMPORAL_CONVERSATIONAL_BOOST: float = 0.5
 
     # Temporal resolution config
@@ -207,12 +208,13 @@ class Settings(BaseModel):
     # Finalizer Weights
     # -------------------------
 
-    FINALIZER_RELEVANCE: float = 1.0
+    FINALIZER_RELEVANCE: float = 0.3
     FINALIZER_IMPORTANCE: float = 0.0
     FINALIZER_RECENCY: float = 0.0
     FINALIZER_DIVERSITY: float = 0.0
     FINALIZER_ATTRIBUTE: float = 0.0
     FINALIZER_BM25: float = 0.0
+    FINALIZER_TEMPORAL: float = 0.7
 
     # -------------------------
     # Consolidator

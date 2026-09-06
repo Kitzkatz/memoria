@@ -24,6 +24,7 @@ from system._response_builder import (
 )
 
 from blackboard.scheduler import SourceCoveragePolicy
+from temporality.temporal_parser import parse_with_session_context
 
 # ---- NEW IMPORT ----
 from routing.matrix import get_workers_for_type
@@ -35,41 +36,38 @@ RANKING_CANDIDATE_LIMIT = 200
 # ---------------------------------------------------------------------------
 # Temporal detection
 # ---------------------------------------------------------------------------
-
 def _detect_temporal(text: str) -> bool:
     temporal_keywords = [
-    # Session references (most important for LoCoMo)
-    "session", "sessions", "conv", "conversation",
-    "previous session", "next session", "last session", "first session",
-    
-    # Explicit temporal phrases (specific, not single words)
-    "sessions ago", "minutes ago", "hours ago", "days ago", "weeks ago",
-    "last week", "last month", "last time",
-    "next week", "next month", "next time",
-    "today", "yesterday", "tomorrow",
-    
-    # Relational temporal (phrases, not single words)
-    "before that", "after that", "since then", "until then",
-    "prior to", "following that", "subsequently",
-    "over the last",
-    
-    # Recency markers
-    "most recent", "latest", "newest",
-    "recently", "recent", "earlier", "later",
-    "from now", "in the past",
-    
-    # Temporal question markers
-    "when did", "when was", "when were", "what happened",
-    "how long ago", "how many times",
-    
-    # Order/sequence (phrases, not single words)
-    "eventually", "finally", "initially", "originally",
-    "consequently", "afterwards", "previously",
-]
+        # Session references (most important for LoCoMo)
+        "session", "sessions", "conv", "conversation",
+        "previous session", "next session", "last session", "first session",
+        
+        # Explicit temporal phrases
+        "sessions ago", "minutes ago", "hours ago", "days ago", "weeks ago",
+        "last week", "last month", "last time",
+        "next week", "next month", "next time",
+        "today", "yesterday", "tomorrow",
+        
+        # Relational temporal
+        "before that", "after that", "since then", "until then",
+        "prior to", "following that", "subsequently",
+        "over the last",
+        
+        # Recency markers
+        "most recent", "latest", "newest",
+        "recently", "recent", "earlier", "later",
+        "from now", "in the past",
+        
+        # Temporal question markers
+        "when did", "when was", "when were",
+        "what happened", "how long ago", "how many times",
+        
+        # Order/sequence
+        "eventually", "finally", "initially", "originally",
+        "consequently", "afterwards", "previously",
+    ]
     text_lower = text.lower()
     return any(kw in text_lower for kw in temporal_keywords)
-
-
 # ---------------------------------------------------------------------------
 # Helper: Sort candidates by retrieval score (skip ranking)
 # ---------------------------------------------------------------------------
@@ -77,22 +75,32 @@ def _detect_temporal(text: str) -> bool:
 
 def _sort_candidates_by_retrieval_score(candidates):
     """
-    Sort candidates using the score already present from the retriever/fusion.
+    Sort candidates using final_score, blending temporal with base_score.
     If base_score is not set, fall back to inverse distance.
-    Also set final_score = base_score for response builder.
     """
+    debug(f"[DEBUG] _sort_candidates_by_retrieval_score called with {len(candidates)} candidates")
+    # Load temporal weight from settings (default 0.30)
+    temporal_weight = getattr(settings, "FINALIZER_TEMPORAL", 0.30)
+    
     for c in candidates:
-        # Compute base_score if missing
+        # ---- BASE SCORE ----
         if not hasattr(c, 'base_score') or c.base_score is None:
             if c.distance is not None:
                 c.base_score = 1.0 / (1.0 + c.distance)
             else:
                 c.base_score = 0.0
-        # Ensure final_score is set to base_score
-        c.final_score = c.base_score
-    candidates.sort(key=lambda c: c.base_score, reverse=True)
+        
+        # ---- TEMPORAL BLEND ----
+        temporal_score = getattr(c, 'temporal_score', 0.0)
+        
+        if temporal_score > 0:
+            # Blend: (retrieval * (1 - temporal_weight)) + (temporal * temporal_weight)
+            c.final_score = (c.base_score * (1.0 - temporal_weight)) + (temporal_score * temporal_weight)
+        else:
+            c.final_score = c.base_score
+    
+    candidates.sort(key=lambda c: c.final_score, reverse=True)
     return candidates
-
 
 # ---------------------------------------------------------------------------
 # V4 retrieval completion policy
@@ -249,6 +257,45 @@ def _handle_query_blackboard(
     t0_retrieval = time.perf_counter()
 
     # ------------------------------------------------------------------
+    # Temporal parsing (NEW)
+    # ------------------------------------------------------------------
+
+    temporal_context = {}
+    if hasattr(system, '_temporal_context'):
+        temporal_context = system._temporal_context
+    elif hasattr(system.db, '_temporal_context'):
+        temporal_context = system.db._temporal_context
+
+    current_session = temporal_context.get("current_session", 0)
+    total_sessions = temporal_context.get("total_sessions", None)
+    reference_time = temporal_context.get("reference_time", None)
+
+    # Parse temporal constraints
+    from temporality.temporal_parser import parse_with_session_context
+    parse_result = parse_with_session_context(
+        query.text,
+        current_session=current_session,
+        total_sessions=total_sessions,
+        reference_time=reference_time,
+        all_sessions=None,  # optional: can be built from temporal index
+    )
+    query.metadata["_temporal_parse"] = parse_result
+
+    # Detect resolved session constraint
+    resolved_session = None
+    for constraint in parse_result.get("constraints", []):
+        if constraint.resolved and constraint.relation == "session":
+            resolved_session = constraint.target
+            break
+
+    allowed_ids = None
+    if resolved_session is not None and hasattr(system, 'temporal_index'):
+        # Use search_by_session to get memory IDs for that session
+        allowed_ids = system.temporal_index.search_by_session(resolved_session)
+        query.metadata["_allowed_ids"] = allowed_ids
+        debug(f"[MemorySystem] Session constraint: session {resolved_session} -> {len(allowed_ids)} memories")
+
+    # ------------------------------------------------------------------
     # Step 1: Routing
     # ------------------------------------------------------------------
 
@@ -266,18 +313,26 @@ def _handle_query_blackboard(
 
     if getattr(settings, "USE_ROUTING", True) and hasattr(system, "router") and system.router:
         route = system.router.route(memory_type_hint)
-        
+
         # ---- Base workers from config/routing ----
         base_workers = getattr(settings, "WORKERS_TO_USE", get_workers_for_type(memory_type_hint))
-        
+
         # ---- Detect temporal signals ----
         temporal_needed = _detect_temporal(query.text)
         debug(f"[MemorySystem] Temporal detected: {temporal_needed} for query: {query.text[:60]}...")
-        
+
         # ---- Build final worker list ----
-        # TEMPORAL IS A STANDALONE PATH. IF DETECTED, ONLY RUN TEMPORAL.
-        # DO NOT MIX WITH RETRIEVAL WORKERS.
-        if temporal_needed and getattr(settings, "USE_TEMPORAL_WORKER", False):
+        # If we have a hard session constraint, we don't need temporal worker.
+        if resolved_session is not None:
+            # Hard constraint: pre‑filtering, skip temporal worker.
+            workers_to_use = [w for w in base_workers if w != "temporal"]
+            if "fusion" not in workers_to_use:
+                workers_to_use = ["fusion"] + workers_to_use
+            query.metadata["_temporal_detected"] = False
+            query.metadata["_fallback_allowed"] = False
+            debug(f"[MemorySystem] Hard session constraint: workers={workers_to_use}")
+        elif temporal_needed and getattr(settings, "USE_TEMPORAL_WORKER", False):
+            # Temporal intent without hard constraint → use temporal worker standalone.
             workers_to_use = ["temporal"]
             query.metadata["_temporal_detected"] = True
             query.metadata["_fallback_allowed"] = True
@@ -286,7 +341,7 @@ def _handle_query_blackboard(
             workers_to_use = list(base_workers)
             query.metadata["_temporal_detected"] = False
             query.metadata["_fallback_allowed"] = False
-        
+
         graph_depth = route.get("graph_depth", getattr(settings, "GRAPH_DEPTH", 2))
         signals = route.get("signals", {})
         pool = route.get("pool", "memories")
@@ -300,7 +355,6 @@ def _handle_query_blackboard(
             f"depth={graph_depth}"
         )
 
-
     else:
         # ---- FALLBACK: use general fusion-aware workers ----
         workers_to_use = get_workers_for_type("general")
@@ -310,6 +364,10 @@ def _handle_query_blackboard(
         fallback_pools = []
         query.metadata["_temporal_detected"] = False
         query.metadata["_fallback_allowed"] = False
+
+    # ---- If we have a hard session constraint, ensure fusion is used ----
+    if resolved_session is not None and "fusion" not in workers_to_use:
+        workers_to_use = ["fusion"] + workers_to_use
 
     # Keep this available for future routing diagnostics without changing
     # current behavior.
@@ -526,15 +584,15 @@ def _handle_query_blackboard(
             # ----------------------------------------------------------
 
             if "faiss" in workers_to_use:
-                task_id = system.scheduler.submit(
-                    "faiss",
-                    {
-                        "vector": vec,
-                        "top_k": top_k_per_shard,
-                        "shard_id": shard_id,
-                        "num_shards": num_shards,
-                    },
-                )
+                payload = {
+                    "vector": vec,
+                    "top_k": top_k_per_shard,
+                    "shard_id": shard_id,
+                    "num_shards": num_shards,
+                }
+                if allowed_ids is not None:
+                    payload["allowed_ids"] = allowed_ids
+                task_id = system.scheduler.submit("faiss", payload)
 
                 task_ids.append(task_id)
                 task_source_map[task_id] = "faiss"
@@ -548,15 +606,15 @@ def _handle_query_blackboard(
                 system.bm25_ranker
                 and "bm25" in workers_to_use
             ):
-                task_id = system.scheduler.submit(
-                    "bm25",
-                    {
-                        "tokens": query.tokens,
-                        "limit": top_k_per_shard,
-                        "shard_id": shard_id,
-                        "num_shards": num_shards,
-                    },
-                )
+                payload = {
+                    "tokens": query.tokens,
+                    "limit": top_k_per_shard,
+                    "shard_id": shard_id,
+                    "num_shards": num_shards,
+                }
+                if allowed_ids is not None:
+                    payload["allowed_ids"] = allowed_ids
+                task_id = system.scheduler.submit("bm25", payload)
 
                 task_ids.append(task_id)
                 task_source_map[task_id] = "bm25"
@@ -578,7 +636,7 @@ def _handle_query_blackboard(
                         "shard_id": shard_id,
                         "num_shards": num_shards,
                         "depth": graph_depth,
-                    },
+                    }
                 )
 
                 task_ids.append(task_id)
@@ -601,7 +659,7 @@ def _handle_query_blackboard(
                         "limit": 100 // num_shards,
                         "shard_id": shard_id,
                         "num_shards": num_shards,
-                    },
+                    }
                 )
 
                 task_ids.append(task_id)
@@ -624,7 +682,7 @@ def _handle_query_blackboard(
                         "attribute": attribute,
                         "shard_id": shard_id,
                         "num_shards": num_shards,
-                    },
+                    }
                 )
 
                 task_ids.append(task_id)
@@ -635,44 +693,37 @@ def _handle_query_blackboard(
             # Fusion
             # ----------------------------------------------------------
             if "fusion" in workers_to_use:
-                task_id = system.scheduler.submit(
-                    "fusion",
-                    {
-                        "vector": vec,
-                        "tokens": query.tokens,
-                        "top_k": top_k_per_shard,
-                        "shard_id": shard_id,
-                        "num_shards": num_shards,
-                    }
-                )
+                payload = {
+                    "vector": vec,
+                    "tokens": query.tokens,
+                    "top_k": top_k_per_shard,
+                    "shard_id": shard_id,
+                    "num_shards": num_shards,
+                }
+                if allowed_ids is not None:
+                    payload["allowed_ids"] = allowed_ids
+                task_id = system.scheduler.submit("fusion", payload)
+
                 task_ids.append(task_id)
                 task_source_map[task_id] = "fusion"
                 submitted_sources.add("fusion")
 
             # ----------------------------------------------------------
-            # Temporal (STANDALONE)
+            # Temporal (STANDALONE) – only if no hard session constraint
             # ----------------------------------------------------------
             if "temporal" in workers_to_use:
-                # Get temporal context from system
-                temporal_context = {}
-                if hasattr(system, '_temporal_context'):
-                    temporal_context = system._temporal_context
-                elif hasattr(system.db, '_temporal_context'):
-                    temporal_context = system.db._temporal_context
-                
-                task_id = system.scheduler.submit(
-                    "temporal",
-                    {
-                        "query_text": query.text,
-                        "tokens": query.tokens,
-                        "limit": top_k_per_shard,
-                        "shard_id": shard_id,
-                        "num_shards": num_shards,
-                        "current_session": temporal_context.get("current_session", 0),
-                        "total_sessions": temporal_context.get("total_sessions", None),
-                        "reference_time": temporal_context.get("reference_time", None),
-                    }
-                )
+                payload = {
+                    "query_text": query.text,
+                    "tokens": query.tokens,
+                    "limit": top_k_per_shard,
+                    "shard_id": shard_id,
+                    "num_shards": num_shards,
+                    "current_session": current_session,
+                    "total_sessions": total_sessions,
+                    "reference_time": reference_time,
+                }
+                task_id = system.scheduler.submit("temporal", payload)
+
                 task_ids.append(task_id)
                 task_source_map[task_id] = "temporal"
                 submitted_sources.add("temporal")
@@ -938,7 +989,7 @@ def _handle_query_blackboard(
             # ---- Set base_score based on retrieval source ----
             if source == "fusion":
                 candidate.base_score = dist if dist is not None else 0.0
-            
+
             elif source == "bm25":
                 candidate.base_score = dist if dist is not None else 0.0
 
@@ -994,12 +1045,12 @@ def _handle_query_blackboard(
     # FALLBACK: If temporal returned empty, try fusion
     # This runs AFTER the main retrieval path, for BOTH cases
     # ================================================================
-    if (query.metadata.get("_temporal_detected", False) and 
+    if (query.metadata.get("_temporal_detected", False) and
         query.metadata.get("_fallback_allowed", False) and
         len(candidates) == 0):
-        
+
         debug("[MemorySystem] Temporal returned empty, falling back to fusion")
-        
+
         # Re-submit fusion task
         fusion_task_id = system.scheduler.submit(
             "fusion",
@@ -1011,7 +1062,7 @@ def _handle_query_blackboard(
                 "num_shards": 1,
             }
         )
-        
+
         fusion_policy = _build_retrieval_policy({"fusion"})
         fusion_execution = system.scheduler.execute(
             [fusion_task_id],
@@ -1019,7 +1070,7 @@ def _handle_query_blackboard(
             deadline=retrieval_deadline,
             cancel_pending=False,
         )
-        
+
         fusion_mem_ids = set()
         fusion_source_map = {}
         for result in fusion_execution.results:
@@ -1027,7 +1078,7 @@ def _handle_query_blackboard(
                 for mem_id, score in result.get("candidates", []):
                     fusion_mem_ids.add(mem_id)
                     fusion_source_map[mem_id] = ("fusion", float(score), False)
-        
+
         if fusion_mem_ids:
             fusion_rows = system.db.fetch_many(list(fusion_mem_ids))
             fallback_candidates = []
@@ -1045,7 +1096,7 @@ def _handle_query_blackboard(
                     )
                     candidate.base_score = dist if dist is not None else 0.0
                     fallback_candidates.append(candidate)
-            
+
             candidates = fallback_candidates
             debug(f"[MemorySystem] Fallback fusion returned {len(candidates)} candidates")
 
