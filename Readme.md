@@ -1,12 +1,14 @@
 # Memoria V4.5
 
 
-A more complete version of documentation can be found at https://kitzkatz.github.io/memoria/
 **Local-first, LLM-agnostic memory system with parallel hybrid retrieval, multi-signal ranking, declarative type routing, and a plugin-based architecture.**
 
 **4GB RAM · CPU-only · No cloud · No API keys required · MIT licensed**
 
 Memoria is designed as a configurable memory/retrieval substrate rather than a chatbot-specific memory implementation.
+
+A more complete version of documentation can be found at https://kitzkatz.github.io/memoria/
+
 
 ---
 
