@@ -23,6 +23,7 @@ Memoria is a configurable **memory/retrieval substrate**, not a chatbot-specific
 | Build an adapter for a new dataset | [Adapters](adapters.md) |
 | Understand how retrieval works | [Retrieval](retrieval.md) |
 | See benchmark methodology and results | [Benchmarks](benchmarks.md) |
+| Use the HTTP API | [API](api.md) |
 | Understand the architecture | [Architecture](ARCHITECTURE.md) |
 | Write a plugin | [Plugins](PLUGINS.md) |
 
@@ -31,6 +32,8 @@ Memoria is a configurable **memory/retrieval substrate**, not a chatbot-specific
 ## What It Is
 
 Memoria is a fully local memory system for LLMs and other applications that need persistent contextual retrieval.
+
+Memoria stores **raw memories**. Extraction produces indexes — entities, relationships, embeddings, importance — that annotate each raw memory. Retrieval returns the original memory, not a decomposed fragment of it.
 
 Retrieval workers can include:
 

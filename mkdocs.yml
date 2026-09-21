@@ -1,18 +1,64 @@
 site_name: Memoria
-site_description: Local-first, LLM-agnostic memory system
-site_url: https://Kitzkatz.github.io/memoria/
+site_description: Local-first, LLM-agnostic memory substrate
+site_url: https://kitzkatz.github.io/memoria/
+repo_url: https://github.com/Kitzkatz/memoria
+repo_name: Kitzkatz/memoria
+edit_uri: edit/main/docs/
 
 theme:
   name: material
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - toc.integrate
+  palette:
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
 
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
-  - Installation: installation.md
-  - Architecture: ARCHITECTURE.md
   - Configuration: configuration.md
   - Adapters: adapters.md
-  - Plugins: PLUGINS.md
   - Retrieval: retrieval.md
   - Benchmarks: benchmarks.md
-  - Contributing: CONTRIBUTING.md
+  - API: api.md
+  - Architecture: ARCHITECTURE.md
+  - Plugins: PLUGINS.md
+  - Project History & Design:
+      - Overview: 02_project_overview.md
+      - Status: 01_project_status.md
+      - Dataflow: 04_Dataflow.md
+      - Design Principles: 05_Design_Principles.md
+      - Design Intent: 07_design_intent.md
+      - Roadmap: 06_roadmap.md
+      - Release Strategy: 09_release_strategy.md
+      - Manifesto: project_manifesto.md
+  - Version History:
+      - v3: v3.md
+      - v4: v4.md
+      - v5: v5.md

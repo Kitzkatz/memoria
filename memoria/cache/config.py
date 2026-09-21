@@ -362,4 +362,4 @@ def load_from_env():
                     setattr(settings, setting_name, value)
 
 
-# load_from_env()
+ load_from_env()
