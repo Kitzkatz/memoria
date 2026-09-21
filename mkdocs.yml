@@ -1,0 +1,17 @@
+site_name: Memoria
+site_description: Local-first, LLM-agnostic memory system
+site_url: https://Kitzkatz.github.io/memoria/
+
+theme:
+  name: material
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Installation: installation.md
+  - Architecture: architecture.md
+  - Configuration: configuration.md
+  - Adapters: adapters.md
+  - Retrieval: retrieval.md
+  - Benchmarks: benchmarks.md
+  - Contributing: contributing.md
