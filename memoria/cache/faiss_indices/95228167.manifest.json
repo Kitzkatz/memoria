@@ -1,0 +1,9 @@
+{
+  "question_id": "95228167",
+  "dataset_hash": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+  "embedding_model": "memory/models/all-MiniLM-L6-v2",
+  "embedding_dimension": 384,
+  "memory_count": 507,
+  "vector_count": 507,
+  "created_at": "2026-08-28T04:30:23.145803+00:00"
+}
