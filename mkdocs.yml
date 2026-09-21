@@ -9,9 +9,10 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - Installation: installation.md
-  - Architecture: architecture.md
+  - Architecture: ARCHITECTURE.md
   - Configuration: configuration.md
   - Adapters: adapters.md
+  - Plugins: PLUGINS.md
   - Retrieval: retrieval.md
   - Benchmarks: benchmarks.md
-  - Contributing: contributing.md
+  - Contributing: CONTRIBUTING.md
