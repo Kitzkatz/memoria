@@ -37,6 +37,14 @@ class MemoryController:
     def update_goal(self, goal_id, progress=None, status=None):
         return self.goals.update_goal(goal_id, progress=progress, status=status)
 
+    def fetch(self, mem_id):
+        return self.system.db.fetch(mem_id)
+
+    def update(self, mem_id, **kwargs):
+        return self.system.db.update(mem_id, **kwargs)
+
+    def delete(self, mem_id):
+        return self.system.db.delete(mem_id)
     def list_goals(self, status=None):
         return self.goals.list_goals(status=status)
 

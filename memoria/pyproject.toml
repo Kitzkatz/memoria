@@ -18,6 +18,7 @@ dependencies = [
     "requests>=2.28.0",
     "fastapi>=0.100.0",
     "uvicorn[standard]>=0.23.0",
+    "mcp>=1.0.0",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -27,6 +28,7 @@ classifiers = [
 [project.scripts]
 memory = "cli:main"
 memory-tui = "tui:main"
+memoria-mcp = "menoria_mcp.server:main"
 
 [tool.setuptools]
 package-dir = {"" = "."}

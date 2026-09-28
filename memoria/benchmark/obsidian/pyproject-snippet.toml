@@ -1,0 +1,8 @@
+# Optional dependency if the project does not already provide YAML parsing.
+#
+# dependencies = [
+#     "PyYAML>=6.0",
+# ]
+#
+# The adapter has a small fallback parser for simple frontmatter, but PyYAML
+# is recommended for full Obsidian YAML compatibility.
