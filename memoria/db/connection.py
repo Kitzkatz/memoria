@@ -7,10 +7,10 @@ from core.logger import debug
 
 
 class DBConnection:
-    """Manages SQLite connection with WAL and proper pragmas."""
+    """Manages SQLite connection with WAL and serialized access."""
 
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.conn = sqlite3.connect(
             settings.DB_PATH,
             check_same_thread=False
@@ -18,15 +18,17 @@ class DBConnection:
         self.conn.row_factory = sqlite3.Row
 
         # WAL mode for better concurrency
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self.conn.execute("PRAGMA synchronous=NORMAL;")
+        with self.lock:
+            self.conn.execute("PRAGMA journal_mode=WAL;")
+            self.conn.execute("PRAGMA synchronous=NORMAL;")
 
         debug("[DB] Using:", os.path.abspath(settings.DB_PATH))
 
     def close(self):
         """Close the database connection."""
-        if self.conn:
-            self.conn.close()
+        with self.lock:
+            if self.conn:
+                self.conn.close()
 
     def execute(self, sql, params=None):
         """Execute a SQL statement with parameters."""
@@ -44,5 +46,11 @@ class DBConnection:
             self.conn.commit()
 
     def cursor(self):
-        """Get a cursor (use within a with block for safety)."""
-        return self.conn.cursor()
+        """
+        Get a cursor.
+
+        Callers that perform multiple operations should hold
+        ``self.lock`` around the entire operation.
+        """
+        with self.lock:
+            return self.conn.cursor()

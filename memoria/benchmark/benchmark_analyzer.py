@@ -87,14 +87,15 @@ class BenchmarkAnalyzer:
             # Build a minimal candidate list (for score analysis, we fake one if rank exists)
             candidates = []
             candidate_count = entry.get("candidate_count", 0)
+
             if expected_rank is not None and candidate_count > 0:
-                # Create a dummy candidate at the correct rank (only for analysis)
+                # Preserve rank information for result-format adapters without
+                # inventing score data that could contaminate score statistics.
                 candidates.append({
                     "rank": expected_rank,
-                    "score": 1.0,
-                    "final_score": 1.0,
+                    "synthetic": True,
                     "text": "dummy",
-                    "metadata": {}
+                    "metadata": {},
                 })
 
             record = {
@@ -128,7 +129,10 @@ class BenchmarkAnalyzer:
         # ---- Plugin hook: pre-analysis ----
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_analysis_pre(records, {})
+                self.plugin_manager.memoria_analysis_pre(
+                    records=records,
+                    context={},
+                )
             except Exception as e:
                 error(f"[Plugin] analysis_pre error: {e}", category="benchmark")
 
@@ -178,7 +182,10 @@ class BenchmarkAnalyzer:
         # ---- Plugin hook: post-analysis ----
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_analysis_post(metrics, summary)
+                self.plugin_manager.memoria_analysis_post(
+                    metrics=metrics,
+                    summary=summary,
+                )
             except Exception as e:
                 error(f"[Plugin] analysis_post error: {e}", category="benchmark")
 
@@ -254,13 +261,17 @@ class BenchmarkAnalyzer:
 
         if candidates:
             best = candidates[0]
-            metrics["final_scores"].append(best.get("final_score", 0))
 
-            score = best.get("score", 0)
-            if rank and rank <= 3:
-                metrics["top3_scores"].append(score)
-            else:
-                metrics["not_top3_scores"].append(score)
+            # Synthetic candidates contain rank information only. They must
+            # never contribute fabricated values to score statistics.
+            if not best.get("synthetic", False):
+                metrics["final_scores"].append(best.get("final_score", 0))
+
+                score = best.get("score", 0)
+                if rank and rank <= 3:
+                    metrics["top3_scores"].append(score)
+                else:
+                    metrics["not_top3_scores"].append(score)
 
         before = diagnostics.get("before_mmr", [])
         after = diagnostics.get("after_mmr", [])

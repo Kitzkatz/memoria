@@ -112,6 +112,7 @@ class MemoriaPluginManager:
             feedback,
             evaluation,
             lifecycle,
+            analysis,
         )
         self.add_hookspecs(retrieval)
         self.add_hookspecs(ranking)
@@ -123,6 +124,7 @@ class MemoriaPluginManager:
         self.add_hookspecs(feedback)
         self.add_hookspecs(evaluation)
         self.add_hookspecs(lifecycle)
+        self.add_hookspecs(analysis)
 
     def get_hook(self, name):
         """Get a hook caller by name."""

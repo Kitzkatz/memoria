@@ -40,6 +40,11 @@ class ContextBuilder:
         skipped_by_budget = 0
 
         for candidate in filtered:
+            # Enforce the memory-count cap for every candidate,
+            # including zero-token candidates.
+            if len(selected) >= self.max_memories:
+                break
+
             # Get token cost safely
             token_cost = candidate.memory.token_count
             if token_cost is None or token_cost <= 0:
@@ -49,7 +54,7 @@ class ContextBuilder:
             token_cost = int(token_cost) if token_cost else 0
 
             if token_cost == 0:
-                # Can't budget zero-token memories, but still include them
+                # Zero-token memories still count toward max_memories.
                 selected.append(candidate)
                 candidate.diagnostics["selected_reason"] = "score_budget_zero_token"
                 continue
@@ -62,9 +67,6 @@ class ContextBuilder:
             candidate.diagnostics["selected_reason"] = "score_budget"
             selected.append(candidate)
             used_tokens += token_cost
-
-            if len(selected) >= self.max_memories:
-                break
 
         if skipped_by_budget > 0:
             debug(f"[BUDGET] Skipped {skipped_by_budget} memories due to token budget")

@@ -42,7 +42,7 @@ class RetrievalEngine:
         """Get embedding from cache, falling back to vector store."""
         embedding = self.embedding_cache.get(mem_id)
         if embedding is None:
-            embedding = self.vector_store.get(mem_id)
+            embedding = self.vector_store.fetch(mem_id)
             if embedding is not None:
                 self.embedding_cache.add(mem_id, embedding)
         return embedding
@@ -69,7 +69,7 @@ class RetrievalEngine:
 
         # Batch fetch missing from vector store
         if missing_ids:
-            vectors = self.vector_store.get_many(missing_ids)
+            vectors = self.vector_store.fetch_many(missing_ids)
             for mem_id, vector in vectors.items():
                 if vector is not None:
                     self.embedding_cache.add(mem_id, vector)
@@ -101,6 +101,7 @@ class RetrievalEngine:
                 CandidateRecord(
                     memory=memory,
                     distance=float(dist),
+                    retrieval_score=1.0 / (1.0 + float(dist)),
                     embedding=embedding,
                     graph_hit=False
                 )

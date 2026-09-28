@@ -4,33 +4,54 @@ from core.logger import debug
 
 class EdgeStore:
 
-    def __init__(self, db):
+    def __init__(self, db, entity_store=None):
         self.db = db
+        self.entity_store = entity_store
+
+    def _entity_id(self, entity):
+        """
+        Resolve a public entity name to its canonical entity ID.
+
+        Graph storage uses entity IDs internally. Integer IDs are accepted
+        directly so internal graph traversal does not perform unnecessary
+        name lookups.
+        """
+        if isinstance(entity, int):
+            return entity
+
+        if self.entity_store is None:
+            return None
+
+        record = self.entity_store.find(entity)
+        return record.id if record else None
 
     def insert_edge(self, record: GraphRecord) -> bool:
         """
         Insert a single edge into the graph.
-        Returns True if inserted, False if duplicate edge already exists.
+        Returns True if inserted, False if duplicate edge exists.
         """
-        # Check for duplicate edge
-        cur = self.db.conn.cursor()
-        cur.execute(
-            """
-            SELECT id FROM graph
-            WHERE memory_id = ? AND source = ? AND relation = ? AND target = ?
-            """,
-            (
-                record.memory_id,
-                record.source,
-                record.relation,
-                record.target
-            )
-        )
-        if cur.fetchone():
-            debug(f"[EdgeStore] Duplicate edge skipped: {record.source} -{record.relation}-> {record.target}")
-            return False
-
         with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute(
+                """
+                SELECT id FROM graph
+                WHERE memory_id = ? AND source = ? AND relation = ? AND target = ?
+                """,
+                (
+                    record.memory_id,
+                    record.source,
+                    record.relation,
+                    record.target
+                )
+            )
+
+            if cur.fetchone():
+                debug(
+                    f"[EdgeStore] Duplicate edge skipped: "
+                    f"{record.source} -{record.relation}-> {record.target}"
+                )
+                return False
+
             self.db.conn.execute(
                 """
                 INSERT INTO graph
@@ -62,58 +83,88 @@ class EdgeStore:
 
     def fetch_edges(self, mem_id):
         """Fetch all edges for a memory ID."""
-        cur = self.db.conn.cursor()
-        cur.execute(
-            "SELECT * FROM graph WHERE memory_id = ?",
-            (mem_id,)
-        )
-        rows = cur.fetchall()
+        with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute(
+                "SELECT * FROM graph WHERE memory_id = ?",
+                (mem_id,)
+            )
+            rows = cur.fetchall()
+
         return [GraphRecord(**dict(row)) for row in rows]
 
-    def fetch_edges_by_entity(self, entity_name: str):
+    def fetch_edges_by_entity(self, entity):
         """
-        Fetch all edges where entity appears as source or target.
-        Args:
-            entity_name: String entity name (not ID) — graph stores source/target as TEXT
+        Fetch all edges where an entity appears as source or target.
+
+        Public callers may provide an entity name; internal callers may
+        provide the canonical entity ID.
         """
-        cur = self.db.conn.cursor()
-        cur.execute(
-            "SELECT * FROM graph WHERE source = ? OR target = ?",
-            (entity_name, entity_name)
-        )
-        rows = cur.fetchall()
+        entity_id = self._entity_id(entity)
+        if entity_id is None:
+            return []
+
+        with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute(
+                "SELECT * FROM graph WHERE source = ? OR target = ?",
+                (entity_id, entity_id)
+            )
+            rows = cur.fetchall()
+
         return [GraphRecord(**dict(row)) for row in rows]
 
     def fetch_by_relation(self, relation: str):
         """Fetch all edges with a specific relation type."""
-        cur = self.db.conn.cursor()
-        cur.execute(
-            "SELECT * FROM graph WHERE relation = ?",
-            (relation,)
-        )
-        rows = cur.fetchall()
+        with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute(
+                "SELECT * FROM graph WHERE relation = ?",
+                (relation,)
+            )
+            rows = cur.fetchall()
+
         return [GraphRecord(**dict(row)) for row in rows]
 
-    def get_memory_ids_for_entity(self, entity_name: str):
-        """Get all memory IDs associated with an entity."""
-        cur = self.db.conn.cursor()
-        cur.execute(
-            "SELECT DISTINCT memory_id FROM graph WHERE source = ? OR target = ?",
-            (entity_name, entity_name)
-        )
-        return [row["memory_id"] for row in cur.fetchall()]
+    def get_memory_ids_for_entity(self, entity):
+        """
+        Get all memory IDs associated with an entity.
+
+        Public callers may provide an entity name; internal callers may
+        provide the canonical entity ID.
+        """
+        entity_id = self._entity_id(entity)
+        if entity_id is None:
+            return []
+
+        with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute(
+                "SELECT DISTINCT memory_id FROM graph "
+                "WHERE source = ? OR target = ?",
+                (entity_id, entity_id)
+            )
+            rows = cur.fetchall()
+
+        return [row["memory_id"] for row in rows]
 
     def get_entities_for_memory(self, mem_id):
-        """Get all entities connected to a memory."""
-        cur = self.db.conn.cursor()
-        cur.execute(
-            "SELECT DISTINCT source, target FROM graph WHERE memory_id = ?",
-            (mem_id,)
-        )
+        """
+        Get all canonical entity IDs connected to a memory.
+        """
+        with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute(
+                "SELECT DISTINCT source, target FROM graph WHERE memory_id = ?",
+                (mem_id,)
+            )
+            rows = cur.fetchall()
+
         entities = set()
-        for row in cur.fetchall():
+        for row in rows:
             entities.add(row["source"])
             entities.add(row["target"])
+
         return list(entities)
 
     def delete_edges_for_memory(self, mem_id):
@@ -124,6 +175,7 @@ class EdgeStore:
                 (mem_id,)
             )
             self.db.conn.commit()
+
         debug(f"[EdgeStore] Deleted edges for memory {mem_id}")
 
     def delete_edge(self, memory_id, source, relation, target):
@@ -140,24 +192,27 @@ class EdgeStore:
 
     def count(self):
         """Return total number of edges."""
-        cur = self.db.conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM graph")
-        return cur.fetchone()[0]
+        with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM graph")
+            return cur.fetchone()[0]
 
     def stats(self) -> dict:
         """Return edge statistics."""
-        cur = self.db.conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM graph")
-        total = cur.fetchone()[0]
+        with self.db.lock:
+            cur = self.db.conn.cursor()
 
-        cur.execute("SELECT COUNT(DISTINCT memory_id) FROM graph")
-        memories = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM graph")
+            total = cur.fetchone()[0]
 
-        cur.execute("SELECT COUNT(DISTINCT source) FROM graph")
-        sources = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(DISTINCT memory_id) FROM graph")
+            memories = cur.fetchone()[0]
 
-        cur.execute("SELECT COUNT(DISTINCT target) FROM graph")
-        targets = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(DISTINCT source) FROM graph")
+            sources = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(DISTINCT target) FROM graph")
+            targets = cur.fetchone()[0]
 
         return {
             "total_edges": total,

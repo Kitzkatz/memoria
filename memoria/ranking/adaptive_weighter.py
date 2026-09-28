@@ -1,8 +1,8 @@
+
 import json
 import re
 import os
-from typing import Dict, List, Optional
-from pathlib import Path
+from typing import Dict, Optional
 
 from cache.config import settings
 from core.logger import debug
@@ -19,14 +19,20 @@ def compute_signal_deltas(benchmark_file: str) -> Dict[str, float]:
                  entity, subject, attribute, tfidf, bm25
     """
     if not os.path.exists(benchmark_file):
-        debug(f"[AdaptiveWeighter] Benchmark file not found: {benchmark_file}")
+        debug(
+            f"[AdaptiveWeighter] Benchmark file not found: "
+            f"{benchmark_file}"
+        )
         return {}
 
     try:
-        with open(benchmark_file, 'r') as f:
+        with open(benchmark_file, "r") as f:
             data = json.load(f)
     except json.JSONDecodeError as e:
-        debug(f"[AdaptiveWeighter] Invalid JSON in {benchmark_file}: {e}")
+        debug(
+            f"[AdaptiveWeighter] Invalid JSON in "
+            f"{benchmark_file}: {e}"
+        )
         return {}
 
     records = data.get("records", [])
@@ -48,12 +54,15 @@ def compute_signal_deltas(benchmark_file: str) -> Dict[str, float]:
     }
 
     count = 0
+
     for record in records:
         expected_rank = record.get("expected_rank")
+
         if expected_rank is None or expected_rank <= 3:
             continue
 
         candidates = record.get("candidates", [])
+
         if not candidates or expected_rank >= len(candidates):
             continue
 
@@ -77,19 +86,132 @@ def compute_signal_deltas(benchmark_file: str) -> Dict[str, float]:
     return deltas
 
 
-def adjust_weights(deltas: Dict[str, float], step_size: float = 0.02) -> Dict[str, float]:
+def _normalize_bounded_weights(
+    weights: Dict[str, float],
+    minimum: float = 0.01,
+    maximum: float = 0.50,
+) -> Dict[str, float]:
+    """
+    Normalize weights so they sum to 1.0 while respecting bounds.
+
+    Values outside the bounds are fixed at the relevant boundary and
+    the remaining residual is redistributed among the unfixed values.
+    A final correction is applied to eliminate accumulated floating-
+    point drift as far as Python floating-point arithmetic permits.
+    """
+    if not weights:
+        return {}
+
+    result = {
+        signal: max(minimum, min(maximum, float(value)))
+        for signal, value in weights.items()
+    }
+
+    fixed = set()
+
+    # Iteratively redistribute the residual while respecting bounds.
+    for _ in range(len(result) + 1):
+        total = sum(result.values())
+        residual = 1.0 - total
+
+        if abs(residual) <= 1e-15:
+            break
+
+        adjustable = [
+            signal
+            for signal in result
+            if signal not in fixed
+        ]
+
+        if not adjustable:
+            break
+
+        share = residual / len(adjustable)
+        changed = False
+
+        for signal in adjustable:
+            new_value = result[signal] + share
+
+            if new_value < minimum:
+                result[signal] = minimum
+                fixed.add(signal)
+                changed = True
+
+            elif new_value > maximum:
+                result[signal] = maximum
+                fixed.add(signal)
+                changed = True
+
+            else:
+                result[signal] = new_value
+
+        if not changed:
+            break
+
+    # Final correction. Apply the remaining tiny residual to a weight
+    # with enough room to absorb it without violating the bounds.
+    total = sum(result.values())
+    residual = 1.0 - total
+
+    if abs(residual) > 0.0:
+        candidates = sorted(
+            result,
+            key=lambda signal: (
+                result[signal]
+                if residual < 0
+                else -result[signal]
+            ),
+        )
+
+        for signal in candidates:
+            new_value = result[signal] + residual
+
+            if minimum <= new_value <= maximum:
+                result[signal] = new_value
+                break
+
+    # Force the final floating-point correction onto the largest
+    # available component. This keeps the returned sum at 1.0 to
+    # normal floating-point precision without changing the bounds.
+    total = sum(result.values())
+    residual = 1.0 - total
+
+    if residual != 0.0:
+        for signal in sorted(
+            result,
+            key=lambda s: result[s],
+            reverse=(residual > 0),
+        ):
+            new_value = result[signal] + residual
+
+            if minimum <= new_value <= maximum:
+                result[signal] = new_value
+                break
+
+    return result
+
+
+def adjust_weights(
+    deltas: Dict[str, float],
+    step_size: float = 0.02,
+) -> Dict[str, float]:
     """
     Adjust ranking weights based on signal deltas.
 
     CORRECT LOGIC:
-    - If delta is NEGATIVE (expected wins on this signal), INCREASE the weight
-    - If delta is POSITIVE (winner wins on this signal), DECREASE the weight
+    - If delta is NEGATIVE (expected wins on this signal), INCREASE
+      the weight.
+    - If delta is POSITIVE (winner wins on this signal), DECREASE
+      the weight.
     """
     if not deltas:
-        debug("[AdaptiveWeighter] No deltas provided, returning default weights")
+        debug(
+            "[AdaptiveWeighter] No deltas provided, "
+            "returning default weights"
+        )
         return get_default_weights()
 
-    # Get current weights from settings
+    # Get current weights from settings.
     weights = {
         "semantic": getattr(settings, "RANKING_SEMANTIC", 0.20),
         "importance": getattr(settings, "RANKING_IMPORTANCE", 0.08),
@@ -103,32 +225,40 @@ def adjust_weights(deltas: Dict[str, float], step_size: float = 0.02) -> Dict[st
         "bm25": getattr(settings, "RANKING_BM25", 0.10),
     }
 
-    valid_signals = [s for s in weights if s in deltas]
+    valid_signals = [
+        signal
+        for signal in weights
+        if signal in deltas
+    ]
+
     if not valid_signals:
-        debug("[AdaptiveWeighter] No matching signals found, returning default weights")
+        debug(
+            "[AdaptiveWeighter] No matching signals found, "
+            "returning default weights"
+        )
         return weights
 
-    # Adjust weights based on signal deltas
+    # Adjust weights based on signal deltas.
     for signal in valid_signals:
         delta = deltas[signal]
 
-        # CORRECTED LOGIC:
-        # Negative delta = expected wins = need MORE weight
-        # Positive delta = winner wins = need LESS weight
-        # Adjustment direction is inverted from before
-        adjustment = -step_size * (delta / (abs(delta) + 0.001))
-        adjustment = max(-step_size, min(step_size, adjustment))
+        # Negative delta = expected wins = need MORE weight.
+        # Positive delta = winner wins = need LESS weight.
+        adjustment = -step_size * (
+            delta / (abs(delta) + 0.001)
+        )
 
-        weights[signal] = max(0.01, min(0.50, weights[signal] + adjustment))
+        adjustment = max(
+            -step_size,
+            min(step_size, adjustment),
+        )
 
-    # Normalize to sum to 1.0
-    total = sum(weights.values())
-    for signal in weights:
-        weights[signal] /= total
+        weights[signal] += adjustment
 
-    # Clamp to reasonable bounds
-    for signal in weights:
-        weights[signal] = max(0.01, min(0.50, weights[signal]))
+    # Apply bounds and normalize together so the final result:
+    #   1. stays within [0.01, 0.50]
+    #   2. sums to 1.0
+    weights = _normalize_bounded_weights(weights)
 
     return weights
 
@@ -149,7 +279,10 @@ def get_default_weights() -> Dict[str, float]:
     }
 
 
-def print_weight_comparison(old_weights: Dict[str, float], new_weights: Dict[str, float]):
+def print_weight_comparison(
+    old_weights: Dict[str, float],
+    new_weights: Dict[str, float],
+):
     """Pretty print the weight changes."""
     print("\n[WEIGHT ADJUSTMENT]")
     print(f"{'Signal':<15} {'Old':<8} {'New':<8} {'Δ':<8}")
@@ -161,10 +294,19 @@ def print_weight_comparison(old_weights: Dict[str, float], new_weights: Dict[str
         old = old_weights.get(signal, 0.0)
         new = new_weights.get(signal, 0.0)
         delta = new - old
-        print(f"{signal:<15} {old:<8.4f} {new:<8.4f} {delta:<+8.4f}")
+
+        print(
+            f"{signal:<15} "
+            f"{old:<8.4f} "
+            f"{new:<8.4f} "
+            f"{delta:<+8.4f}"
+        )
 
 
-def save_weights_to_config(new_weights: Dict[str, float], config_path: Optional[str] = None):
+def save_weights_to_config(
+    new_weights: Dict[str, float],
+    config_path: Optional[str] = None,
+):
     """
     Update config.py with new weights.
     """
@@ -172,57 +314,101 @@ def save_weights_to_config(new_weights: Dict[str, float], config_path: Optional[
         config_path = os.path.join("cache", "config.py")
 
     if not os.path.exists(config_path):
-        debug(f"[AdaptiveWeighter] Config file not found: {config_path}")
+        debug(
+            f"[AdaptiveWeighter] Config file not found: "
+            f"{config_path}"
+        )
         return
 
     try:
-        with open(config_path, 'r') as f:
+        with open(config_path, "r") as f:
             content = f.read()
 
         backup_path = config_path + ".backup"
-        with open(backup_path, 'w') as f:
+
+        with open(backup_path, "w") as f:
             f.write(content)
-        debug(f"[AdaptiveWeighter] Backed up config to {backup_path}")
+
+        debug(
+            f"[AdaptiveWeighter] Backed up config to {backup_path}"
+        )
 
         for signal, value in new_weights.items():
-            pattern = f"RANKING_{signal.upper()}: float = [0-9.]+"
-            replacement = f"RANKING_{signal.upper()}: float = {value:.4f}"
-            content = re.sub(pattern, replacement, content)
+            pattern = (
+                f"RANKING_{signal.upper()}: float = [0-9.]+"
+            )
+            replacement = (
+                f"RANKING_{signal.upper()}: float = {value:.4f}"
+            )
+            content = re.sub(
+                pattern,
+                replacement,
+                content,
+            )
 
-            pattern2 = f"RANKING_{signal.upper()}: float=[0-9.]+"
-            replacement2 = f"RANKING_{signal.upper()}: float={value:.4f}"
-            content = re.sub(pattern2, replacement2, content)
+            pattern2 = (
+                f"RANKING_{signal.upper()}: float=[0-9.]+"
+            )
+            replacement2 = (
+                f"RANKING_{signal.upper()}: float={value:.4f}"
+            )
+            content = re.sub(
+                pattern2,
+                replacement2,
+                content,
+            )
 
-        with open(config_path, 'w') as f:
+        with open(config_path, "w") as f:
             f.write(content)
 
-        debug(f"[AdaptiveWeighter] Updated {config_path} with new weights")
+        debug(
+            f"[AdaptiveWeighter] Updated {config_path} "
+            f"with new weights"
+        )
 
     except Exception as e:
-        debug(f"[AdaptiveWeighter] Error saving weights: {e}")
+        debug(
+            f"[AdaptiveWeighter] Error saving weights: {e}"
+        )
 
 
-def adaptive_weighter_pipeline(benchmark_file: str, dry_run: bool = False, step_size: float = 0.02):
+def adaptive_weighter_pipeline(
+    benchmark_file: str,
+    dry_run: bool = False,
+    step_size: float = 0.02,
+):
     """
     Run the full adaptive weighting pipeline.
     """
     debug("[AdaptiveWeighter] Starting pipeline...")
 
     deltas = compute_signal_deltas(benchmark_file)
+
     if not deltas:
-        debug("[AdaptiveWeighter] No deltas computed, skipping")
+        debug(
+            "[AdaptiveWeighter] No deltas computed, skipping"
+        )
         return None
 
     old_weights = get_default_weights()
-    new_weights = adjust_weights(deltas, step_size=step_size)
+    new_weights = adjust_weights(
+        deltas,
+        step_size=step_size,
+    )
 
-    print_weight_comparison(old_weights, new_weights)
+    print_weight_comparison(
+        old_weights,
+        new_weights,
+    )
 
     if not dry_run:
         save_weights_to_config(new_weights)
         debug("[AdaptiveWeighter] Pipeline complete")
     else:
-        debug("[AdaptiveWeighter] Dry run complete (no changes saved)")
+        debug(
+            "[AdaptiveWeighter] Dry run complete "
+            "(no changes saved)"
+        )
 
     return {
         "old_weights": old_weights,

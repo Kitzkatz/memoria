@@ -231,7 +231,7 @@ def get_detection_weights(type_name: str) -> dict:
     
     return {
         "keyword_weight": detection.get("keyword_weight", DETECTION_WEIGHTS["keyword_match"]),
-        "exclude_penalty": detection.get("exclude_penalty", DETECTION_WEIGHTS["exclude_match"]),
+        "exclude_penalty": detection.get("exclude_penalty", abs(DETECTION_WEIGHTS["exclude_match"]),),
         "entity_boost": detection.get("boost", {}).get("entity_required", 0.2),
         "attribute_boost": detection.get("boost", {}).get("attribute_required", 0.15),
         "min_confidence": detection.get("min_confidence", 0.5),
@@ -262,7 +262,7 @@ def compute_detection_score(type_name: str, query: str, entities: list = None, a
             matched_excludes.append(ex)
     
     score = len(matched_keywords) * weights["keyword_weight"]
-    score += len(matched_excludes) * weights["exclude_penalty"]
+    score -= len(matched_excludes) * weights["exclude_penalty"]
     
     if entities and config.get("entity_required", False):
         score += weights["entity_boost"]

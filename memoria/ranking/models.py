@@ -12,6 +12,7 @@ class CandidateRecord(BaseModel):
 
     # Retrieval Signals
     distance: float
+    retrieval_score: float = 0.0
     embedding: Optional[List[float]] = None
     graph_hit: bool = False
 

@@ -118,7 +118,10 @@ class MemoryPruner:
             # If we pruned something and not dry run, rebuild the FAISS index
             if pruned_count > 0 and not dry_run:
                 debug("[MemoryPruner] Rebuilding FAISS index after pruning...")
-                self.vector_store.rebuild_from_db(self.db)
+                self.vector_store.rebuild_from_db(
+                    self.db,
+                    self.embedding_cache,
+                )
 
             elapsed = time.perf_counter() - start_time
             debug(f"[MemoryPruner] Prune scan complete: {pruned_count} pruned, {total} total, {elapsed:.2f}s")

@@ -514,7 +514,9 @@ class Scheduler:
         # ---- Plugin hook: pre-scheduler ----
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_scheduler_pre(task_ids)
+                self.plugin_manager.memoria_scheduler_pre(
+                    task_ids=task_ids,
+                )
             except Exception as e:
                 debug(f"[Plugin] scheduler_pre error: {e}")
 
@@ -660,7 +662,9 @@ class Scheduler:
         # ---- Plugin hook: post-scheduler ----
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_scheduler_post(execution_result)
+                self.plugin_manager.memoria_scheduler_post(
+                    execution_result=execution_result,
+                )
             except Exception as e:
                 debug(f"[Plugin] scheduler_post error: {e}")
 

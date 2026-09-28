@@ -46,6 +46,38 @@ class MemoryController:
     def reflect(self):
         return self.system.reflect()
 
+    def stats(self) -> dict:
+        """Return system-wide memory statistics."""
+        stats = {
+            "memory_count": self.system.db.count(),
+            "goals": len(self.list_goals()),
+        }
+
+        # Optional system components
+        vector_store = getattr(self.system, "vector_store", None)
+        if vector_store is not None:
+            try:
+                stats["vector_count"] = vector_store.count()
+            except Exception:
+                pass
+
+        embedding_cache = getattr(self.system, "embedding_cache", None)
+        if embedding_cache is not None:
+            try:
+                stats["embedding_cache"] = embedding_cache.count()
+            except Exception:
+                pass
+
+        # Optional relevance manager
+        relevance_manager = getattr(self.system, "relevance_manager", None)
+        if relevance_manager is not None:
+            try:
+                stats["relevance"] = relevance_manager.stats()
+            except Exception:
+                pass
+
+        return stats
+
     def chat(self, prompt: str, top_n=None, template=None, template_vars=None):
         """
         Chat with memory‑augmented LLM using a customizable template.
@@ -92,9 +124,13 @@ class MemoryController:
 
         # 5. Send to LLM
         reply = self.llm.chat(full_prompt)
-        print("CONTROLLER:", repr(reply))
+        
         return reply
-
+    def raw_chat(self, prompt: str) -> str:
+        """
+        Send a prompt directly to the configured LLM without retrieval.
+        """
+        return self.llm.chat(prompt)
     def _load_default_template(self):
         """Load the default template from config path."""
         template_dir = getattr(settings, "CHAT_TEMPLATE_DIR", "chat_templates")

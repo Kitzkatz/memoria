@@ -54,19 +54,19 @@ class MemoryRanker:
             # Episodic: fast decay (7 days)
             if memory_type == "episodic":
                 return math.exp(-age / 7)
-            
+
             # Code: minimal decay (730 days)
             if memory_type == "code":
                 return math.exp(-age / 730)
-            
+
             # Procedural: moderate decay (30 days)
             if memory_type == "procedural":
                 return math.exp(-age / 30)
-            
+
             # Science: moderate decay (90 days)
             if memory_type == "science":
                 return math.exp(-age / 90)
-            
+
             # Semantic: slow decay (365 days)
             if memory_type == "semantic":
                 return math.exp(-age / 365)
@@ -137,8 +137,8 @@ class MemoryRanker:
     # Semantic score
     # ---------------------------------
 
-    def semantic_score(self, distance):
-        return 1.0 / (1.0 + float(distance))
+    def semantic_score(self, retrieval_score):
+        return float(retrieval_score)
 
     def tfidf_score(self, query_tokens, memory_tokens):
         if not hasattr(self, 'tfidf_ranker') or not self.tfidf_ranker:
@@ -171,7 +171,7 @@ class MemoryRanker:
         """
         # First try: get memory type from query
         memory_type = query.metadata.get("memory_type_hint", "general")
-        
+
         # Try registry
         try:
             weights = self.signal_router.get_active_signals(memory_type)
@@ -179,7 +179,7 @@ class MemoryRanker:
                 return weights
         except Exception:
             pass
-        
+
         # Fallback: routing matrix
         routing_signals = query.metadata.get("routing_signals")
         if routing_signals and isinstance(routing_signals, dict):
@@ -188,7 +188,7 @@ class MemoryRanker:
                 if key in merged:
                     merged[key] = value
             return merged
-        
+
         return self._default_weights
 
     # ---------------------------------
@@ -209,23 +209,49 @@ class MemoryRanker:
         skip_graph = memory_type in ["semantic", "general"] or weights.get("graph_distance", 0.0) <= 0.001
 
         t_semantic = time_module.perf_counter()
-        semantic = self.semantic_score(candidate.distance)
+        semantic = self.semantic_score(candidate.retrieval_score)
         t_importance = time_module.perf_counter()
+
         importance = max(0.0, min(float(candidate.memory.importance), 1.0))
         t_recency = time_module.perf_counter()
+
         recency = self.recency_score(candidate.memory.created_at, memory_type)
         t_token = time_module.perf_counter()
+
         token = self.token_overlap(query.tokens, candidate.memory.tokens, memory_type)
         t_entity = time_module.perf_counter()
+
         entity = self.entity_overlap(query.entities, candidate.memory.entities, memory_type)
         t_tfidf = time_module.perf_counter()
-        tfidf = self.tfidf_score(query.tokens, candidate.memory.tokens) if not skip_tfidf else 0.0
+
+        tfidf = (
+            self.tfidf_score(query.tokens, candidate.memory.tokens)
+            if not skip_tfidf
+            else 0.0
+        )
+
+        # BM25 is already computed upstream by RankingPipeline and attached
+        # to the candidate. Consume that value here as the configured
+        # ranking signal.
+        t_bm25 = time_module.perf_counter()
+        bm25 = float(getattr(candidate, "bm25_score", 0.0))
+
         t_graph = time_module.perf_counter()
-        graph_dist = self.graph_distance_score(query.entities, candidate.memory.entities) if not skip_graph else 0.0
+
+        graph_dist = (
+            self.graph_distance_score(
+                query.entities,
+                candidate.memory.entities
+            )
+            if not skip_graph
+            else 0.0
+        )
+
         t_subject = time_module.perf_counter()
 
         subject = 0.0
         attribute = 0.0
+
         if candidate.memory.metadata:
             mem_subject = candidate.memory.metadata.get("subject")
             mem_attribute = candidate.memory.metadata.get("attribute")
@@ -235,20 +261,26 @@ class MemoryRanker:
             if mem_subject and query_subject:
                 if str(mem_subject).lower() == str(query_subject).lower():
                     subject = 1.0
+
             if mem_attribute and query_attribute:
                 if str(mem_attribute) == str(query_attribute):
                     attribute = 1.0
+
         t_feedback = time_module.perf_counter()
 
         auto_feedback = 0.0
         if self.feedback_loop and weights.get("feedback", 0.0) > 0:
             auto_feedback = self.feedback_loop.get_boost(candidate.memory.id)
+
         combined_feedback = max(-1.0, min(auto_feedback, 1.0))
         t_score = time_module.perf_counter()
 
         # ============================================================
         # FIX: Removed hardcoded fallback defaults, replaced with 0.0.
         # Now any signal missing from weights dict has zero effect.
+        #
+        # BM25 is included here because it is explicitly configured
+        # in the signal registry and populated by RankingPipeline.
         # ============================================================
         score = (
             semantic * weights.get("semantic", 0.0)
@@ -260,14 +292,17 @@ class MemoryRanker:
             + subject * weights.get("subject", 0.0)
             + attribute * weights.get("attribute", 0.0)
             + tfidf * weights.get("tfidf", 0.0)
+            + bm25 * weights.get("bm25", 0.0)
             + graph_dist * weights.get("graph_distance", 0.0)
         )
+
         t_end = time_module.perf_counter()
 
         candidate.semantic_score = semantic
         candidate.importance_score = importance
         candidate.recency_score = recency
         candidate.token_score = token
+        candidate.bm25_score = bm25
         candidate.base_score = score
 
         # Timing accumulation (in memory only, no file I/O)
@@ -276,7 +311,8 @@ class MemoryRanker:
         self._timing_accumulator["recency"] += (t_token - t_recency) * 1000
         self._timing_accumulator["token"] += (t_entity - t_token) * 1000
         self._timing_accumulator["entity"] += (t_tfidf - t_entity) * 1000
-        self._timing_accumulator["tfidf"] += (t_graph - t_tfidf) * 1000
+        self._timing_accumulator["tfidf"] += (t_bm25 - t_tfidf) * 1000
+        self._timing_accumulator["bm25"] += (t_graph - t_bm25) * 1000
         self._timing_accumulator["graph_distance"] += (t_subject - t_graph) * 1000
         self._timing_accumulator["subject_attribute"] += (t_feedback - t_subject) * 1000
         self._timing_accumulator["feedback"] += (t_score - t_feedback) * 1000
@@ -284,12 +320,13 @@ class MemoryRanker:
         self._timing_accumulator["total"] += (t_end - t0) * 1000
         self._candidate_count += 1
 
-        # ✅ ALWAYS store ranker signals (needed for benchmark analysis)
+        # ALWAYS store ranker signals (needed for benchmark analysis)
         candidate.diagnostics["ranker"] = {
             "semantic": semantic,
             "importance": importance,
             "recency": recency,
             "token": token,
+            "bm25": bm25,
             "feedback": combined_feedback,
             "entity": entity,
             "subject": subject,
@@ -304,6 +341,7 @@ class MemoryRanker:
         if self.enable_diagnostics:
             candidate.diagnostics["tfidf_score"] = tfidf
             candidate.diagnostics["graph_distance"] = graph_dist
+            candidate.diagnostics["bm25_score"] = bm25
             candidate.diagnostics["feedback_auto"] = auto_feedback
             candidate.diagnostics["feedback_combined"] = combined_feedback
 
@@ -328,10 +366,14 @@ class MemoryRanker:
 
         updated.sort(key=lambda x: x.base_score, reverse=True)
 
-        # ✅ Timing breakdown is kept in memory (no file I/O)
+        # Timing breakdown is kept in memory (no file I/O)
         # Access via self._timing_accumulator if needed for diagnostics
         if self._candidate_count > 0 and self.enable_diagnostics:
-            debug(f"[Ranker] {self._candidate_count} candidates in {elapsed_total:.2f}ms", category="ranking")
+            debug(
+                f"[Ranker] {self._candidate_count} candidates "
+                f"in {elapsed_total:.2f}ms",
+                category="ranking"
+            )
 
         return updated
 

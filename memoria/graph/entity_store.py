@@ -30,58 +30,61 @@ class EntityStore:
         if not normalized:
             return None
 
-        cur = self.db.conn.cursor()
+        with self.db.lock:
+            cur = self.db.conn.cursor()
 
-        # Try exact match on name first
-        cur.execute(
-            """
-            SELECT *
-            FROM entities
-            WHERE name = ?
-            """,
-            (normalized,)
-        )
-        row = cur.fetchone()
-        if row:
-            return self._row_to_record(row)
-
-        # Try alias match using json_each (SQLite JSON function)
-        try:
+            # Try exact match on name first
             cur.execute(
                 """
-                SELECT e.*
-                FROM entities e, json_each(e.aliases) as alias
-                WHERE alias.value = ?
+                SELECT *
+                FROM entities
+                WHERE name = ?
                 """,
                 (normalized,)
             )
             row = cur.fetchone()
             if row:
                 return self._row_to_record(row)
-        except Exception:
-            # Fallback to LIKE if json_each fails (older SQLite)
-            cur.execute(
-                """
-                SELECT *
-                FROM entities
-                WHERE aliases LIKE ?
-                """,
-                (f'%"{normalized}"%',)
-            )
-            row = cur.fetchone()
-            if row:
-                return self._row_to_record(row)
+
+            # Try alias match using json_each (SQLite JSON function)
+            try:
+                cur.execute(
+                    """
+                    SELECT e.*
+                    FROM entities e, json_each(e.aliases) as alias
+                    WHERE alias.value = ?
+                    """,
+                    (normalized,)
+                )
+                row = cur.fetchone()
+                if row:
+                    return self._row_to_record(row)
+            except Exception:
+                # Fallback to LIKE if json_each fails (older SQLite)
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM entities
+                    WHERE aliases LIKE ?
+                    """,
+                    (f'%"{normalized}"%',)
+                )
+                row = cur.fetchone()
+                if row:
+                    return self._row_to_record(row)
 
         return None
 
     def find_by_id(self, entity_id):
         """Find entity by ID."""
-        cur = self.db.conn.cursor()
-        cur.execute(
-            "SELECT * FROM entities WHERE id = ?",
-            (entity_id,)
-        )
-        row = cur.fetchone()
+        with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute(
+                "SELECT * FROM entities WHERE id = ?",
+                (entity_id,)
+            )
+            row = cur.fetchone()
+
         if row:
             return self._row_to_record(row)
         return None
@@ -94,6 +97,7 @@ class EntityStore:
 
         # Use provided aliases or default
         alias_list = aliases or [normalized]
+
         # Ensure normalized name is in aliases
         if normalized not in alias_list:
             alias_list.append(normalized)
@@ -123,10 +127,85 @@ class EntityStore:
 
     def get_or_create(self, name, entity_type="unknown", aliases=None):
         """Get existing entity or create new one."""
-        existing = self.find(name)
-        if existing:
-            return existing
-        return self.create(name, entity_type, aliases)
+        normalized = self.normalize(name)
+        if not normalized:
+            return None
+
+        with self.db.lock:
+            # Keep lookup + insert under the same lock.
+            cur = self.db.conn.cursor()
+
+            cur.execute(
+                """
+                SELECT *
+                FROM entities
+                WHERE name = ?
+                """,
+                (normalized,)
+            )
+            row = cur.fetchone()
+
+            if row:
+                return self._row_to_record(row)
+
+            try:
+                cur.execute(
+                    """
+                    SELECT e.*
+                    FROM entities e, json_each(e.aliases) as alias
+                    WHERE alias.value = ?
+                    """,
+                    (normalized,)
+                )
+                row = cur.fetchone()
+
+                if row:
+                    return self._row_to_record(row)
+
+            except Exception:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM entities
+                    WHERE aliases LIKE ?
+                    """,
+                    (f'%"{normalized}"%',)
+                )
+                row = cur.fetchone()
+
+                if row:
+                    return self._row_to_record(row)
+
+            alias_list = aliases or [normalized]
+            if normalized not in alias_list:
+                alias_list.append(normalized)
+
+            cur.execute(
+                """
+                INSERT INTO entities
+                (name, entity_type, aliases)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    normalized,
+                    entity_type,
+                    json.dumps(alias_list)
+                )
+            )
+            self.db.conn.commit()
+
+            entity_id = cur.lastrowid
+
+            cur.execute(
+                "SELECT * FROM entities WHERE id = ?",
+                (entity_id,)
+            )
+            row = cur.fetchone()
+
+            if row:
+                return self._row_to_record(row)
+
+        return None
 
     def add_alias(self, entity_id, alias):
         """Add an alias to an existing entity."""
@@ -187,50 +266,60 @@ class EntityStore:
 
     def list_all(self, limit=1000):
         """List all entities."""
-        cur = self.db.conn.cursor()
-        cur.execute(
-            """
-            SELECT *
-            FROM entities
-            ORDER BY id
-            LIMIT ?
-            """,
-            (limit,)
-        )
-        rows = cur.fetchall()
+        with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute(
+                """
+                SELECT *
+                FROM entities
+                ORDER BY id
+                LIMIT ?
+                """,
+                (limit,)
+            )
+            rows = cur.fetchall()
+
         return [self._row_to_record(row) for row in rows]
 
     def find_by_type(self, entity_type, limit=100):
         """Find entities by type."""
-        cur = self.db.conn.cursor()
-        cur.execute(
-            """
-            SELECT *
-            FROM entities
-            WHERE entity_type = ?
-            LIMIT ?
-            """,
-            (entity_type, limit)
-        )
-        rows = cur.fetchall()
+        with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute(
+                """
+                SELECT *
+                FROM entities
+                WHERE entity_type = ?
+                LIMIT ?
+                """,
+                (entity_type, limit)
+            )
+            rows = cur.fetchall()
+
         return [self._row_to_record(row) for row in rows]
 
     def count(self):
         """Return total number of entities."""
-        cur = self.db.conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM entities")
-        return cur.fetchone()[0]
+        with self.db.lock:
+            cur = self.db.conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM entities")
+            return cur.fetchone()[0]
 
     def stats(self):
         """Return entity statistics."""
-        cur = self.db.conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM entities")
-        total = cur.fetchone()[0]
+        with self.db.lock:
+            cur = self.db.conn.cursor()
 
-        cur.execute(
-            "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type"
-        )
-        types = {row["entity_type"]: row["COUNT(*)"] for row in cur.fetchall()}
+            cur.execute("SELECT COUNT(*) FROM entities")
+            total = cur.fetchone()[0]
+
+            cur.execute(
+                "SELECT entity_type, COUNT(*) FROM entities GROUP BY entity_type"
+            )
+            types = {
+                row["entity_type"]: row["COUNT(*)"]
+                for row in cur.fetchall()
+            }
 
         return {
             "total_entities": total,

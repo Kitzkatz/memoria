@@ -168,7 +168,9 @@ class BenchmarkRunner:
         # ---- Plugin hook: pre-run ----
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_pre_query(None)  # Placeholder for pre-benchmark
+                self.plugin_manager.memoria_pre_query(
+                    text=None,
+                )  # Placeholder for pre-benchmark
             except Exception as e:
                 error(f"[Plugin] pre-run hook error: {e}", category="benchmark")
 
@@ -294,7 +296,10 @@ class BenchmarkRunner:
         # ---- Plugin hook: post-run ----
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_post_query(None, {"results_file": outfile})
+                self.plugin_manager.memoria_post_query(
+                    text=None,
+                    response={"results_file": outfile},
+                )
             except Exception as e:
                 error(f"[Plugin] post-run hook error: {e}", category="benchmark")
 

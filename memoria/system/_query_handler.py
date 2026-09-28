@@ -46,7 +46,9 @@ def _sort_candidates_by_retrieval_score(candidates):
     for c in candidates:
         # Compute base_score if missing
         if not hasattr(c, 'base_score') or c.base_score is None:
-            if c.distance is not None:
+            if getattr(c, "retrieval_score", None) is not None:
+                c.base_score = c.retrieval_score
+            elif c.distance is not None:
                 c.base_score = 1.0 / (1.0 + c.distance)
             else:
                 c.base_score = 0.0
@@ -55,6 +57,64 @@ def _sort_candidates_by_retrieval_score(candidates):
     candidates.sort(key=lambda c: c.base_score, reverse=True)
     return candidates
 
+def _rrf_fuse_ranked(base_candidates, temporal_candidates):
+    """
+    Second-stage RRF fusion.
+
+    base_candidates:
+        Existing FAISS+BM25 Fusion results.
+
+    temporal_candidates:
+        TemporalWorker results.
+
+    Returns:
+        [(memory_id, rrf_score), ...]
+    """
+    if not base_candidates or not temporal_candidates:
+        return []
+
+    rrf_k = getattr(settings, "RRF_K", 60)
+
+    if rrf_k < 0:
+        rrf_k = 60
+
+    base_rank = {
+        int(mem_id): rank
+        for rank, (mem_id, _) in enumerate(
+            base_candidates,
+            start=1,
+        )
+    }
+
+    temporal_rank = {
+        int(mem_id): rank
+        for rank, (mem_id, _) in enumerate(
+            temporal_candidates,
+            start=1,
+        )
+    }
+
+    all_ids = set(base_rank) | set(temporal_rank)
+
+    scores = {}
+
+    for mem_id in all_ids:
+        score = 0.0
+
+        rank = base_rank.get(mem_id)
+        if rank is not None:
+            score += 1.0 / (rank + rrf_k)
+
+        rank = temporal_rank.get(mem_id)
+        if rank is not None:
+            score += 1.0 / (rank + rrf_k)
+
+        scores[mem_id] = score
+
+    return sorted(
+        scores.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
 
 # ---------------------------------------------------------------------------
 # V4 retrieval completion policy
@@ -182,13 +242,21 @@ def _handle_query_blackboard(
 ):
     """
     V4 query path using blackboard workers and scheduler completion policy.
+
+    Retrieval architecture:
+
+        FAISS + BM25 -> Fusion #1
+        Temporal     -> independent temporal rank
+
+        Fusion #1 + Temporal -> Fusion #2
+
+    Temporal is query-global and runs once alongside the first-stage
+    retrieval workers. Non-temporal queries pass through the existing
+    Fusion result unchanged.
     """
 
     # ------------------------------------------------------------------
     # Retrieval diagnostics initialized up front.
-    #
-    # This guarantees that the diagnostic contract remains valid even
-    # when the relevance pool satisfies the query and workers are skipped.
     # ------------------------------------------------------------------
 
     execution = None
@@ -203,9 +271,6 @@ def _handle_query_blackboard(
 
     # ------------------------------------------------------------------
     # Retrieval boundary
-    #
-    # Everything from routing through candidate construction/type
-    # filtering belongs to the V4 retrieval section.
     # ------------------------------------------------------------------
 
     t0_retrieval = time.perf_counter()
@@ -222,15 +287,31 @@ def _handle_query_blackboard(
     # ---- Plugin hook: pre-routing ----
     if system.plugin_manager:
         try:
-            system.plugin_manager.memoria_routing_pre(query, memory_type_hint)
+            system.plugin_manager.memoria_routing_pre(
+                query=query,
+                memory_type_hint=memory_type_hint,
+            )
         except Exception as e:
             debug(f"[Plugin] routing_pre error: {e}")
 
-    if getattr(settings, "USE_ROUTING", True) and hasattr(system, "router") and system.router:
+    if (
+        getattr(settings, "USE_ROUTING", True)
+        and hasattr(system, "router")
+        and system.router
+    ):
         route = system.router.route(memory_type_hint)
+
         # ---- USE FUSION-AWARE WORKER LIST ----
-        workers_to_use = getattr(settings, "WORKERS_TO_USE", get_workers_for_type(memory_type_hint))
-        graph_depth = route.get("graph_depth", getattr(settings, "GRAPH_DEPTH", 2))
+        workers_to_use = getattr(
+            settings,
+            "WORKERS_TO_USE",
+            get_workers_for_type(memory_type_hint),
+        )
+
+        graph_depth = route.get(
+            "graph_depth",
+            getattr(settings, "GRAPH_DEPTH", 2),
+        )
         signals = route.get("signals", {})
         pool = route.get("pool", "memories")
         fallback_pools = route.get("fallback_pools", [])
@@ -245,7 +326,11 @@ def _handle_query_blackboard(
     else:
         # ---- FALLBACK: use general fusion-aware workers ----
         workers_to_use = get_workers_for_type("general")
-        graph_depth = getattr(settings, "GRAPH_DEPTH", 2)
+        graph_depth = getattr(
+            settings,
+            "GRAPH_DEPTH",
+            2,
+        )
         signals = {}
         pool = "memories"
         fallback_pools = []
@@ -264,7 +349,10 @@ def _handle_query_blackboard(
                 "pool": pool,
                 "fallback_pools": fallback_pools,
             }
-            system.plugin_manager.memoria_routing_post(route_info)
+
+            system.plugin_manager.memoria_routing_post(
+                route=route_info,
+            )
         except Exception as e:
             debug(f"[Plugin] routing_post error: {e}")
 
@@ -303,7 +391,7 @@ def _handle_query_blackboard(
 
                     embedding = (
                         system.embedding_cache.get(mem_id)
-                        or system.vector_store.get(mem_id)
+                        or system.vector_store.fetch(mem_id)
                     )
 
                     relevance_candidates.append(
@@ -347,7 +435,7 @@ def _handle_query_blackboard(
 
                     embedding = (
                         system.embedding_cache.get(row["id"])
-                        or system.vector_store.get(row["id"])
+                        or system.vector_store.fetch(row["id"])
                     )
 
                     relevance_candidates.append(
@@ -377,18 +465,27 @@ def _handle_query_blackboard(
         )
 
         # No workers were submitted, so skip scheduler hooks.
-        # We still call pre/post retrieval hooks to allow plugins to modify candidates.
+        # We still call pre/post retrieval hooks to allow plugins to
+        # modify candidates.
+
         # ---- Plugin hook: pre-retrieval (with empty list) ----
         if system.plugin_manager:
             try:
-                system.plugin_manager.memoria_retrieval_pre(query, [])
+                system.plugin_manager.memoria_retrieval_pre(
+                    query=query,
+                    candidates=[],
+                )
             except Exception as e:
                 debug(f"[Plugin] retrieval_pre error: {e}")
 
         # ---- Plugin hook: post-retrieval ----
         if system.plugin_manager:
             try:
-                system.plugin_manager.memoria_retrieval_post(query, candidates)
+                system.plugin_manager.memoria_retrieval_post(
+                    query=query,
+                    candidates=candidates,
+                    results=candidates,
+                )
             except Exception as e:
                 debug(f"[Plugin] retrieval_post error: {e}")
 
@@ -434,6 +531,12 @@ def _handle_query_blackboard(
         # --------------------------------------------------------------
 
         task_ids = []
+
+        # First-stage Fusion results and independent Temporal results.
+        fusion_candidates = []
+        temporal_candidates = []
+        temporal_active = False
+        final_fusion_ids = []
 
         top_k_per_shard = getattr(
             settings,
@@ -573,8 +676,9 @@ def _handle_query_blackboard(
                 submitted_sources.add("attribute")
 
             # ----------------------------------------------------------
-            # Fusion
+            # First-stage Fusion
             # ----------------------------------------------------------
+
             if "fusion" in workers_to_use:
                 task_id = system.scheduler.submit(
                     "fusion",
@@ -584,14 +688,45 @@ def _handle_query_blackboard(
                         "top_k": top_k_per_shard,
                         "shard_id": shard_id,
                         "num_shards": num_shards,
-                    }
+                    },
                 )
+
                 task_ids.append(task_id)
                 task_source_map[task_id] = "fusion"
                 submitted_sources.add("fusion")
 
-        debug(f"[Fusion] task_ids: {task_ids}")
-        debug(f"[Fusion] submitted_sources: {submitted_sources}")
+        # --------------------------------------------------------------
+        # Temporal
+        #
+        # Temporal is query-global, not shard-local.
+        # Submit exactly once, alongside the first-stage retrieval.
+        # --------------------------------------------------------------
+
+        if getattr(
+            settings,
+            "USE_TEMPORAL_WORKER",
+            False,
+        ):
+            task_id = system.scheduler.submit(
+                "temporal",
+                {
+                    "query": text,
+                    "top_k": top_k_per_shard * num_shards,
+                },
+            )
+
+            task_ids.append(task_id)
+            task_source_map[task_id] = "temporal"
+            submitted_sources.add("temporal")
+
+        debug(
+            f"[Fusion] task_ids: {task_ids}"
+        )
+
+        debug(
+            f"[Fusion] submitted_sources: "
+            f"{submitted_sources}"
+        )
 
         debug(
             f"[MemorySystem] Submitted retrieval sources: "
@@ -601,7 +736,9 @@ def _handle_query_blackboard(
         # ---- Plugin hook: pre-scheduler ----
         if system.plugin_manager:
             try:
-                system.plugin_manager.memoria_scheduler_pre(task_ids)
+                system.plugin_manager.memoria_scheduler_pre(
+                    task_ids=task_ids,
+                )
             except Exception as e:
                 debug(f"[Plugin] scheduler_pre error: {e}")
 
@@ -618,7 +755,7 @@ def _handle_query_blackboard(
         retrieval_deadline_ms = getattr(
             settings,
             "QUERY_RETRIEVAL_DEADLINE_MS",
-            100,
+            125,
         )
 
         retrieval_deadline = (
@@ -653,7 +790,9 @@ def _handle_query_blackboard(
         # ---- Plugin hook: post-scheduler ----
         if system.plugin_manager:
             try:
-                system.plugin_manager.memoria_scheduler_post(execution)
+                system.plugin_manager.memoria_scheduler_post(
+                    execution_result=execution,
+                )
             except Exception as e:
                 debug(f"[Plugin] scheduler_post error: {e}")
 
@@ -720,7 +859,8 @@ def _handle_query_blackboard(
             elif source == "bm25":
                 for mem_id, score in result_candidates:
                     mem_ids.add(mem_id)
-                    # Use raw BM25 score directly (higher is better)
+
+                    # Use raw BM25 score directly (higher is better).
                     source_map[mem_id] = (
                         "bm25",
                         float(score),
@@ -756,15 +896,103 @@ def _handle_query_blackboard(
                         float(dist),
                         False,
                     )
+
             elif source == "fusion":
                 for mem_id, score in result_candidates:
+                    mem_id = int(mem_id)
+                    score = float(score)
+
                     mem_ids.add(mem_id)
-                    source_map[mem_id] = ("fusion", float(score), False)
+
+                    fusion_candidates.append(
+                        (mem_id, score)
+                    )
+
+                    source_map[mem_id] = (
+                        "fusion",
+                        score,
+                        False,
+                    )
+
+            elif source == "temporal":
+                temporal_active = bool(
+                    result.get("active", False)
+                )
+
+                if temporal_active:
+                    for mem_id, score in result_candidates:
+                        mem_id = int(mem_id)
+                        score = float(score)
+
+                        mem_ids.add(mem_id)
+
+                        temporal_candidates.append(
+                            (mem_id, score)
+                        )
+
+        # --------------------------------------------------------------
+        # Step 7b: Second-stage Fusion
+        #
+        # Existing Fusion already performs:
+        #
+        #     FAISS + BM25 -> Fusion #1
+        #
+        # Temporal is independently ranked:
+        #
+        #     query -> Temporal
+        #
+        # Then:
+        #
+        #     Fusion #1 + Temporal -> Fusion #2
+        #
+        # Non-temporal queries leave the existing Fusion ordering
+        # completely untouched.
+        # --------------------------------------------------------------
+
+        if (
+            temporal_active
+            and fusion_candidates
+            and temporal_candidates
+        ):
+            final_fusion = _rrf_fuse_ranked(
+                fusion_candidates,
+                temporal_candidates,
+            )
+
+            final_fusion_ids = [
+                mem_id
+                for mem_id, _ in final_fusion
+            ]
+
+            for mem_id, score in final_fusion:
+                mem_ids.add(mem_id)
+
+                source_map[mem_id] = (
+                    "fusion",
+                    float(score),
+                    False,
+                )
+
+            debug(
+                f"[TemporalFusion] "
+                f"base={len(fusion_candidates)}, "
+                f"temporal={len(temporal_candidates)}, "
+                f"final={len(final_fusion)}"
+            )
+
+        elif temporal_active:
+            debug(
+                "[TemporalFusion] Temporal active but "
+                "base Fusion or temporal candidates were unavailable"
+            )
 
         # ---- Plugin hook: pre-retrieval ----
         if system.plugin_manager:
             try:
-                system.plugin_manager.memoria_retrieval_pre(query, list(mem_ids))
+                system.plugin_manager.memoria_retrieval_pre(
+                    query=query,
+                    candidates=list(mem_ids),
+                )
             except Exception as e:
                 debug(f"[Plugin] retrieval_pre error: {e}")
 
@@ -772,7 +1000,19 @@ def _handle_query_blackboard(
         # Step 8: Cap candidates BEFORE DB fetch
         # --------------------------------------------------------------
 
-        mem_id_list = list(mem_ids)
+        if final_fusion_ids:
+            seen_ids = set(final_fusion_ids)
+
+            mem_id_list = (
+                final_fusion_ids
+                + [
+                    mem_id
+                    for mem_id in mem_ids
+                    if mem_id not in seen_ids
+                ]
+            )
+        else:
+            mem_id_list = list(mem_ids)
 
         original_count = len(mem_id_list)
 
@@ -831,10 +1071,10 @@ def _handle_query_blackboard(
 
             embedding = (
                 system.embedding_cache.get(mem_id)
-                or system.vector_store.get(mem_id)
+                or system.vector_store.fetch(mem_id)
             )
 
-            # Create candidate
+            # Create candidate.
             candidate = CandidateRecord(
                 memory=memory,
                 distance=dist,
@@ -842,18 +1082,41 @@ def _handle_query_blackboard(
                 graph_hit=graph_hit,
             )
 
-            # ---- Set base_score based on retrieval source ----
             if source == "fusion":
-                # dist is already a similarity score from fusion worker
-                candidate.base_score = dist if dist is not None else 0.0
+                candidate.retrieval_score = (
+                    dist
+                    if dist is not None
+                    else 0.0
+                )
+                candidate.base_score = (
+                    candidate.retrieval_score
+                )
+
             elif source == "faiss":
-                # Convert distance to similarity (lower distance = higher similarity)
-                candidate.base_score = 1.0 / (1.0 + dist) if dist is not None else 0.0
+                candidate.retrieval_score = (
+                    1.0 / (1.0 + dist)
+                    if dist is not None
+                    else 0.0
+                )
+                candidate.base_score = (
+                    candidate.retrieval_score
+                )
+
             elif source == "bm25":
-                # dist is already inverted (1/(score+epsilon)) in source_map
-                candidate.base_score = dist if dist is not None else 0.0
+                candidate.bm25_score = (
+                    dist
+                    if dist is not None
+                    else 0.0
+                )
+                candidate.retrieval_score = (
+                    candidate.bm25_score
+                )
+                candidate.base_score = (
+                    candidate.retrieval_score
+                )
+
             else:
-                # For graph, attribute, phrase – auxiliary, set to 0
+                candidate.retrieval_score = 0.0
                 candidate.base_score = 0.0
 
             worker_candidates.append(candidate)
@@ -890,42 +1153,83 @@ def _handle_query_blackboard(
         # ---- Plugin hook: post-retrieval ----
         if system.plugin_manager:
             try:
-                system.plugin_manager.memoria_retrieval_post(query, candidates)
+                system.plugin_manager.memoria_retrieval_post(
+                    query=query,
+                    candidates=candidates,
+                    results=candidates,
+                )
             except Exception as e:
                 debug(f"[Plugin] retrieval_post error: {e}")
 
     # ==================================================================
     # CROSS-ENCODER RERANKER (optional, configurable)
     # ==================================================================
-    if getattr(settings, "USE_CROSS_ENCODER", False) and len(candidates) > 1:
+    if (
+        getattr(settings, "USE_CROSS_ENCODER", False)
+        and len(candidates) > 1
+    ):
         try:
             from sentence_transformers import CrossEncoder
             import os
 
-            ce_path = getattr(settings, "CROSS_ENCODER_MODEL_PATH", "memory/models/cross-encoder")
-            top_k = getattr(settings, "CROSS_ENCODER_TOP_K", 100)
+            ce_path = getattr(
+                settings,
+                "CROSS_ENCODER_MODEL_PATH",
+                "memory/models/cross-encoder",
+            )
 
-            # Load the model from local path
+            top_k = getattr(
+                settings,
+                "CROSS_ENCODER_TOP_K",
+                100,
+            )
+
+            # Load the model from local path.
             ce = CrossEncoder(ce_path)
+
             top_candidates = candidates[:top_k]
-            pairs = [[query.text, c.memory.text] for c in top_candidates]
+
+            pairs = [
+                [query.text, c.memory.text]
+                for c in top_candidates
+            ]
+
             ce_scores = ce.predict(pairs)
 
-            for c, score in zip(top_candidates, ce_scores):
+            for c, score in zip(
+                top_candidates,
+                ce_scores,
+            ):
                 c.base_score = float(score)
-                c.final_score = float(score)  # also set final_score
+                c.final_score = float(score)
 
-            # Re-sort the top candidates by CE score
-            top_candidates.sort(key=lambda c: c.base_score, reverse=True)
+            # Re-sort the top candidates by CE score.
+            top_candidates.sort(
+                key=lambda c: c.base_score,
+                reverse=True,
+            )
 
-            # Merge back: top candidates first, then the rest
-            candidates = top_candidates + candidates[top_k:]
+            # Merge back: top candidates first, then the rest.
+            candidates = (
+                top_candidates
+                + candidates[top_k:]
+            )
 
-            debug(f"[Cross-Encoder] Reranked {len(top_candidates)} candidates")
+            debug(
+                f"[Cross-Encoder] "
+                f"Reranked {len(top_candidates)} candidates"
+            )
+
         except ImportError:
-            debug("[Cross-Encoder] sentence_transformers not installed. Skipping.")
+            debug(
+                "[Cross-Encoder] "
+                "sentence_transformers not installed. Skipping."
+            )
+
         except Exception as e:
-            debug(f"[Cross-Encoder] Error: {e}. Skipping.")
+            debug(
+                f"[Cross-Encoder] Error: {e}. Skipping."
+            )
 
     # ------------------------------------------------------------------
     # Step 10: Pass routing signals
@@ -980,17 +1284,26 @@ def _handle_query_blackboard(
 
     t_rank = time.perf_counter()
 
-    if getattr(settings, "RANKING_ENABLED", True):
-        # Full ranking pipeline
+    if getattr(
+        settings,
+        "RANKING_ENABLED",
+        True,
+    ):
+        # Full ranking pipeline.
         results, ranking_diag = system.pipeline.run(
             query,
             candidates,
         )
+
     else:
-        # Retrieval-only: use existing scores from retriever/fusion
-        # Sort candidates by base_score (or fallback to distance inverse)
-        results = _sort_candidates_by_retrieval_score(candidates)
-        ranking_diag = {"ranking_skipped": True}
+        # Retrieval-only: use existing scores from retriever/fusion.
+        results = _sort_candidates_by_retrieval_score(
+            candidates
+        )
+
+        ranking_diag = {
+            "ranking_skipped": True
+        }
 
     ranking_ms = (
         time.perf_counter() - t_rank
@@ -1022,14 +1335,6 @@ def _handle_query_blackboard(
         response,
     )
 
-    if response:
-        top_result = response[0]
-
-        system.feedback.record_click(
-            top_result["id"],
-            text,
-        )
-
     feedback_ms = (
         time.perf_counter() - t_feedback
     ) * 1000
@@ -1041,12 +1346,17 @@ def _handle_query_blackboard(
     t_auto_store = time.perf_counter()
     auto_store_stored = 0
 
-    if hasattr(system, "auto_store") and system.auto_store:
+    if (
+        hasattr(system, "auto_store")
+        and system.auto_store
+    ):
         if settings.AUTO_STORE_MEMORIES:
-            auto_store_stored = system.auto_store.process_results(
-                text,
-                response,
-                memory_type_hint or "chat"
+            auto_store_stored = (
+                system.auto_store.process_results(
+                    text,
+                    response,
+                    memory_type_hint or "chat",
+                )
             )
 
     auto_store_ms = (
@@ -1160,7 +1470,7 @@ def _handle_query_blackboard(
                 3,
             ),
 
-            # New source-level scheduler diagnostics.
+            # Source-level scheduler diagnostics.
             "retrieval_submitted_sources": sorted(
                 submitted_sources
             ),
@@ -1174,14 +1484,28 @@ def _handle_query_blackboard(
                 failed_sources
             ),
 
+            # Temporal diagnostics.
+            "temporal_active": temporal_active,
+            "temporal_candidate_count": len(
+                temporal_candidates
+            ),
+            "temporal_fusion_applied": bool(
+                temporal_active
+                and fusion_candidates
+                and temporal_candidates
+            ),
+
             # Auto-store diagnostics.
             "auto_store_stored": auto_store_stored,
 
-            # Indicate if ranking was skipped
-            "ranking_skipped": not getattr(settings, "RANKING_ENABLED", True),
+            # Indicate if ranking was skipped.
+            "ranking_skipped": not getattr(
+                settings,
+                "RANKING_ENABLED",
+                True,
+            ),
         },
     }
-
 
 # ---------------------------------------------------------------------------
 # V3 fallback
@@ -1309,13 +1633,7 @@ def _handle_query_v3_fallback(
         response,
     )
 
-    if response:
-        top_result = response[0]
-
-        system.feedback.record_click(
-            top_result["id"],
-            text,
-        )
+    
 
     feedback_ms = (
         time.perf_counter() - t_feedback

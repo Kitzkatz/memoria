@@ -13,30 +13,7 @@ import os
 class Settings(BaseModel):
     """Main configuration class for the Memory Daemon."""
 
-    # -------------------------
-    # Paths
-    # -------------------------
-
-    DB_PATH: str = "memory.db"
-    VECTOR_INDEX_PATH: str = "memory.index"
-    CACHE_PATH: str = "cache/embedding_cache.pkl"
-
-    # -------------------------
-    # Models
-    # -------------------------
-
-    EMBEDDING_MODEL: str = "memory/models/all-MiniLM-L6-v2"
-    CHAT_TEMPLATE_DIR: str = "chat_templates"
-    CHAT_TEMPLATE_FILE: str = "llama3.txt"
-    VECTOR_DIM: int = 384
-    CHAT_MODEL: str = "mistral"
-    LLM_URL: str = "http://localhost:8080"
-    LLM_ENDPOINT: str = "/v1/completions"
-    LLM_MAX_TOKENS: int = 256
-    LLM_TEMPERATURE: float = 0.7
-    LLM_TIMEOUT: int = 600
-    LLM_STOP_TOKENS: List[str] = Field(default_factory=lambda: ["<|eot_id|>"])
-
+    
     # -------------------------
     # Paths
     # -------------------------
@@ -83,6 +60,8 @@ class Settings(BaseModel):
     USE_PHRASE_SEARCH: bool = True
     USE_BM25: bool = True
     USE_FUSION: bool = True
+    USE_FUSION: bool = True
+    USE_TEMPORAL_WORKER: bool = False
     # FIX (2026-08-24): Rolled back to neutral 0.5. Your upstream retriever was starving.
     FUSION_SEMANTIC_WEIGHT: float = 0.5
     # CRITICAL FIX: The benchmark IGNORED this flag last time and forced MMR ON.
@@ -92,6 +71,7 @@ class Settings(BaseModel):
     MMR_ENABLED: bool = False
     USE_BLACKBOARD: bool = True
     USE_CASE_FOLDING: bool = True
+    
 
     # -------------------------
     # Retrieval Workers
@@ -362,4 +342,4 @@ def load_from_env():
                     setattr(settings, setting_name, value)
 
 
- load_from_env()
+load_from_env()

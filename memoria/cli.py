@@ -237,7 +237,7 @@ def main():
         p_signals.add_argument("--enable", action="store_true", help="Enable signal")
         p_signals.add_argument("--disable", action="store_true", help="Disable signal")
         p_signals.add_argument("--export", type=str, help="Export registry to JSON")
-        p_signals.add_argument("--import", type=str, help="Import registry from JSON")
+        p_signals.add_argument("--import", dest="import_file", type=str, help="Import registry from JSON")
         p_signals.add_argument("--reset", action="store_true", help="Reset registry to defaults")
 
     # ---- query-history (NEW) ----

@@ -84,7 +84,11 @@ class PDFWorker:
         Returns:
             Number of chunks ingested
         """
-        chunks = self.extract_text(filepath, page_limit=max_pages, min_text_length=min_text_length)
+        chunks = self.extract_text(
+            filepath,
+            page_limit=max_pages,
+            min_text_length=min_text_length
+        )
 
         if not chunks:
             return 0
@@ -120,13 +124,24 @@ class PDFWorker:
         self,
         filepath: str,
         max_pages: int = 100,
-        chunk_size: int = 1000  # characters per chunk
+        chunk_size: int = 1000,
+        min_text_length: int = 50
     ) -> int:
         """
         Ingest a PDF with page-level chunking into smaller pieces.
         Useful for long pages that exceed token limits.
+
+        Args:
+            filepath: Path to PDF file
+            max_pages: Maximum number of pages to ingest
+            chunk_size: Maximum target size for each chunk in characters
+            min_text_length: Minimum text length for extracted pages/chunks
         """
-        chunks = self.extract_text(filepath, page_limit=max_pages)
+        chunks = self.extract_text(
+            filepath,
+            page_limit=max_pages,
+            min_text_length=min_text_length
+        )
 
         if not chunks:
             return 0
@@ -153,7 +168,7 @@ class PDFWorker:
                     sub_chunks.append(" ".join(current))
 
                 for sub_text in sub_chunks:
-                    if len(sub_text.strip()) >= 50:
+                    if len(sub_text.strip()) >= min_text_length:
                         self.memory.store(
                             sub_text,
                             memory_type="semantic",
@@ -165,16 +180,17 @@ class PDFWorker:
                         )
                         total_ingested += 1
             else:
-                self.memory.store(
-                    text,
-                    memory_type="semantic",
-                    metadata={
-                        "source_file": chunk["source_file"],
-                        "page": chunk["page"],
-                        "type": "pdf"
-                    }
-                )
-                total_ingested += 1
+                if len(text.strip()) >= min_text_length:
+                    self.memory.store(
+                        text,
+                        memory_type="semantic",
+                        metadata={
+                            "source_file": chunk["source_file"],
+                            "page": chunk["page"],
+                            "type": "pdf"
+                        }
+                    )
+                    total_ingested += 1
 
         debug(f"[PDFWorker] Complete: {total_ingested} chunks ingested from {filepath}")
         return total_ingested

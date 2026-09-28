@@ -304,7 +304,7 @@ class EmbeddingCache:
 
             for row in rows:
                 mem_id = row["id"]
-                vector = vector_store.get(mem_id)
+                vector = vector_store.fetch(mem_id)
                 if vector is not None:
                     self._cache[mem_id] = vector
 

@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+import sqlite3
 
 from core.logger import debug
 
@@ -304,7 +305,6 @@ def search_attribute(conn, subject, attribute):
 
 
 def update(conn, mem_id, **kwargs):
-    """Update a memory record."""
     allowed = {
         "text",
         "normalized_text",
@@ -315,53 +315,122 @@ def update(conn, mem_id, **kwargs):
         "metadata",
         "entities",
         "relationships",
-        "last_accessed"
+        "last_accessed",
     }
 
     fields = []
     values = []
 
-    for k, v in kwargs.items():
-        if k not in allowed:
-            continue
-
-        fields.append(f"{k}=?")
-
-        if k == "tokens":
-            values.append(json.dumps(v or []))
-        elif k == "metadata":
-            values.append(json.dumps(v or {}))
-        elif k == "entities":
-            values.append(json.dumps(v or []))
-        elif k == "relationships":
-            values.append(json.dumps(v or []))
-        else:
-            values.append(json.dumps(v) if isinstance(v, (dict, list)) else v)
+    for key, value in kwargs.items():
+        if key in allowed:
+            fields.append(f"{key}=?")
+            values.append(value)
 
     if not fields:
         return
 
-    values.append(mem_id)
-
-    query = f"""
-        UPDATE memories
-        SET {", ".join(fields)}
-        WHERE id=?
-    """
+    mem_id = int(mem_id)
 
     with conn:
-        conn.execute(query, values)
+        # Get the current type before the update so we can move the
+        # shadow row if memory_type changes.
+        row = conn.execute(
+            "SELECT memory_type FROM memories WHERE id=?",
+            (mem_id,),
+        ).fetchone()
 
+        if row is None:
+            return
+
+        old_type = row[0] or "general"
+        new_type = kwargs.get("memory_type", old_type) or "general"
+
+        # Update the canonical row.
+        conn.execute(
+            f"""
+            UPDATE memories
+            SET {", ".join(fields)}
+            WHERE id=?
+            """,
+            values + [mem_id],
+        )
+
+        # If the memory changed type, move its shadow row.
+        if old_type != new_type:
+            if old_type != "general":
+                old_table = f"memories_{old_type}"
+                conn.execute(
+                    f"DELETE FROM {old_table} WHERE id=?",
+                    (mem_id,),
+                )
+
+            if new_type != "general":
+                new_table = f"memories_{new_type}"
+
+                conn.execute(
+                    f"""
+                    INSERT OR REPLACE INTO {new_table} (
+                        id, text, normalized_text, tokens, token_count,
+                        memory_type, metadata, entities, relationships,
+                        importance, created_at, last_accessed, tombstone
+                    )
+                    SELECT
+                        id, text, normalized_text, tokens, token_count,
+                        memory_type, metadata, entities, relationships,
+                        importance, created_at, last_accessed, tombstone
+                    FROM memories
+                    WHERE id=?
+                    """,
+                    (mem_id,),
+                )
+
+        # Same type: keep the existing shadow row synchronized.
+        elif new_type != "general":
+            table = f"memories_{new_type}"
+
+            conn.execute(
+                f"""
+                UPDATE {table}
+                SET {", ".join(fields)}
+                WHERE id=?
+                """,
+                values + [mem_id],
+            )
 
 def delete(conn, mem_id):
-    """Soft delete a memory."""
+    """Soft delete a memory and its type-specific shadow row."""
+    mem_id = int(mem_id)
+
     with conn:
-        conn.execute("""
+        row = conn.execute(
+            "SELECT memory_type FROM memories WHERE id=?",
+            (mem_id,),
+        ).fetchone()
+
+        if row is None:
+            return
+
+        mem_type = row[0] or "general"
+
+        conn.execute(
+            """
             UPDATE memories
             SET tombstone = 1
-            WHERE id = ?
-        """, (int(mem_id),))
+            WHERE id=?
+            """,
+            (mem_id,),
+        )
 
+        if mem_type != "general":
+            table = f"memories_{mem_type}"
+            conn.execute(
+                f"""
+                UPDATE {table}
+                SET tombstone = 1
+                WHERE id=?
+                """,
+                (mem_id,),
+            )
 
 def count(conn):
     """Count non-tombstone memories."""

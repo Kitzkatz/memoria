@@ -1,6 +1,7 @@
 from core.logger import debug
 import requests
 
+
 BASE = "http://localhost:8000"
 
 
@@ -8,61 +9,68 @@ TESTS = [
     {
         "text": "Alice likes tacos",
         "query": "Alice likes",
-        "expect": "tacos"
+        "expect": "tacos",
     },
     {
         "text": "Bob drives a blue truck",
         "query": "Bob drives",
-        "expect": "truck"
+        "expect": "truck",
     },
     {
         "text": "Charlie lives in Detroit",
         "query": "Charlie lives",
-        "expect": "detroit"
-    }
+        "expect": "detroit",
+    },
 ]
 
 
 def run():
-
     debug("\n[REGRESSION START]\n")
 
-    for t in TESTS:
+    created_texts = []
+
+    for test in TESTS:
 
         # SAFE INSERT
-        r = requests.post(
+        response = requests.post(
             f"{BASE}/memory/test_store",
-            json={"text": t["text"]}
+            json={"text": test["text"]},
         )
 
-        assert r.status_code == 200
+        assert response.status_code == 200
+        created_texts.append(test["text"])
 
         # QUERY
-        r = requests.post(
+        response = requests.post(
             f"{BASE}/memory/query",
-            json={"text": t["query"]}
+            json={"text": test["query"]},
         )
 
-        data = r.json()
+        assert response.status_code == 200
+
+        data = response.json()
         results = data.get("results", [])
 
         joined = " ".join(
-            str(x) for x in results
+            str(result) for result in results
         ).lower()
 
-        ok = t["expect"].lower() in joined
+        ok = test["expect"].lower() in joined
 
-        debug("TEST:", t["text"])
+        debug("TEST:", test["text"])
         debug("PASS" if ok else "FAIL")
         debug()
 
-    # ALWAYS REPAIR INDEX AFTER TESTS
     # CLEANUP AT END
     requests.post(
         f"{BASE}/memory/test_cleanup",
-        json={"texts": created_ids}
+        json={"texts": created_texts},
     )
-    requests.post(f"{BASE}/memory/rebuild_index")
+
+    # ALWAYS REPAIR INDEX AFTER TESTS
+    requests.post(
+        f"{BASE}/memory/rebuild_index"
+    )
 
     debug("\n[REGRESSION DONE]\n")
 

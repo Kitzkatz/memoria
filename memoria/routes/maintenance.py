@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 import time
 
-from memory.memory_controller import MemoryController
+from memory.controller_instance import controller as mc
 from core.logger import debug, info, error
 
 router = APIRouter(
@@ -9,7 +9,7 @@ router = APIRouter(
     tags=["Maintenance"]
 )
 
-mc = MemoryController()
+
 
 
 # -----------------------------------------

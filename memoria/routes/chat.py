@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
-from memory.memory_controller import MemoryController
+from memory.controller_instance import controller as mc
 from core.logger import debug, info, error
 
 router = APIRouter(
@@ -10,7 +10,7 @@ router = APIRouter(
     tags=["Chat"]
 )
 
-mc = MemoryController()
+
 
 
 # --------------------------------------------------
@@ -33,7 +33,7 @@ class ChatResponse(BaseModel):
 # --------------------------------------------------
 
 @router.post("/")
-@router.post("/chat")
+
 def chat(inp: ChatInput):
     """
     Chat with the memory system.

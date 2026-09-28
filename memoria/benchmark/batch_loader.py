@@ -170,10 +170,14 @@ class BatchLoader:
                     else:
                         metadata_to_store = None
 
+                    effective_skip_embedding_build = (
+                        skip_embedding or skip_embedding_build
+                    )
+
                     ids = self.memory.remember_many(
                         texts_to_store,
                         metadatas=metadata_to_store,
-                        skip_embedding_build=skip_embedding_build
+                        skip_embedding_build=effective_skip_embedding_build
                     )
                     stored += len(ids)
 
@@ -196,7 +200,8 @@ class BatchLoader:
         info("[BATCH COMPLETE]", category="benchmark")
         info(f"Stored: {stored}", category="benchmark")
         info(f"Runtime: {elapsed:.2f} seconds", category="benchmark")
-        info(f"Rate: {stored / elapsed:.1f} mem/s", category="benchmark")
+        rate = stored / elapsed if elapsed > 0 else 0
+        info(f"Rate: {rate:.1f} mem/s", category="benchmark")
         info("=" * 60, category="benchmark")
 
         return stored
@@ -264,7 +269,8 @@ class BatchLoader:
         info("[BATCH COMPLETE]", category="benchmark")
         info(f"Stored: {stored}", category="benchmark")
         info(f"Runtime: {elapsed:.2f} seconds", category="benchmark")
-        info(f"Rate: {stored / elapsed:.1f} mem/s", category="benchmark")
+        rate = stored / elapsed if elapsed > 0 else 0
+        info(f"Rate: {rate:.1f} mem/s", category="benchmark")
         info("=" * 60, category="benchmark")
         return stored
 

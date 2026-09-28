@@ -12,7 +12,10 @@ def handle_store(system, text, metadata=None):
     # ---- Plugin hook: pre-ingestion ----
     if system.plugin_manager:
         try:
-            system.plugin_manager.memoria_ingestion_pre(text, metadata)
+            system.plugin_manager.memoria_ingestion_pre(
+                text=text,
+                metadata=metadata,
+            )
         except Exception as e:
             debug(f"[Plugin] ingestion_pre error: {e}")
 
@@ -27,7 +30,9 @@ def handle_store(system, text, metadata=None):
     # ---- Plugin hook: post-ingestion ----
     if system.plugin_manager:
         try:
-            system.plugin_manager.memoria_ingestion_post(record)
+            system.plugin_manager.memoria_ingestion_post(
+                record=record,
+            )
         except Exception as e:
             debug(f"[Plugin] ingestion_post error: {e}")
 
@@ -48,7 +53,10 @@ def handle_store(system, text, metadata=None):
     # ---- Plugin hook: pre-storage ----
     if system.plugin_manager:
         try:
-            system.plugin_manager.memoria_storage_pre(record, metadata)
+            system.plugin_manager.memoria_storage_pre(
+                text=record,
+                metadata=metadata,
+            )
         except Exception as e:
             debug(f"[Plugin] storage_pre error: {e}")
 
@@ -67,7 +75,7 @@ def handle_store(system, text, metadata=None):
     debug("db:", time.perf_counter() - t0)
 
     system.embedding_cache.add(mem_id, vec)
-    system.vector_store.add(mem_id, vec, persist=True)
+    system.vector_store.store(mem_id, vec, persist=True)
 
     t0 = time.perf_counter()
     debug("\n[TEST FAISS SYNC]")
@@ -80,7 +88,11 @@ def handle_store(system, text, metadata=None):
     # ---- Plugin hook: post-storage ----
     if system.plugin_manager:
         try:
-            system.plugin_manager.memoria_storage_post(mem_id, record, metadata)
+            system.plugin_manager.memoria_storage_post(
+                mem_id=mem_id,
+                text=record,
+                metadata=metadata,
+            )
         except Exception as e:
             debug(f"[Plugin] storage_post error: {e}")
 
@@ -118,7 +130,10 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
         if system.plugin_manager:
             try:
                 meta = metadatas[i] if metadatas else None
-                system.plugin_manager.memoria_ingestion_pre(text, meta)
+                system.plugin_manager.memoria_ingestion_pre(
+                    text=text,
+                    metadata=meta,
+                )
             except Exception as e:
                 debug(f"[Plugin] ingestion_pre error: {e}")
 
@@ -132,7 +147,9 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
         # ---- Plugin hook: post-ingestion per record ----
         if system.plugin_manager:
             try:
-                system.plugin_manager.memoria_ingestion_post(record)
+                system.plugin_manager.memoria_ingestion_post(
+                    record=record,
+                )
             except Exception as e:
                 debug(f"[Plugin] ingestion_post error: {e}")
 
@@ -143,8 +160,14 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
         records.append(record)
         normalized_texts.append(record.normalized_text)
 
-    debug(f"[EXTRACT] total: {extract_time:.4f}s, avg: {extract_time/total:.4f}s", category="store")
-    debug(f"[SCORE]   total: {score_time:.4f}s, avg: {score_time/total:.4f}s", category="store")
+    debug(
+        f"[EXTRACT] total: {extract_time:.4f}s, avg: {extract_time/total:.4f}s",
+        category="store",
+    )
+    debug(
+        f"[SCORE]   total: {score_time:.4f}s, avg: {score_time/total:.4f}s",
+        category="store",
+    )
 
     # ---- Embedding ----
     vectors = None
@@ -152,18 +175,31 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
         t0 = time.perf_counter()
         vectors = system.embedder.embed_many(normalized_texts)
         embed_time = time.perf_counter() - t0
-        debug(f"[EMBED]   total: {embed_time:.4f}s, avg: {embed_time/total:.4f}s", category="store")
+        debug(
+            f"[EMBED]   total: {embed_time:.4f}s, avg: {embed_time/total:.4f}s",
+            category="store",
+        )
     else:
         if skip_embedding_build:
-            debug("[EMBED]   skipped (using cached FAISS index)", category="store")
+            debug(
+                "[EMBED]   skipped (using cached FAISS index)",
+                category="store",
+            )
         else:
-            debug("[EMBED]   skipped (embedding disabled)", category="store")
+            debug(
+                "[EMBED]   skipped (embedding disabled)",
+                category="store",
+            )
+
     debug(f"[READY] {len(records)} records", category="store")
 
     # ---- Plugin hook: pre-storage (batch) ----
     if system.plugin_manager:
         try:
-            system.plugin_manager.memoria_storage_pre(records, metadatas)
+            system.plugin_manager.memoria_storage_pre(
+                text=records,
+                metadata=metadatas,
+            )
         except Exception as e:
             debug(f"[Plugin] storage_pre error: {e}")
 
@@ -174,42 +210,85 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
     debug(f"[DB INSERT] {db_time:.4f}s", category="store")
 
     # ---- Rebuild Inverted Index and BM25 ----
-    if hasattr(system, 'inverted_index') and system.inverted_index:
+    if hasattr(system, "inverted_index") and system.inverted_index:
         t0 = time.perf_counter()
-        system.inverted_index.build()   # rebuilds index from DB
+        system.inverted_index.build()
         inverted_index_time = time.perf_counter() - t0
-        debug(f"[INVERTED INDEX] rebuilt in {inverted_index_time:.4f}s", category="store")
+        debug(
+            f"[INVERTED INDEX] rebuilt in {inverted_index_time:.4f}s",
+            category="store",
+        )
     else:
-        debug("[INVERTED INDEX] skipped (not available)", category="store")
+        debug(
+            "[INVERTED INDEX] skipped (not available)",
+            category="store",
+        )
 
-    if hasattr(system, 'bm25_ranker') and system.bm25_ranker:
+    if hasattr(system, "bm25_ranker") and system.bm25_ranker:
         t0 = time.perf_counter()
         corpus_tokens = [r.tokens for r in records]
         system.bm25_ranker.build(corpus_tokens)
         bm25_time = time.perf_counter() - t0
-        debug(f"[BM25] rebuilt in {bm25_time:.4f}s", category="store")
+        debug(
+            f"[BM25] rebuilt in {bm25_time:.4f}s",
+            category="store",
+        )
     else:
-        debug("[BM25] skipped (not available)", category="store")
+        debug(
+            "[BM25] skipped (not available)",
+            category="store",
+        )
 
     # ---- Relationship Building ----
     t0 = time.perf_counter()
     for mem_id, record in zip(ids, records):
-        system.relationship_builder.build(mem_id, record.relationships)
+        system.relationship_builder.build(
+            mem_id,
+            record.relationships,
+        )
     rel_time = time.perf_counter() - t0
-    debug(f"[REL BUILD] {rel_time:.4f}s", category="store")
+    debug(
+        f"[REL BUILD] {rel_time:.4f}s",
+        category="store",
+    )
 
     # ---- Cache + Vector Store Add (skip if embedding build is skipped) ----
     if not skip_embedding_build and not system.embedder.skip:
         t0 = time.perf_counter()
-        system.embedding_cache.add_many(ids, vectors)
-        system.vector_store.add_many(ids, vectors, persist=False)
+
+        valid_ids = []
+        valid_vectors = []
+
+        for mem_id, vector in zip(ids, vectors):
+            if vector is None or len(vector) == 0:
+                continue
+            valid_ids.append(mem_id)
+            valid_vectors.append(vector)
+
+        if valid_ids:
+            system.embedding_cache.add_many(valid_ids, valid_vectors)
+            system.vector_store.store_many(
+                valid_ids,
+                valid_vectors,
+                persist=False,
+            )
+
         cache_time = time.perf_counter() - t0
-        debug(f"[CACHE+ADD] {cache_time:.4f}s", category="store")
+        debug(
+            f"[CACHE+ADD] {cache_time:.4f}s",
+            category="store",
+        )
     else:
         if skip_embedding_build:
-            debug("[CACHE+ADD] skipped (using cached FAISS index)", category="store")
+            debug(
+                "[CACHE+ADD] skipped (using cached FAISS index)",
+                category="store",
+            )
         else:
-            debug("[CACHE+ADD] skipped (embedding disabled)", category="store")
+            debug(
+                "[CACHE+ADD] skipped (embedding disabled)",
+                category="store",
+            )
 
     debug("[DB] Insert complete", category="store")
 
@@ -218,21 +297,36 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
         t0 = time.perf_counter()
         system.vector_store.save()
         save_time = time.perf_counter() - t0
-        debug(f"[FAISS SAVE] {save_time:.4f}s", category="store")
+        debug(
+            f"[FAISS SAVE] {save_time:.4f}s",
+            category="store",
+        )
     else:
         if skip_embedding_build:
-            debug("[FAISS SAVE] skipped (using cached FAISS index)", category="store")
+            debug(
+                "[FAISS SAVE] skipped (using cached FAISS index)",
+                category="store",
+            )
         else:
-            debug("[FAISS SAVE] skipped (embedding disabled)", category="store")
+            debug(
+                "[FAISS SAVE] skipped (embedding disabled)",
+                category="store",
+            )
 
     # ---- Plugin hook: post-storage (batch) ----
     if system.plugin_manager:
         try:
-            system.plugin_manager.memoria_storage_post(ids, records, metadatas)
+            system.plugin_manager.memoria_storage_post(
+                mem_id=ids,
+                text=records,
+                metadata=metadatas,
+            )
         except Exception as e:
             debug(f"[Plugin] storage_post error: {e}")
 
     runtime = time.perf_counter() - overall_start
-    debug(f"[COMPLETE] {len(ids)} memories in {runtime:.2f}s", category="store")
+    debug(
+        f"[COMPLETE] {len(ids)} memories in {runtime:.2f}s",
+        category="store",
+    )
     return ids
-	

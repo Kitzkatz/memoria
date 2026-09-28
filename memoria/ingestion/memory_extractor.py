@@ -283,7 +283,7 @@ class MemoryExtractor:
             is_acronym = stripped.isupper() and len(stripped) >= 2
             is_capitalized = stripped[0].isupper() and not stripped.isupper()
 
-            if is_capitalized or is_acronym:
+            if is_acronym or is_capitalized:
                 current.append(stripped)
             else:
                 if current:
@@ -340,6 +340,11 @@ class MemoryExtractor:
         - Connects consecutive entities with "related_to"
         - Looks for explicit relationship cues (likes, works_at, etc.)
 
+        Relationship extraction uses all occurrences of each entity
+        rather than only the first occurrence. For explicit cues,
+        the nearest source occurrence before the cue and nearest target
+        occurrence after the cue are selected.
+
         Future improvements:
         - Dependency parsing
         - LLM-based extraction
@@ -367,23 +372,71 @@ class MemoryExtractor:
 
         text_lower = text.lower()
 
+        # Find every occurrence of each entity in the original text.
+        entity_positions = {}
+        for entity in entities:
+            entity_lower = entity.lower()
+            positions = [
+                match.start()
+                for match in re.finditer(
+                    re.escape(entity_lower),
+                    text_lower
+                )
+            ]
+            if positions:
+                entity_positions[entity] = positions
+
         for cue, relation in relation_cues.items():
-            if cue in text_lower:
-                for i, entity in enumerate(entities):
-                    entity_lower = entity.lower()
-                    if entity_lower in text_lower:
-                        pos = text_lower.find(entity_lower)
-                        cue_pos = text_lower.find(cue)
-                        if cue_pos > pos:
-                            source = entity
-                            for j in range(i + 1, len(entities)):
-                                if entities[j].lower() in text_lower and text_lower.find(entities[j].lower()) > cue_pos:
-                                    relationships.append({
-                                        "source": source,
-                                        "relation": relation,
-                                        "target": entities[j]
-                                    })
-                                    break
+            cue_positions = [
+                match.start()
+                for match in re.finditer(
+                    re.escape(cue),
+                    text_lower
+                )
+            ]
+
+            for cue_pos in cue_positions:
+                # Find the nearest entity occurrence before the cue.
+                source_candidates = []
+                for entity in entities:
+                    positions = entity_positions.get(entity, [])
+                    before = [pos for pos in positions if pos < cue_pos]
+                    if before:
+                        source_candidates.append(
+                            (max(before), entity)
+                        )
+
+                if not source_candidates:
+                    continue
+
+                source_pos, source = max(
+                    source_candidates,
+                    key=lambda item: item[0]
+                )
+
+                # Find the nearest entity occurrence after the cue.
+                target_candidates = []
+                for entity in entities:
+                    positions = entity_positions.get(entity, [])
+                    after = [pos for pos in positions if pos > cue_pos]
+                    if after:
+                        target_candidates.append(
+                            (min(after), entity)
+                        )
+
+                if not target_candidates:
+                    continue
+
+                target_pos, target = min(
+                    target_candidates,
+                    key=lambda item: item[0]
+                )
+
+                relationships.append({
+                    "source": source,
+                    "relation": relation,
+                    "target": target
+                })
 
         if not relationships and len(entities) >= 2:
             for i in range(len(entities) - 1):

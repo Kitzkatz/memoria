@@ -1,203 +1,77 @@
 # Memoria V4.5
 
-
 **Local-first, LLM-agnostic memory system with parallel hybrid retrieval, multi-signal ranking, declarative type routing, and a plugin-based architecture.**
 
-**4GB RAM · CPU-only · No cloud · No API keys required · MIT licensed**
+**4 GB RAM · CPU-only · No cloud · No API keys required · MIT licensed**
 
-Memoria is designed as a configurable memory/retrieval substrate rather than a chatbot-specific memory implementation.
+Memoria is a memory substrate, not an LLM application. An LLM can be plugged in when needed, but retrieval, ranking, storage, routing, and evaluation all run independently of any model.
 
-A more complete version of documentation can be found at https://kitzkatz.github.io/memoria/
+## Results
 
+### LongMemEval-S
 
----
+**500 questions · 470 retrieval-evaluable · 30 intentional abstentions**
 
-## What It Is
+| Metric                           |        Result |
+| --------------------------------- | ------------: |
+| Retrieval-evaluable questions      | **470 / 500** |
+| Questions with retrieved results   | **468 / 470** |
+| Actual retrieval failures          |   **2 / 470** |
+| R@1                                |     **89.8%** |
+| R@3                                |     **96.4%** |
+| R@5                                |     **97.9%** |
+| R@10                               |     **98.9%** |
+| R@30                               |     **99.6%** |
+| R@50                               |     **99.6%** |
+| Session NDCG@10                    |    **0.9257** |
 
-Memoria is a fully local memory system for LLMs and other applications that need persistent contextual retrieval.
+The 30 abstention questions are excluded from retrieval metrics by design. Of the remaining 470 retrieval-evaluable questions, 468 returned results and 2 were genuine retrieval failures.
 
-It can store memories, route queries by memory type, retrieve candidates using parallel workers, rank and finalize results, construct context, and expose the system through CLI, TUI, GUI, and API interfaces.
+### Synthetic Retrieval Benchmark
 
-Retrieval workers can include:
+**4,632 questions · CPU-only · ~4 GB RAM**
 
-* **FAISS** — semantic retrieval
-* **BM25** — lexical retrieval
-* **Graph** — entity/relationship traversal
-* **Phrase** — phrase matching
-* **Attribute** — structured attribute retrieval
-* **Fusion** — combined retrieval strategies
+| Metric                |        Result |
+| ---------------------- | ------------: |
+| Retrieved               |    **99.46%** |
+| R@1                     |    **32.60%** |
+| R@3                     |    **39.98%** |
+| R@5                     |    **52.03%** |
+| R@10                    |    **78.76%** |
+| Average query latency   | **~122.3 ms** |
 
-Retrieval workers are coordinated through a **blackboard/scheduler architecture** with declarative completion policies rather than requiring the query handler to synchronously wait for every worker.
+The two benchmarks measure different things: LongMemEval-S evaluates retrieval against a real long-context memory benchmark; the synthetic set is a larger workload built for system-level performance testing.
 
-**You own your data. No cloud. No subscription.**
+## Documentation
 
----
+Full documentation: **https://kitzkatz.github.io/memoria/**
 
-## Quick Start
-
-```bash
-git clone https://github.com/Kitzkatz/memoria.git
-cd memoria
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-python cli.py store "Kevin Johnson likes ramen."
-python cli.py recall "What does Kevin Johnson like?"
-```
-
----
-
-## Interfaces
-
-| Interface | Command          | URL                        |
-| --------- | ---------------- | -------------------------- |
-| CLI       | `python cli.py`  | Terminal                   |
-| TUI       | `python tui.py`  | Terminal                   |
-| GUI       | `python gui.py`  | http://localhost:5000      |
-| API       | `python main.py` | http://localhost:8000/docs |
+Covers installation, configuration, retrieval architecture, adapters, benchmarks, CLI usage, plugin architecture, and performance tuning.
 
 ---
 
-## CLI Commands
+# What is Memoria?
 
-```bash
-python cli.py store "Your memory here"
-python cli.py recall "What did I say?" --limit 5
-python cli.py chat "What does Kevin Johnson like?"
-python cli.py set-goal "Finish V4 release" --progress started
-python cli.py list-goals --status active
-python cli.py info
-python cli.py doctor
-python cli.py benchmark --limit 100
-python cli.py serve --port 8000
-python cli.py export memories.json
-python cli.py import memories.json
-python cli.py config
-```
+Memoria is a local memory system built to provide persistent, searchable memory without a hosted model or cloud service.
 
----
+Rather than relying on a single embedding search, the core combines several retrieval signals:
 
-## TUI
+* Dense vector retrieval
+* BM25 lexical retrieval
+* Graph retrieval
+* Phrase retrieval
+* Attribute retrieval
+* Reciprocal-rank fusion
+* Multi-signal ranking
+* MMR diversification
+* Declarative type routing
+* Blackboard-based scheduling
 
-```bash
-python tui.py
-```
-
-Commands:
-
-`store`, `recall`, `chat`, `set-goal`, `list-goals`, `graph`, `stats`, `doctor`, `export`, `import`, `quit`
-
----
-
-## GUI
-
-```bash
-python gui.py
-```
-
-Open:
-
-`http://localhost:5000`
-
----
-
-## API
-
-```bash
-python main.py
-```
-
-Open:
-
-`http://localhost:8000/docs`
-
-Endpoints include:
-
-`/memory/store` · `/memory/query` · `/memory/batch_store` · `/chat` · `/chat/raw` · `/debug/stats` · `/debug/health` · `/maintenance/rebuild_index` · `/benchmark/run`
-
----
-
-# LongMemEval
-
-Memoria includes an adapter for the **LongMemEval-S** benchmark.
-
-The adapter works from the benchmark's native question/haystack structure rather than converting the dataset into Memoria's original database format.
-
-For each question it can:
-
-* isolate the relevant haystack
-* construct the corresponding memory state
-* cache embeddings
-* reuse cached embeddings across runs
-* execute the query
-* identify expected answer sessions
-* compare retrieved memories against expected IDs
-* record retrieval and ranking diagnostics
-* record per-stage timing
-
-The adapter is designed to make repeated evaluation practical even on constrained hardware.
-
-On a **4GB RAM CPU-only laptop**, caching the embeddings for the 500-question evaluation took roughly **one minute**. Subsequent evaluation runs against the cached embeddings take roughly **2–3 minutes**.
-
-### Current LongMemEval Retrieval Result
-
-**500-question LongMemEval-S run**
-
-> **Important:** These numbers measure **retrieval performance only**. They evaluate whether the expected memory/session was retrieved and where it appeared in the candidate ranking. They are **not end-to-end answer-generation accuracy**.
-
-```text
-Questions:     500
-Retrieved:     497 (99.40%)
-Failed:          3
-
-Recall@1:       79.40%
-Recall@3:       87.20%
-Recall@5:       90.20%
-Recall@10:      93.60%
-
-Average query:  219.9 ms
-Embedding:       48.7 ms
-Retrieval:       80.3 ms
-Ranking:          0.3 ms
-```
-
-The current run uses a fusion-based retrieval configuration with FAISS/semantic retrieval combined with additional retrieval sources where routed.
-
-The remaining failures are primarily **retrieval coverage failures**, while retrieved-but-not-top-ranked cases are tracked separately for further tuning.
-
-These results are from an ongoing evaluation and should not be interpreted as a claim of state-of-the-art performance without matching the evaluation protocol and comparison conditions of other systems.
-
----
-
-# Synthetic Benchmark
-
-Memoria also includes a larger synthetic benchmark for evaluating retrieval and ranking behavior across controlled workloads.
-
-Full benchmark:
-
-```text
-Questions:       4632
-Retrieved:       99.46%
-
-Recall@1:         32.60%
-Recall@3:         39.98%
-Recall@5:         52.03%
-Recall@10:        78.76%
-
-Avg query latency: 122.3 ms
-Hardware:           4GB RAM, CPU-only
-```
-
-The synthetic benchmark is primarily used for architectural regression testing, retrieval/ranking experiments, and performance analysis.
-
-The LongMemEval adapter provides a separate evaluation path using a real-world conversational-memory benchmark.
+It's usable via CLI, TUI, GUI, or API. An LLM is optional.
 
 ---
 
 # Architecture
-
-The primary V4 boundary is:
 
 ```text
 Query
@@ -214,32 +88,105 @@ Candidate Records
   ↓
 Ranking
   ↓
+MMR
+  ↓
 Finalization
   ↓
 Context Construction
   ↓
-MMR
-  ↓
 Results
 ```
 
-The architectural goal is to keep **retrieval responsible for finding candidates** and **ranking responsible for determining which candidates are useful**.
+Individual retrieval mechanisms run independently; the scheduler coordinates when each has completed.
 
-Retrieval workers are independently replaceable and can be coordinated by declarative completion policies.
+---
+
+# Retrieval
+
+## FAISS
+Dense semantic retrieval over vector embeddings.
+
+Default embedding model: `all-MiniLM-L6-v2` · Vector dimension: `384`
+
+## BM25
+Lexical retrieval for exact terms, names, identifiers, and vocabulary semantic embeddings may miss. Maintains its own scoring signal and contributes to fusion and ranking independently.
+
+## Graph
+Retrieves memories through entity and relationship connections. Uses canonical integer entity IDs at the retrieval boundary while preserving name-based lookup.
+
+## Phrase
+Targets phrase-level lexical matches and exact textual relationships.
+
+## Attribute
+Retrieves memories through structured metadata and attribute matches.
+
+## Fusion
+Combines retrieval sources via reciprocal-rank fusion, letting dense and lexical retrieval contribute independently before ranking.
+
+---
+
+# Ranking
+
+Candidate records pass through a multi-signal ranking stage after retrieval. Signals include:
+
+* Semantic similarity
+* Token similarity
+* TF-IDF
+* Entity overlap
+* Subject similarity
+* BM25
+* Type/routing information
+* Other candidate metadata
+
+Current ranking weights:
+
+| Signal   | Weight |
+| -------- | -----: |
+| Semantic | 0.1195 |
+| Token    | 0.3107 |
+| TF-IDF   | 0.2929 |
+| Entity   | 0.0272 |
+| Subject  | 0.0980 |
+| BM25     | 0.0762 |
+
+Ranking is independent from the retrieval workers, so the two can be ablated separately.
+
+## MMR
+
+Maximal Marginal Relevance runs after ranking to reduce redundancy while keeping highly relevant candidates. It records relevance score, diversity score, MMR score, selection order, and reordering diagnostics — making diversification measurable rather than an opaque post-processing step.
+
+---
+
+# Blackboard and Scheduler
+
+Retrieval workers run through a shared blackboard/scheduler architecture. Workers publish candidate results and completion state rather than controlling the query lifecycle directly; completion policies determine when enough retrieval work has finished to proceed.
+
+This provides parallel retrieval, worker isolation, explicit completion policies, timing diagnostics, extensible retrieval workers, and controlled query deadlines.
+
+---
+
+# Storage
+
+Storage is kept separate from retrieval indexes. The pipeline handles:
+
+1. Ingestion hooks
+2. Extraction
+3. Metadata processing
+4. Scoring
+5. Embedding
+6. Database insertion
+7. Relationship construction
+8. Vector indexing
+9. Cache updates
+10. Post-storage hooks
+
+Batch ingestion has matching bulk operations for embedding, database insertion, inverted-index construction, BM25 rebuilding, relationship construction, and vector-store updates.
 
 ---
 
 # Plugin Architecture
 
-Memoria uses **Pluggy** to expose extension points across the system.
-
-Current architecture:
-
-* **10 plugin subsystems**
-* **39 hook specifications**
-* Plugin discovery through entry points and a local `plugins/` directory
-
-Subsystems include:
+Built around explicit hook specifications — **10 plugin subsystems, 39 hook specifications**:
 
 | Subsystem  | Hooks |
 | ---------- | ----: |
@@ -254,160 +201,200 @@ Subsystems include:
 | Query      |     3 |
 | Feedback   |     3 |
 
-Plugins can register components such as:
+Plugins extend system behavior without changing the core memory pipeline.
 
-* retrieval workers
-* ranking signals
-* rerankers
-* database backends
-* vector stores
-* ingestion extractors
-* entity recognizers
-* scheduler workers
-* completion policies
-* routers
-* benchmark adapters
-* analyzers
-* feedback recorders
-* query processors
+---
 
-The goal is to make major pieces of the memory substrate replaceable without requiring the core query pipeline to be rewritten.
+# Interfaces
+
+CLI, TUI, GUI, API, and Python interfaces all sit over the same underlying system — the memory substrate is independent of whichever interface you use.
+
+---
+
+# Quick Start
+
+```bash
+git clone https://github.com/KitzKatz/Memoria.git
+cd Memoria
+```
+
+See the documentation for configuration and the interface setup for your environment: **https://kitzkatz.github.io/memoria/**
 
 ---
 
 # Configuration
 
-Memoria exposes a large set of configurable parameters through Pydantic in `cache/config.py`.
+Memoria runs locally and is configured via settings and environment variables, covering embedding models, LLM integration, retrieval workers, ranking, MMR, candidate limits, scheduler behavior, context limits, caching, storage, and benchmark configuration.
 
-Environment variables can override settings using the `MEMORY_` prefix.
+Environment variables use the `MEMORY_` prefix.
 
-Example:
+---
+
+# LongMemEval-S
+
+Memoria includes an adapter for the LongMemEval-S benchmark. It:
+
+* Isolates each question's haystack
+* Stores every non-empty turn
+* Preserves session and turn metadata
+* Queries Memoria and preserves ranked candidates
+* Calculates session- and turn-level retrieval metrics
+* Excludes intentional abstentions from retrieval metrics
+* Supports reproducible per-question caches
+* Records dataset, model, settings, and commit metadata
+
+It supports five retrieval modes for ablation testing.
+
+## Dense — FAISS only
+```bash
+python benchmark/longmemeval_adapter.py \
+    --retrieval-mode dense \
+    --output benchmark_output/results/dense.json
+```
+
+## BM25 — BM25 only
+```bash
+python benchmark/longmemeval_adapter.py \
+    --retrieval-mode bm25 \
+    --output benchmark_output/results/bm25.json
+```
+
+## Raw — FAISS + BM25, ranking disabled
+```bash
+python benchmark/longmemeval_adapter.py \
+    --retrieval-mode raw \
+    --output benchmark_output/results/raw.json
+```
+
+## Fusion — configured fusion path
+```bash
+python benchmark/longmemeval_adapter.py \
+    --retrieval-mode fusion \
+    --output benchmark_output/results/fusion.json
+```
+
+## Full — FAISS + BM25 + Graph + Phrase + Attribute, ranking enabled
+```bash
+python benchmark/longmemeval_adapter.py \
+    --retrieval-mode full \
+    --output benchmark_output/results/full.json
+```
+
+## Compare the ablations
 
 ```bash
-export MEMORY_TOP_K=1000
-export MEMORY_CONTEXT_TOKEN_BUDGET=20000
+python benchmark/benchmark_analyzer.py --compare \
+    benchmark_output/results/dense.json \
+    benchmark_output/results/bm25.json \
+    benchmark_output/results/raw.json \
+    benchmark_output/results/fusion.json \
+    benchmark_output/results/full.json
 ```
-
-### Retrieval
-
-* `TOP_K`
-* `TOP_N`
-* `TOP_K_PER_SHARD`
-* `GRAPH_TOP_K`
-* `GRAPH_SEARCH_LIMIT`
-* `GRAPH_DEPTH`
-* `USE_BM25`
-* `USE_PHRASE_SEARCH`
-* `USE_INVERTED_INDEX`
-* `RETRIEVAL_MIN_CANDIDATES`
-* `MIN_RETRIEVAL_SOURCES`
-* `RETRIEVAL_DEADLINE`
-
-### Routing
-
-* `USE_ROUTING`
-* `ROUTING_MATRIX_OVERRIDE`
-* `ROUTING_FALLBACK_ENABLED`
-
-### Ranking
-
-* `RANKING_SEMANTIC`
-* `RANKING_TOKEN`
-* `RANKING_TFIDF`
-* `RANKING_BM25`
-* `RANKING_ENTITY`
-* `RANKING_SUBJECT`
-* `RANKING_ATTRIBUTE`
-* `RANKING_IMPORTANCE`
-* `RANKING_RECENCY`
-* `RANKING_FEEDBACK`
-
-### Memory
-
-* `MEMORY_DECAY_DAYS`
-* `MEMORY_DECAY_RATE`
-* `CONSOLIDATE_THRESHOLD`
-* `CONSOLIDATE_BATCH_SIZE`
-* `PRUNE_THRESHOLD`
-* `PRUNE_MAX_AGE_DAYS`
-* `AUTO_STORE_MEMORIES`
-* `AUTO_STORE_THRESHOLD`
-
-### Architecture
-
-* `USE_BLACKBOARD`
-* `USE_SHARDING`
-* `NUM_SHARDS`
-* `MMR_ENABLED`
-* `USE_ADAPTIVE_WEIGHTS`
-* `RANKER_DIAGNOSTICS`
-* `ENABLE_SIGNAL_REGISTRY`
-
----
-
-## Ranking Weights
-
-Default ranking weights:
-
-| Signal   | Weight |
-| -------- | -----: |
-| Semantic | 0.1195 |
-| Token    | 0.3107 |
-| TF-IDF   | 0.2929 |
-| Entity   | 0.0272 |
-| Subject  | 0.0980 |
-| BM25     | 0.0762 |
-
-Additional ranking signals such as importance, recency, attribute, and feedback can also be configured.
-
----
-
-## Performance Tuning
-
-| Goal        | Action                                                |
-| ----------- | ----------------------------------------------------- |
-| **Speed**   | Use embedding cache / skip embedding when appropriate |
-| **Recall**  | Increase `TOP_K_PER_SHARD` and `TOP_K`                |
-| **Quality** | Tune retrieval and ranking configuration              |
-| **Context** | Adjust `CONTEXT_TOKEN_BUDGET`                         |
-
-Memoria is designed so retrieval, ranking, routing, scheduling, and storage behavior can be tuned independently.
-
----
-
-## Chat Templates & LLM Configuration
-
-Memoria is LLM-agnostic at the memory layer.
-
-Chat templates can be configured through `CHAT_TEMPLATE_FILE`.
-
-Templates use:
 
 ```text
-{system}
-{context}
-{user}
-{assistant}
+Mode                     R@1     R@3     R@5    R@10   NDCG@10
+----------------------------------------------------------------
+...
 ```
 
-The LLM endpoint and generation settings can also be configured through `LLM_URL`, `LLM_ENDPOINT`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`, `LLM_TIMEOUT`, and `LLM_STOP_TOKENS`.
+The table uses the adapter's session-level `recall_any` and session-level NDCG@10 — tied to the benchmark's actual retrieval evaluation, not the legacy "returned any candidate" diagnostic.
 
 ---
 
-## Requirements
+# Benchmark Analyzer
 
-* Python 3.12+
-* 4GB RAM minimum target
-* CPU-compatible
-* Local embedding model
-* No cloud service required
+```bash
+python benchmark/benchmark_analyzer.py results.json          # single file
+python benchmark/benchmark_analyzer.py --compare a.json b.json ...  # compare runs
+python benchmark/benchmark_analyzer.py --all                 # analyze everything available
+```
 
----
-
-## License
-
-MIT
+Reports retrieval statistics, timing, MMR diagnostics, Recall@K, and official session/turn metrics.
 
 ---
 
-**Built solo. Local-first. LLM-agnostic. Designed to be extended rather than replaced.**
+# Performance
+
+A representative LongMemEval-S run on CPU-only hardware:
+
+| Stage                 |   Average |
+| ---------------------- | --------: |
+| Query processing        |  ~0.24 ms |
+| Embedding                |  ~79.8 ms |
+| Retrieval                | ~101.9 ms |
+| Scheduler wait           |  ~35.2 ms |
+| Database                 |  ~30.9 ms |
+| Ranking                  |  ~0.28 ms |
+| Response construction    |   ~3.4 ms |
+| **Total**                | **~208.5 ms** |
+
+Configured retrieval deadline: **125 ms**. Each stage is timed independently so regressions surface at the stage level rather than hiding inside one aggregate number.
+
+---
+
+# Synthetic Benchmark
+
+**4,632 questions**, built primarily for retrieval and performance analysis, runnable on modest CPU-only hardware without a GPU or hosted inference service.
+
+| Metric                |    Result |
+| ---------------------- | --------: |
+| Questions               |     4,632 |
+| Retrieved                |    99.46% |
+| R@1                      |    32.60% |
+| R@3                      |    39.98% |
+| R@5                      |    52.03% |
+| R@10                     |    78.76% |
+| Average query latency    | ~122.3 ms |
+
+---
+
+# Project Structure
+
+```text
+memoria/
+├── benchmark/
+│   ├── longmemeval_adapter.py
+│   ├── benchmark_analyzer.py
+│   └── ...
+├── core/
+│   ├── bootstrap.py
+│   ├── context_builder.py
+│   ├── llm_adapter.py
+│   ├── logger.py
+│   └── token_estimator.py
+├── memory/
+├── ranking/
+├── retrieval/
+├── system/
+│   ├── blackboard/
+│   │   ├── core/
+│   │   ├── scheduler/
+│   │   ├── workers/
+│   │   └── consolidator/
+│   └── ...
+├── gui/
+├── cli/
+└── ...
+```
+
+---
+
+# Requirements
+
+* ~4 GB RAM
+* CPU-only
+* Linux
+* Python
+* No cloud service, no API key
+
+An LLM is optional, not a prerequisite for the memory substrate.
+
+---
+
+# License
+
+MIT License.
+
+---
+
+**Memoria is memory infrastructure first: local, composable, measurable, and independent of any particular LLM.**

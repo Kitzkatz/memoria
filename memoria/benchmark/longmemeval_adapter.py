@@ -621,6 +621,7 @@ def check_retrieval(
 # Database / index helpers
 # ----------------------------------------------------------------------
 
+
 def clear_db_fast(controller):
     """Fast truncate clear between isolated questions."""
 
@@ -677,12 +678,40 @@ def clear_db_fast(controller):
 
     conn.commit()
 
+    # Reset vector state.
     controller.system.vector_store.reset()
     controller.system.embedding_cache.clear()
 
-    debug(
-        "[LongMemEval] DB cleared."
+    # Reset lexical retrieval state so the next isolated
+    # benchmark question cannot inherit the previous question's corpus.
+    bm25 = getattr(
+        controller.system,
+        "bm25_ranker",
+        None,
     )
+
+    if bm25 is not None:
+        bm25.build([])
+        debug(
+            "[LongMemEval] BM25 index cleared."
+        )
+
+    inverted_index = getattr(
+        controller.system,
+        "inverted_index",
+        None,
+    )
+
+    if inverted_index is not None:
+        inverted_index.build([])
+        debug(
+            "[LongMemEval] Inverted index cleared."
+        )
+
+    debug(
+        "[LongMemEval] DB and retrieval indexes cleared."
+    )
+
 
 
 def rebuild_indices_from_db(system):
@@ -809,7 +838,7 @@ def build_faiss_from_texts(
         .embed_many(normalized_texts)
     )
 
-    controller.system.vector_store.add_many(
+    controller.system.vector_store.store_many(
         mem_ids,
         vectors,
         persist=False,
@@ -1244,6 +1273,7 @@ def main():
                 )
 
                 skip_db_insert = False
+                
 
                 # Any FAISS index loaded without its matching cached DB
                 # is unsafe because memory IDs may differ.
@@ -1251,6 +1281,7 @@ def main():
                 controller.system.embedding_cache.clear()
                 skip_embedding_build = False
                 faiss_cache_exists = False
+                clear_db_fast(controller)
 
         # ---- BM25 Cache ----
         bm25_cache_path = cache_dir / f"bm25_{q_id}.pkl"
@@ -1304,7 +1335,10 @@ def main():
                     flush=True,
                 )
 
+                skip_db_insert = False
                 skip_embedding_build = False
+                faiss_cache_exists = False
+                clear_db_fast(controller)
 
         # ----------------------------------------------------------
         # Build FAISS if DB exists but FAISS doesn't
@@ -1374,6 +1408,7 @@ def main():
                     )
 
                     skip_db_insert = False
+                    clear_db_fast(controller)
 
             except Exception as e:
                 print(
@@ -1384,6 +1419,7 @@ def main():
                 )
 
                 skip_db_insert = False
+                clear_db_fast(controller)
 
         # ----------------------------------------------------------
         # Store

@@ -75,7 +75,7 @@ class Consolidator:
                     mem_id = row["id"]
                     embedding = self.embedding_cache.get(mem_id)
                     if embedding is None:
-                        embedding = self.vector_store.get(mem_id)
+                        embedding = self.vector_store.fetch(mem_id)
                         if embedding is not None:
                             self.embedding_cache.add(mem_id, embedding)
 
@@ -179,10 +179,12 @@ class Consolidator:
             importance=min(1.0, best.get("importance", 0.5) + 0.1)
         )
 
-        # Soft delete the other memories
+        # Soft delete the other memories and remove their retrieval vectors
         for mem_id in cluster_mem_ids:
             if mem_id != best["id"]:
                 self.db.delete(mem_id)
+                self.vector_store.remove(mem_id)
+                self.embedding_cache.remove(mem_id)
 
         debug(f"[Consolidator] Merged {len(cluster_mem_ids)} memories into ID {best['id']}")
 

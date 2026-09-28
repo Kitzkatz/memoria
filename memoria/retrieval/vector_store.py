@@ -29,9 +29,14 @@ class VectorStore:
     def _load(self):
         """Load index from disk or create new."""
         try:
-            self.index = faiss.read_index(
-                settings.VECTOR_INDEX_PATH
-            )
+            loaded = faiss.read_index(settings.VECTOR_INDEX_PATH)
+
+            if loaded.d != self.dim:
+                raise ValueError(
+                    f"FAISS index dimension {loaded.d} does not match expected {self.dim}"
+                )
+
+            self.index = loaded
             debug(f"[FAISS] Loaded {self.index.ntotal} vectors")
         except Exception as e:
             debug(f"[FAISS] Creating new index ({e})")
@@ -41,7 +46,7 @@ class VectorStore:
     # Insert
     # --------------------------------------------------
 
-    def add(self, mem_id, vector, persist=False):
+    def store(self, mem_id, vector, persist=False):
         """Add a single vector to the index."""
         with self._lock:
             if vector is None:
@@ -49,8 +54,9 @@ class VectorStore:
                 return
 
             if len(vector) != self.dim:
-                debug(f"[FAISS] Warning: vector length {len(vector)} != dim {self.dim}, truncating")
-                vector = vector[:self.dim]
+                raise ValueError(
+                    f"Vector dimension {len(vector)} does not match index dimension {self.dim}"
+                )
 
             arr = np.asarray([vector], dtype=np.float32)
             ids = np.asarray([int(mem_id)], dtype=np.int64)
@@ -71,20 +77,22 @@ class VectorStore:
     # Batch Insert
     # --------------------------------------------------
 
-    def add_many(self, ids, vectors, persist=False):
+    def store_many(self, ids, vectors, persist=False):
         """Add multiple vectors to the index."""
         with self._lock:
             if not ids or not vectors:
                 return
 
-            # Validate and truncate vectors
+            # Validate vectors
             valid_ids = []
             valid_vectors = []
             for mid, vec in zip(ids, vectors):
                 if vec is None:
                     continue
                 if len(vec) != self.dim:
-                    vec = vec[:self.dim]
+                    raise ValueError(
+                        f"Vector dimension {len(vec)} does not match index dimension {self.dim}"
+                    )
                 valid_ids.append(mid)
                 valid_vectors.append(vec)
 
@@ -138,7 +146,7 @@ class VectorStore:
     # Retrieve stored embedding
     # --------------------------------------------------
 
-    def get(self, mem_id) -> Optional[List[float]]:
+    def fetch(self, mem_id) -> Optional[List[float]]:
         """Retrieve a vector by ID."""
         with self._lock:
             try:
@@ -154,10 +162,10 @@ class VectorStore:
                 debug(f"[FAISS] reconstruct failed for {mem_id}: {e}")
                 return None
 
-    def get_many(self, mem_ids: List[int]) -> Dict[int, Optional[List[float]]]:
+    def fetch_many(self, mem_ids: List[int]) -> Dict[int, Optional[List[float]]]:
         """
         Retrieve multiple vectors by ID in batch.
-        This is much faster than calling get() for each ID individually.
+        This is much faster than calling fetch() for each ID individually.
         """
         with self._lock:
             result = {}
@@ -175,40 +183,87 @@ class VectorStore:
 
     def contains(self, mem_id) -> bool:
         """Check if a vector exists in the index."""
-        return self.get(mem_id) is not None
+        return self.fetch(mem_id) is not None
 
     # --------------------------------------------------
     # Remove stale vectors
     # --------------------------------------------------
 
     def remove(self, mem_id):
-        """Mark a vector for removal (FAISS doesn't support direct removal)."""
+        """Remove a vector from the index by memory ID."""
         with self._lock:
-            debug(f"[FAISS] Marked {mem_id} for removal (will rebuild on demand)")
+            ids = np.asarray([int(mem_id)], dtype=np.int64)
+            removed = self.index.remove_ids(ids)
 
-    def rebuild_from_db(self, db):
+            if removed:
+                self.pending += int(removed)
+                debug(f"[FAISS] Removed vector {mem_id}")
+            else:
+                debug(f"[FAISS] Vector {mem_id} not found")
+                
+    def rebuild_from_db(self, db, embedding_cache):
         """
-        Rebuild the entire index from the database.
-        Called by pruner after deletions.
+        Rebuild the entire FAISS index from active database memories
+        using embeddings already stored in the embedding cache.
         """
         with self._lock:
             debug("[FAISS] Rebuilding index from DB...")
             start = time.perf_counter()
 
             memories = db.fetch_all()
+
+            new_index = self._new_index()
+
             if not memories:
-                self.index = self._new_index()
+                self.index = new_index
                 self.pending = 0
                 debug("[FAISS] Rebuild complete: 0 vectors")
                 return
 
-            # This is a placeholder — the caller should provide embeddings
-            # via a separate mechanism (embedding_cache + vector_store)
-            # For now, log that we need to rebuild from cache
-            debug("[FAISS] Rebuild from DB requires embeddings from cache or embedder")
+            ids = []
+            vectors = []
+            missing = []
+
+            for memory in memories:
+                mem_id = int(memory["id"])
+                vector = embedding_cache.get(mem_id)
+
+                if vector is None:
+                    missing.append(mem_id)
+                    continue
+
+                if len(vector) != self.dim:
+                    raise ValueError(
+                        f"Embedding dimension {len(vector)} for memory {mem_id} "
+                        f"does not match index dimension {self.dim}"
+                    )
+
+                ids.append(mem_id)
+                vectors.append(vector)
+
+            if ids:
+                arr = np.asarray(vectors, dtype=np.float32)
+                id_array = np.asarray(ids, dtype=np.int64)
+                new_index.add_with_ids(arr, id_array)
+
+            self.index = new_index
+            self.pending = 0
+            self.save()
 
             elapsed = (time.perf_counter() - start) * 1000
-            debug(f"[FAISS] Rebuild placeholder: {elapsed:.2f}ms")
+
+            debug(
+                f"[FAISS] Rebuild complete: "
+                f"{len(ids)} vectors, "
+                f"{len(missing)} missing embeddings, "
+                f"{elapsed:.2f}ms"
+            )
+
+            if missing:
+                debug(
+                    f"[FAISS] Missing embeddings for IDs: "
+                    f"{sorted(missing)[:20]}"
+                )
 
     # --------------------------------------------------
     # Persistence
@@ -243,7 +298,14 @@ class VectorStore:
             if not os.path.exists(filepath):
                 raise FileNotFoundError(f"Index file not found: {filepath}")
             try:
-                self.index = faiss.read_index(filepath)
+                loaded = faiss.read_index(filepath)
+
+                if loaded.d != self.dim:
+                    raise ValueError(
+                        f"FAISS index dimension {loaded.d} does not match expected {self.dim}"
+                    )
+
+                self.index = loaded
                 self.pending = 0
                 debug(f"[FAISS] Loaded index from {filepath} (ntotal={self.index.ntotal})")
             except Exception as e:
@@ -291,18 +353,49 @@ class VectorStore:
             return self.index.ntotal
 
     def verify(self, db) -> bool:
-        """Verify index matches database count."""
+        """Verify FAISS vector IDs match non-tombstone database memory IDs."""
         with self._lock:
-            db_count = db.count()
-            faiss_count = self.count()
+            db_memories = db.fetch_all()
+            db_ids = {int(memory["id"]) for memory in db_memories}
 
-            debug(f"[VERIFY] DB={db_count}  FAISS={faiss_count}")
+            if not isinstance(self.index, faiss.IndexIDMap2):
+                debug("[VERIFY] FAISS index is not an IndexIDMap2")
+                return False
 
-            if db_count == faiss_count:
+            faiss_ids = set(
+                int(mem_id)
+                for mem_id in faiss.vector_to_array(self.index.id_map)
+            )
+
+            if db_ids == faiss_ids:
+                debug(
+                    f"[VERIFY] DB={len(db_ids)}  FAISS={len(faiss_ids)}  IDs match"
+                )
                 return True
 
-            debug(f"[VERIFY] Mismatch: {faiss_count - db_count} stale vectors")
-            return db_count == faiss_count
+            missing_from_faiss = db_ids - faiss_ids
+            stale_in_faiss = faiss_ids - db_ids
+
+            debug(
+                f"[VERIFY] Mismatch: "
+                f"DB={len(db_ids)} FAISS={len(faiss_ids)} "
+                f"missing_from_faiss={len(missing_from_faiss)} "
+                f"stale_in_faiss={len(stale_in_faiss)}"
+            )
+
+            if missing_from_faiss:
+                debug(
+                    f"[VERIFY] Missing FAISS IDs: "
+                    f"{sorted(missing_from_faiss)[:20]}"
+                )
+
+            if stale_in_faiss:
+                debug(
+                    f"[VERIFY] Stale FAISS IDs: "
+                    f"{sorted(stale_in_faiss)[:20]}"
+                )
+
+            return False
 
     def stats(self) -> dict:
         """Return index statistics."""

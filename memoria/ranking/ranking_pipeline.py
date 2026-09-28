@@ -190,15 +190,11 @@ class RankingPipeline:
         if self.plugin_manager:
             try:
                 self.plugin_manager.memoria_ranking_pre(
-                    query,
-                    candidates
+                    query=query,
+                    candidates=candidates,
                 )
             except Exception as e:
                 debug(f"[Plugin] ranking_pre error: {e}")
-
-        # --- Ensure routing signals are passed to ranker ---
-        # MemoryRanker.get_weights_for_type() reads
-        # query.metadata.get("routing_signals")
 
         # --- Ranker ---
         t0 = time.perf_counter()
@@ -248,9 +244,6 @@ class RankingPipeline:
         )
 
         # --- BM25 Scoring ---
-        #
-        # Candidates already contain real memory IDs.
-        # BM25 resolves those IDs internally to corpus positions.
         t0 = time.perf_counter()
 
         if (
@@ -307,20 +300,6 @@ class RankingPipeline:
             for candidate in candidates[:5]
         ]
 
-        # --- Finalizer ---
-        t0 = time.perf_counter()
-
-        candidates = self.finalizer.finalize(
-            candidates
-        )
-
-        t_finalize = (time.perf_counter() - t0) * 1000
-
-        debug(
-            f"[Pipeline] finalizer: "
-            f"{t_finalize:.2f}ms"
-        )
-
         # --- Context Builder ---
         t0 = time.perf_counter()
 
@@ -367,13 +346,9 @@ class RankingPipeline:
             diagnostics["mmr_changed"] = (
                 before_mmr != after_mmr
             )
-            diagnostics["mmr_moves"] = sum(
-                1
-                for a, b in zip(
-                    before_mmr,
-                    after_mmr
-                )
-                if a != b
+            diagnostics["mmr_moves"] = self.mmr.last_diagnostics.get(
+                "total_moves",
+                0
             )
 
         else:
@@ -394,11 +369,30 @@ class RankingPipeline:
                 "(disabled via settings)"
             )
 
-        # Always populate MMR top diagnostics.
+        # --- Finalizer ---
+        t0 = time.perf_counter()
+
+        candidates = self.finalizer.finalize(
+            candidates
+        )
+
+        t_finalize = (time.perf_counter() - t0) * 1000
+
+        debug(
+            f"[Pipeline] finalizer: "
+            f"{t_finalize:.2f}ms"
+        )
+
+        diagnostics["finalizer_ms"] = round(
+            t_finalize,
+            2
+        )
+
+        # --- MMR diagnostics ---
         diagnostics["mmr_top"] = [
             {
                 "id": candidate.memory.id,
-                "score": candidate.final_score
+                "score": candidate.mmr_score
             }
             for candidate in candidates[:5]
         ]
@@ -460,8 +454,9 @@ class RankingPipeline:
         if self.plugin_manager:
             try:
                 self.plugin_manager.memoria_ranking_post(
-                    query,
-                    candidates
+                    query=query,
+                    candidates=candidates,
+                    scored_candidates=candidates,
                 )
             except Exception as e:
                 debug(

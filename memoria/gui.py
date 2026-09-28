@@ -596,7 +596,7 @@ async def health():
             "status": "ok",
             "version": "4.5",
             "service": "Memory Daemon GUI",
-            "memory_count": memory.controller.db.count(),
+            "memory_count": memory.controller.system.db.count(),
             "signals_available": HAS_SIGNAL_REGISTRY,
             "query_history_available": HAS_QUERY_HISTORY,
         }
@@ -613,7 +613,7 @@ async def stats():
     """Get system statistics."""
     try:
         stats_data = {
-            "memory_count": memory.controller.db.count(),
+            "memory_count": memory.controller.system.db.count(),
             "version": "4.5",
             "goals": len(memory.list_goals()),
             "signals_available": HAS_SIGNAL_REGISTRY,

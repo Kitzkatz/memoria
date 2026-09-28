@@ -5,7 +5,7 @@ Facade that delegates to specialized handlers.
 
 from cache.config import settings
 from core.logger import debug
-from core.plugin_manager import MemoriaPluginManager  # <-- NEW IMPORT
+from core.plugin_manager import MemoriaPluginManager
 
 # Import the new internal modules (prefixed with _ to indicate internal)
 from system._initializer import initialize_components
@@ -63,7 +63,10 @@ class MemorySystem:
         # Pre-store hook
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_pre_store(text, metadata)
+                self.plugin_manager.memoria_pre_store(
+                    text=text,
+                    metadata=metadata,
+                )
             except Exception as e:
                 debug(f"[Plugin] pre-store hook error: {e}")
 
@@ -72,7 +75,11 @@ class MemorySystem:
         # Post-store hook
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_post_store(mem_id, text, metadata)
+                self.plugin_manager.memoria_post_store(
+                    mem_id=mem_id,
+                    text=text,
+                    metadata=metadata,
+                )
             except Exception as e:
                 debug(f"[Plugin] post-store hook error: {e}")
 
@@ -91,16 +98,28 @@ class MemorySystem:
         # Pre-store hook for batch
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_pre_store(texts, metadatas)
+                self.plugin_manager.memoria_pre_store(
+                    text=texts,
+                    metadata=metadatas,
+                )
             except Exception as e:
                 debug(f"[Plugin] pre-store hook error: {e}")
 
-        ids = handle_store_many(self, texts, metadatas=metadatas, skip_embedding_build=skip_embedding_build)
+        ids = handle_store_many(
+            self,
+            texts,
+            metadatas=metadatas,
+            skip_embedding_build=skip_embedding_build,
+        )
 
         # Post-store hook for batch
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_post_store(ids, texts, metadatas)
+                self.plugin_manager.memoria_post_store(
+                    mem_id=ids,
+                    text=texts,
+                    metadata=metadatas,
+                )
             except Exception as e:
                 debug(f"[Plugin] post-store hook error: {e}")
 
@@ -111,7 +130,9 @@ class MemorySystem:
         # Pre-query hook
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_pre_query(text)
+                self.plugin_manager.memoria_pre_query(
+                    text=text,
+                )
             except Exception as e:
                 debug(f"[Plugin] pre-query hook error: {e}")
 
@@ -120,7 +141,10 @@ class MemorySystem:
         # Post-query hook
         if self.plugin_manager:
             try:
-                self.plugin_manager.memoria_post_query(text, response)
+                self.plugin_manager.memoria_post_query(
+                    text=text,
+                    response=response,
+                )
             except Exception as e:
                 debug(f"[Plugin] post-query hook error: {e}")
 
@@ -141,7 +165,7 @@ class MemorySystem:
         debug(len(vector))
         debug(vector[:5])
         self.embedding_cache.add(mem_id, vector)
-        self.vector_store.add(mem_id, vector, persist=True)
+        self.vector_store.store(mem_id, vector, persist=True)
 
     def consolidate(self, threshold: float = None):
         """Run consolidation manually."""

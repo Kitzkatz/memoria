@@ -24,7 +24,7 @@ class Router:
         self.matrix = matrix or ROUTING_MATRIX
         self.default_type = "general"
         self.type_priority = TYPE_PRIORITY
-        self.plugin_manager = plugin_manager  # <-- NEW
+        self.plugin_manager = plugin_manager
         # Cache for route lookups
         self._route_cache = {}
         self._signal_cache = {}
@@ -34,13 +34,6 @@ class Router:
         Return the routing configuration for a memory type.
         Cached for performance.
         """
-        # ---- Plugin hook: pre-routing ----
-        if self.plugin_manager:
-            try:
-                self.plugin_manager.memoria_routing_pre(memory_type)
-            except Exception as e:
-                debug(f"[Plugin] router_pre error: {e}")
-
         # Check cache first
         if memory_type in self._route_cache:
             route = self._route_cache[memory_type]
@@ -55,13 +48,6 @@ class Router:
             # Cache and return
             self._route_cache[memory_type] = config
             route = config
-
-        # ---- Plugin hook: post-routing ----
-        if self.plugin_manager:
-            try:
-                self.plugin_manager.memoria_routing_post(route)
-            except Exception as e:
-                debug(f"[Plugin] router_post error: {e}")
 
         return route
 
@@ -108,7 +94,10 @@ class Router:
 
     def get_detection_hints(self, memory_type: str) -> dict:
         """Return the detection hints for a memory type."""
-        return self.route(memory_type).get("detection", {"keywords": [], "exclude": [], "min_confidence": 0.0})
+        return self.route(memory_type).get(
+            "detection",
+            {"keywords": [], "exclude": [], "min_confidence": 0.0}
+        )
 
     def list_types(self) -> list:
         """Return all available memory types."""
@@ -118,7 +107,12 @@ class Router:
         """Check if a memory type is valid."""
         return memory_type in self.matrix
 
-    def get_matching_type(self, query: str, entities: list = None, attributes: list = None) -> tuple:
+    def get_matching_type(
+        self,
+        query: str,
+        entities: list = None,
+        attributes: list = None
+    ) -> tuple:
         """
         Determine which memory type matches a query based on detection hints.
         Returns (type_name, confidence).
@@ -161,7 +155,12 @@ class Router:
 
         return best_type, best_confidence
 
-    def get_matching_type_detailed(self, query: str, entities: list = None, attributes: list = None) -> dict:
+    def get_matching_type_detailed(
+        self,
+        query: str,
+        entities: list = None,
+        attributes: list = None
+    ) -> dict:
         """
         Get detailed routing information including per-type scores.
         Useful for debugging and diagnostics.
@@ -192,7 +191,9 @@ class Router:
             }
 
         # Find the best match
-        best_type, best_confidence = self.get_matching_type(query, entities, attributes)
+        best_type, best_confidence = self.get_matching_type(
+            query, entities, attributes
+        )
         results["best"] = best_type
         results["best_confidence"] = best_confidence
 

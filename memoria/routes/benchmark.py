@@ -3,7 +3,7 @@ from pydantic import BaseModel
 import time
 from typing import List, Optional
 
-from memory.memory_controller import MemoryController
+from memory.controller_instance import controller as mc
 from core.logger import debug, info, error
 
 router = APIRouter(
@@ -11,7 +11,7 @@ router = APIRouter(
     tags=["Benchmark"]
 )
 
-mc = MemoryController()
+
 
 
 # ----------------------------------------------------

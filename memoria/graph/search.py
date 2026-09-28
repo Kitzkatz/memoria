@@ -1,5 +1,5 @@
 from collections import deque
-from typing import List, Set, Optional, Any
+from typing import List
 from core.logger import debug
 
 
@@ -8,208 +8,358 @@ class GraphSearch:
     def __init__(self, edge_store, entity_store, numpy_graph=None):
         self.edge_store = edge_store
         self.entity_store = entity_store
-        self.numpy_graph = numpy_graph  # optional fast graph
+        self.numpy_graph = numpy_graph
 
     def find_entity(self, name):
         return self.entity_store.find(name)
 
+    def _entity_id(self, name):
+        """Resolve a public entity name to its canonical entity ID."""
+        entity = self.find_entity(name)
+        return entity.id if entity else None
+
+    def _entity_name(self, entity_id):
+        """Resolve a canonical entity ID to its public entity name."""
+        entity = self.entity_store.find_by_id(entity_id)
+        return entity.name if entity else None
+
     def neighbors(self, entity_name: str, depth: int = 1):
         """
         Return related entities and relations up to depth.
-        Uses edge store; for fast lookups consider using numpy_graph.
+
+        Public API uses entity names; graph storage and traversal use
+        canonical entity IDs.
         """
-        if not entity_name:
+        if not entity_name or depth <= 0:
+            return []
+
+        entity_id = self._entity_id(entity_name)
+        if entity_id is None:
             return []
 
         visited = set()
         results = []
         queue = deque()
-        queue.append((entity_name, 0))
+        queue.append((entity_id, 0))
 
         while queue:
-            current, level = queue.popleft()
-            if current in visited:
+            current_id, level = queue.popleft()
+
+            if current_id in visited:
                 continue
-            visited.add(current)
+
+            visited.add(current_id)
+
             if level >= depth:
                 continue
 
-            # Fetch edges where current appears as source or target
-            edges = self.edge_store.fetch_edges_by_entity(current)
+            edges = self.edge_store.fetch_edges_by_entity(current_id)
+
             for edge in edges:
-                # Determine the other entity
-                other = edge.target if edge.source == current else edge.source
-                if other in visited:
+                other_id = (
+                    edge.target
+                    if edge.source == current_id
+                    else edge.source
+                )
+
+                if other_id in visited:
                     continue
+
+                other_name = self._entity_name(other_id)
+                if other_name is None:
+                    continue
+
+                source_name = self._entity_name(edge.source)
+                target_name = self._entity_name(edge.target)
+
                 results.append({
-                    "entity_name": other,
+                    "entity_name": other_name,
                     "relation": edge.relation,
-                    "source": edge.source,
-                    "target": edge.target
+                    "source": source_name,
+                    "target": target_name,
                 })
-                queue.append((other, level + 1))
+
+                queue.append((other_id, level + 1))
 
         return results
 
     def entity_memories(self, entity_name: str) -> List[int]:
         """Get all memory IDs associated with an entity."""
-        return self.edge_store.get_memory_ids_for_entity(entity_name)
+        entity_id = self._entity_id(entity_name)
+        if entity_id is None:
+            return []
 
-    def search(self, entities: List[str], depth: int = 1, limit: int = 200) -> List[int]:
+        return self.edge_store.get_memory_ids_for_entity(entity_id)
+
+    def search(
+        self,
+        entities: List[str],
+        depth: int = 1,
+        limit: int = 200
+    ) -> List[int]:
         """
-        Search for memory IDs related to a list of entities up to given depth.
-        Uses numpy_graph if available for speed, otherwise falls back to edge store.
+        Search for memory IDs related to a list of entities up to depth.
+
+        Public API accepts entity names. Graph internals use canonical
+        entity IDs. Uses numpy_graph when available.
         """
         if not entities:
             return []
 
-        debug(f"GraphSearch: entities={entities}, depth={depth}, limit={limit}", category="graph")
+        debug(
+            f"GraphSearch: entities={entities}, depth={depth}, limit={limit}",
+            category="graph"
+        )
 
-        # If numpy_graph is available and depth <= 2, use it for speed
+        # Resolve public names to canonical IDs once.
+        entity_ids = []
+        for name in entities:
+            entity_id = self._entity_id(name)
+            if entity_id is not None:
+                entity_ids.append(entity_id)
+
+        if not entity_ids:
+            return []
+
+        # Fast NumPy path.
         if self.numpy_graph and self.numpy_graph.built and depth <= 2:
-            memory_ids = self.numpy_graph.multi_hop_search(entities, depth=depth, limit=limit)
-            debug(f"GraphSearch: numpy_graph returned {len(memory_ids)} memories", category="graph")
+            memory_ids = self.numpy_graph.multi_hop_search(
+                entity_ids,
+                depth=depth,
+                limit=limit
+            )
+            debug(
+                f"GraphSearch: numpy_graph returned {len(memory_ids)} memories",
+                category="graph"
+            )
             return memory_ids
 
-        # Fallback: use edge store traversal
+        # Edge-store fallback.
         memory_ids = set()
         processed = set()
-        queue = deque(entities)
-
-        # Pre-load entities to avoid repeated lookups
-        entity_cache = {}
+        queue = deque(entity_ids)
 
         while queue and len(memory_ids) < limit:
-            name = queue.popleft()
-            if name in processed:
+            current_id = queue.popleft()
+
+            if current_id in processed:
                 continue
-            processed.add(name)
 
-            # Get entity from cache or lookup
-            if name not in entity_cache:
-                entity = self.find_entity(name)
-                if not entity:
-                    continue
-                entity_cache[name] = entity
-            else:
-                entity = entity_cache[name]
+            processed.add(current_id)
 
-            # Direct memories
-            for mem_id in self.entity_memories(name):
+            # Direct memories.
+            for mem_id in self.edge_store.get_memory_ids_for_entity(current_id):
                 memory_ids.add(mem_id)
+
                 if len(memory_ids) >= limit:
                     return list(memory_ids)[:limit]
 
-            # If depth > 0, traverse neighbors
+            # Traverse neighbors.
             if depth > 0:
-                neighbor_entities = self._get_neighbors_at_depth_with_cache(name, depth, processed, entity_cache)
-                for neighbor_name in neighbor_entities:
-                    if neighbor_name not in processed:
-                        queue.append(neighbor_name)
+                neighbor_ids = self._get_neighbor_ids(
+                    current_id,
+                    depth,
+                    processed
+                )
+
+                for neighbor_id in neighbor_ids:
+                    if neighbor_id not in processed:
+                        queue.append(neighbor_id)
 
         return list(memory_ids)[:limit]
 
-    def _get_neighbors_at_depth(self, entity_name: str, depth: int) -> List[str]:
-        """Get all entity names reachable within depth (excluding self)."""
-        if not entity_name or depth <= 0:
+    def _get_neighbor_ids(
+        self,
+        entity_id: int,
+        depth: int,
+        processed: set
+    ) -> List[int]:
+        """Get canonical entity IDs reachable within depth."""
+        if entity_id is None or depth <= 0:
             return []
 
-        visited = {entity_name}
-        frontier = {entity_name}
-
-        for _ in range(depth):
-            next_frontier = set()
-            for current in frontier:
-                edges = self.edge_store.fetch_edges_by_entity(current)
-                for edge in edges:
-                    other = edge.target if edge.source == current else edge.source
-                    if other not in visited:
-                        visited.add(other)
-                        next_frontier.add(other)
-            frontier = next_frontier
-            if not frontier:
-                break
-
-        return list(visited - {entity_name})
-
-    def _get_neighbors_at_depth_with_cache(self, entity_name: str, depth: int, processed: set, entity_cache: dict) -> List[str]:
-        """
-        Get neighbors with caching to avoid repeated DB lookups.
-        """
-        if not entity_name or depth <= 0:
-            return []
-
-        visited = {entity_name}
-        frontier = {entity_name}
+        visited = {entity_id}
+        frontier = {entity_id}
         result = []
 
         for _ in range(depth):
             next_frontier = set()
-            for current in frontier:
-                # Skip if already processed in the main search
-                if current in processed:
+
+            for current_id in frontier:
+                if current_id in processed:
                     continue
 
-                edges = self.edge_store.fetch_edges_by_entity(current)
-                for edge in edges:
-                    other = edge.target if edge.source == current else edge.source
-                    if other not in visited:
-                        visited.add(other)
-                        next_frontier.add(other)
-                        result.append(other)
+                edges = self.edge_store.fetch_edges_by_entity(current_id)
 
-                        # Cache entity if we find it
-                        if other not in entity_cache:
-                            entity = self.find_entity(other)
-                            if entity:
-                                entity_cache[other] = entity
+                for edge in edges:
+                    other_id = (
+                        edge.target
+                        if edge.source == current_id
+                        else edge.source
+                    )
+
+                    if other_id not in visited:
+                        visited.add(other_id)
+                        next_frontier.add(other_id)
+                        result.append(other_id)
 
             frontier = next_frontier
+
             if not frontier:
                 break
 
         return result
 
+    def _get_neighbors_at_depth(
+        self,
+        entity_name: str,
+        depth: int
+    ) -> List[str]:
+        """Get entity names reachable within depth, excluding self."""
+        entity_id = self._entity_id(entity_name)
+
+        if entity_id is None or depth <= 0:
+            return []
+
+        neighbor_ids = self._get_neighbor_ids(
+            entity_id,
+            depth,
+            set()
+        )
+
+        names = []
+
+        for neighbor_id in neighbor_ids:
+            name = self._entity_name(neighbor_id)
+            if name is not None:
+                names.append(name)
+
+        return names
+
+    def _get_neighbors_at_depth_with_cache(
+        self,
+        entity_name: str,
+        depth: int,
+        processed: set,
+        entity_cache: dict
+    ) -> List[str]:
+        """
+        Get neighboring entity names with caching.
+
+        The cache remains name-keyed because this method is an internal
+        compatibility path used by callers that operate on public names.
+        """
+        entity_id = self._entity_id(entity_name)
+
+        if entity_id is None or depth <= 0:
+            return []
+
+        neighbor_ids = self._get_neighbor_ids(
+            entity_id,
+            depth,
+            {
+                self._entity_id(name)
+                for name in processed
+                if self._entity_id(name) is not None
+            }
+        )
+
+        result = []
+
+        for neighbor_id in neighbor_ids:
+            name = self._entity_name(neighbor_id)
+            if name is None:
+                continue
+
+            result.append(name)
+
+            if name not in entity_cache:
+                entity = self.find_entity(name)
+                if entity:
+                    entity_cache[name] = entity
+
+        return result
+
     def get_entity_relations(self, entity_name: str) -> List[dict]:
         """Get all relations for a specific entity."""
-        if not entity_name:
-            return []
-        edges = self.edge_store.fetch_edges_by_entity(entity_name)
-        return [
-            {
-                "source": edge.source,
-                "relation": edge.relation,
-                "target": edge.target,
-                "memory_id": edge.memory_id
-            }
-            for edge in edges
-        ]
+        entity_id = self._entity_id(entity_name)
 
-    def get_entity_neighbors(self, entity_name: str, depth: int = 1) -> List[str]:
+        if entity_id is None:
+            return []
+
+        edges = self.edge_store.fetch_edges_by_entity(entity_id)
+
+        relations = []
+
+        for edge in edges:
+            source_name = self._entity_name(edge.source)
+            target_name = self._entity_name(edge.target)
+
+            relations.append({
+                "source": source_name,
+                "relation": edge.relation,
+                "target": target_name,
+                "memory_id": edge.memory_id,
+            })
+
+        return relations
+
+    def get_entity_neighbors(
+        self,
+        entity_name: str,
+        depth: int = 1
+    ) -> List[str]:
         """Get all entity names within depth without relation details."""
         neighbors = self.neighbors(entity_name, depth=depth)
         return [item["entity_name"] for item in neighbors]
 
     def get_entity_connections(self, entity_name: str) -> dict:
         """Get a summary of entity connections."""
-        edges = self.edge_store.fetch_edges_by_entity(entity_name)
+        entity_id = self._entity_id(entity_name)
+
+        if entity_id is None:
+            return {
+                "entity": entity_name,
+                "outgoing": [],
+                "incoming": [],
+                "total_edges": 0,
+            }
+
+        edges = self.edge_store.fetch_edges_by_entity(entity_id)
+
         outgoing = []
         incoming = []
+
         for edge in edges:
-            if edge.source == entity_name:
-                outgoing.append({"target": edge.target, "relation": edge.relation})
-            if edge.target == entity_name:
-                incoming.append({"source": edge.source, "relation": edge.relation})
+            if edge.source == entity_id:
+                target_name = self._entity_name(edge.target)
+                if target_name is not None:
+                    outgoing.append({
+                        "target": target_name,
+                        "relation": edge.relation
+                    })
+
+            if edge.target == entity_id:
+                source_name = self._entity_name(edge.source)
+                if source_name is not None:
+                    incoming.append({
+                        "source": source_name,
+                        "relation": edge.relation
+                    })
+
         return {
             "entity": entity_name,
             "outgoing": outgoing,
             "incoming": incoming,
-            "total_edges": len(edges)
+            "total_edges": len(edges),
         }
 
     def get_stats(self) -> dict:
         """Get search statistics."""
         return {
-            "numpy_graph_available": self.numpy_graph is not None and self.numpy_graph.built,
+            "numpy_graph_available": (
+                self.numpy_graph is not None
+                and self.numpy_graph.built
+            ),
             "entity_store_available": self.entity_store is not None,
         }

@@ -63,7 +63,10 @@ class AutoStore:
                 
                 # Store using the memory system
                 if hasattr(self.system, "store"):
-                    self.system.store(memory_data)
+                    self.system.store(
+                        memory_data["text"],
+                        metadata=memory_data
+                    )
                 elif hasattr(self.system, "memory_store") and hasattr(self.system.memory_store, "save"):
                     self.system.memory_store.save(memory_data)
                 else:
