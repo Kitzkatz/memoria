@@ -16,6 +16,7 @@ from core.plugin_generator import (
     HOOK_GROUPS,
     generate_plugin,
 )
+from shared.memory_interface import MemoryInterface
 
 
 # Optional dependencies
@@ -398,7 +399,7 @@ def main():
         return
 
     try:
-        from shared.memory_interface import MemoryInterface
+        
         interface = MemoryInterface()
         if args.command == "store":
             mid = interface.remember(args.text)
