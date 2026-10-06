@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Memory Daemon — Main Entry Point
+Memoria — Main Entry Point
 
 Usage:
     python main.py
@@ -14,14 +14,14 @@ from app import app
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Memory Daemon Server")
+    parser = argparse.ArgumentParser(description="Memoria Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind")
     parser.add_argument("--port", type=int, default=8000, help="Port to listen on")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload (development)")
     args = parser.parse_args()
 
     info("========================================")
-    info("      🧠 Memory Daemon V4")
+    info("      🧠 Memoria V1.0")
     info("========================================")
     info(f"   Host: {args.host}")
     info(f"   Port: {args.port}")

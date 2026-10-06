@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Memory Daemon CLI – configurable, command-line interface (like git).
+Memoria CLI – configurable, command-line interface (like git).
 """
 import argparse
 import json
@@ -9,9 +9,14 @@ import os
 import time
 from datetime import datetime
 
-from shared.memory_interface import MemoryInterface
+
 from cache.config import settings
 from core.logger import debug, info
+from core.plugin_generator import (
+    HOOK_GROUPS,
+    generate_plugin,
+)
+
 
 # Optional dependencies
 try:
@@ -35,8 +40,9 @@ except ImportError:
     HAS_SIGNAL_REGISTRY = False
 
 # Query history
+
 try:
-    from memory.query_history import get_query_history
+    from memory.query_history import QueryHistory
     HAS_QUERY_HISTORY = True
 except ImportError:
     HAS_QUERY_HISTORY = False
@@ -63,17 +69,25 @@ def print_table(results, limit, show_scores=True, width=80):
 
 
 def print_goals(goals):
-    """Pretty‑print goals."""
     if not goals:
         print("No goals found.")
         return
+
     print(f"{'ID':<6} {'Goal':<30} {'Progress':<12} {'Status'}")
     print("-" * 70)
+
     for g in goals:
-        print(f"{g['id']:<6} {g.get('goal', '')[:28]:<30} "
-              f"{g.get('progress', '')[:12]:<12} {g.get('status', '')}")
+        goal_id = getattr(g, "id", "")
+        goal = getattr(g, "goal", "")
+        progress = getattr(g, "progress", "")
+        status = getattr(g, "status", "")
 
-
+        print(
+            f"{goal_id:<6} "
+            f"{str(goal)[:28]:<30} "
+            f"{str(progress)[:12]:<12} "
+            f"{status}"
+        )
 def print_signals(signals, memory_type="general"):
     """Pretty‑print signal registry."""
     if not signals:
@@ -98,23 +112,24 @@ def print_signals(signals, memory_type="general"):
 
 
 def print_query_history(entries, limit=20):
-    """Pretty‑print query history entries."""
+    """Pretty-print recent query history entries."""
     if not entries:
         print("No history entries found.")
         return
 
-    print(f"{'ID':<8} {'Timestamp':<20} {'Type':<12} {'Results':<8} {'Query'}")
+    print(f"{'Timestamp':<20} {'Results':<8} {'Query'}")
     print("-" * 80)
 
     for entry in entries[:limit]:
-        entry_id = entry.get('id', '')[:8]
-        timestamp = entry.get('timestamp', '')[:16]
-        query_type = entry.get('query_type', 'unknown')[:12]
-        result_count = entry.get('result_count', 0)
-        query = entry.get('query', '')[:40]
-        print(f"{entry_id:<8} {timestamp:<20} {query_type:<12} {result_count:<8} {query}")
+        timestamp = datetime.fromtimestamp(
+            entry.get("timestamp", 0)
+        ).isoformat(timespec="minutes")
+        result_count = len(entry.get("results", []))
+        query = entry.get("query", "")[:50]
 
+        print(f"{timestamp:<20} {result_count:<8} {query}")
 
+        
 def print_query_diff(diff_result):
     """Pretty‑print query diff results."""
     if "error" in diff_result:
@@ -146,14 +161,105 @@ def print_auto_store_status():
     print(f"Max per session: {settings.AUTO_STORE_MAX_PER_SESSION}")
     print(f"Types: {settings.AUTO_STORE_TYPES}")
 
+def _run_plugin_create():
+    """Interactively create a new Memoria plugin."""
 
+    print()
+    print("Memoria Plugin Generator")
+    print("========================")
+    print()
+
+    plugin_name = input("Plugin name: ").strip()
+
+    if not plugin_name:
+        print("Plugin name cannot be empty.")
+        return
+
+    description = input("Description: ").strip()
+
+    print()
+    print("Select hook groups.")
+    print("Enter y to include a group, or n to skip it.")
+    print()
+
+    selected_groups = []
+
+    for group in HOOK_GROUPS:
+        answer = input(f"Include {group} hooks? [y/N]: ").strip().lower()
+
+        if answer in {"y", "yes"}:
+            selected_groups.append(group)
+
+    print()
+
+    create_tests = (
+        input("Create tests? [Y/n]: ").strip().lower()
+        not in {"n", "no"}
+    )
+
+    create_readme = (
+        input("Create README? [Y/n]: ").strip().lower()
+        not in {"n", "no"}
+    )
+
+    default_output = settings.PLUGIN_DIR
+
+    output_input = input(
+        f"Output directory [{default_output}]: "
+    ).strip()
+
+    output_dir = output_input or default_output
+
+    print()
+    print("Plugin configuration")
+    print("--------------------")
+    print(f"Name:        {plugin_name}")
+    print(f"Description: {description or '(none)'}")
+    print(
+        "Hooks:       "
+        + (", ".join(selected_groups) if selected_groups else "(none)")
+    )
+    print(f"Tests:       {'yes' if create_tests else 'no'}")
+    print(f"README:      {'yes' if create_readme else 'no'}")
+    print(f"Output:      {output_dir}")
+    print()
+
+    confirm = input("Create plugin? [Y/n]: ").strip().lower()
+
+    if confirm in {"n", "no"}:
+        print("Plugin creation cancelled.")
+        return
+
+    try:
+        generated = generate_plugin(
+            plugin_name=plugin_name,
+            description=description,
+            hook_groups=selected_groups,
+            output_dir=output_dir,
+            create_tests=create_tests,
+            create_readme=create_readme,
+        )
+    except (ValueError, FileExistsError, OSError) as exc:
+        print(f"Plugin creation failed: {exc}")
+        return
+
+    print()
+    print("Plugin created successfully.")
+    print()
+
+    for kind, path in generated.items():
+        print(f"{kind:>8}: {path}")
+
+    print()
+
+    
 def main():
     parser = argparse.ArgumentParser(
         prog="memory",
-        description="Memory Daemon CLI – local memory engine for LLMs",
+        description="Memoria CLI – local memory engine for LLMs",
         usage="memory <command> [options]"
     )
-    parser.add_argument("--version", action="version", version="Memory Daemon v4.5")
+    parser.add_argument("--version", action="version", version="Memoria v1.0")
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommand")
 
@@ -241,23 +347,23 @@ def main():
         p_signals.add_argument("--reset", action="store_true", help="Reset registry to defaults")
 
     # ---- query-history (NEW) ----
+    
     if HAS_QUERY_HISTORY:
-        p_history = subparsers.add_parser("query-history", help="Query history management")
-        p_history.add_argument("--search", type=str, help="Search by query text")
-        p_history.add_argument("--start-date", type=str, help="Start date (YYYY-MM-DD)")
-        p_history.add_argument("--end-date", type=str, help="End date (YYYY-MM-DD)")
-        p_history.add_argument("--type", type=str, help="Filter by query type")
-        p_history.add_argument("--min-results", type=int, help="Minimum number of results")
-        p_history.add_argument("--max-results", type=int, help="Maximum number of results")
-        p_history.add_argument("--min-score", type=float, help="Minimum score threshold")
-        p_history.add_argument("--limit", type=int, default=20, help="Maximum entries to return")
-        p_history.add_argument("--diff", nargs=2, metavar=('ID1', 'ID2'), help="Diff two entries")
-        p_history.add_argument("--show", type=str, help="Show details of a specific entry")
-        p_history.add_argument("--export", type=str, choices=['json', 'csv', 'markdown'], help="Export format")
-        p_history.add_argument("--output", type=str, help="Output file path (for export)")
-        p_history.add_argument("--stats", action="store_true", help="Show statistics")
-        p_history.add_argument("--clear", type=int, nargs='?', const=0, help="Clear history (optional: older than N days)")
-
+        p_history = subparsers.add_parser(
+            "query-history",
+            help="Show query history"
+        )
+        p_history.add_argument(
+            "--limit",
+            type=int,
+            default=20,
+            help="Maximum number of entries to show"
+        )
+        p_history.add_argument(
+            "--frequent",
+            action="store_true",
+            help="Show most frequent queries instead of recent queries"
+        )
     # ---- auto-store (NEW) ----
     p_autostore = subparsers.add_parser("auto-store", help="Manage auto-store settings")
     p_autostore.add_argument("--enable", action="store_true", help="Enable auto-store")
@@ -267,10 +373,33 @@ def main():
     p_autostore.add_argument("--types", type=str, help="Comma-separated list of memory types to auto-store")
     p_autostore.add_argument("--status", action="store_true", help="Show current auto-store status")
 
+
+    p_plugin = subparsers.add_parser(
+        "plugin",
+        help="Manage Memoria plugins",
+    )
+
+    plugin_subparsers = p_plugin.add_subparsers(
+        dest="plugin_command",
+        required=True,
+    )
+
+    p_plugin_create = plugin_subparsers.add_parser(
+        "create",
+        help="Create a new Memoria plugin",
+    )
+
+    p_plugin_create.set_defaults(plugin_action="create")
+    
     args = parser.parse_args()
-    interface = MemoryInterface()
+
+    if getattr(args, "plugin_action", None) == "create":
+        _run_plugin_create()
+        return
 
     try:
+        from shared.memory_interface import MemoryInterface
+        interface = MemoryInterface()
         if args.command == "store":
             mid = interface.remember(args.text)
             print(f"Stored memory with ID: {mid}")
@@ -353,7 +482,7 @@ def main():
         elif args.command == "info":
             db = interface.controller.system.db
             count = db.count()
-            print(f"Memory Daemon v4.5")
+            print(f"Memoria v1.0")
             print(f"Database: {settings.DB_PATH}")
             print(f"Total memories: {count}")
             print(f"Embedding model: {settings.EMBEDDING_MODEL}")
@@ -416,7 +545,11 @@ def main():
             if not isinstance(data, list):
                 print("Error: import file must contain a list of memory objects.")
                 return
-            texts = [item.get('text', item.get('normalized_text', '')) for item in data if item.get('text')]
+            texts = [
+                item.get("text") or item.get("normalized_text", "")
+                for item in data
+                if item.get("text") or item.get("normalized_text")
+            ]
             ids = interface.remember_many(texts)
             print(f"Imported {len(ids)} memories from {args.file}")
 
@@ -478,114 +611,29 @@ def main():
                 print_signals(signals, memory_type)
 
         # ---- query-history (NEW) ----
+        
         elif args.command == "query-history":
             if not HAS_QUERY_HISTORY:
                 print("Error: Query history module not available.")
                 return
 
-            history = get_query_history()
+            history = QueryHistory()
 
-            # Stats
-            if args.stats:
-                stats = history.get_stats()
-                print("Query History Statistics:")
-                print(f"  Total queries: {stats['total_queries']}")
-                print(f"  Types: {json.dumps(stats['type_counts'], indent=2)}")
-                if stats['oldest']:
-                    print(f"  Oldest: {stats['oldest']}")
-                if stats['newest']:
-                    print(f"  Newest: {stats['newest']}")
-                print(f"  Avg results: {stats['avg_results']}")
-                return
+            if args.frequent:
+                queries = history.get_frequent(args.limit)
 
-            # Clear
-            if args.clear is not None:
-                if args.clear == 0:
-                    count = history.clear()
-                    print(f"Cleared {count} entries")
-                else:
-                    count = history.clear(older_than_days=args.clear)
-                    print(f"Cleared {count} entries older than {args.clear} days")
-                return
-
-            # Diff
-            if args.diff:
-                diff_result = history.diff(args.diff[0], args.diff[1])
-                print_query_diff(diff_result)
-                return
-
-            # Show specific entry
-            if args.show:
-                entry = history.get_by_id(args.show)
-                if not entry:
-                    print(f"Entry {args.show} not found")
-                    return
-                print(f"ID: {entry['id']}")
-                print(f"Timestamp: {entry['timestamp']}")
-                print(f"Query: {entry['query']}")
-                print(f"Type: {entry['query_type']}")
-                print(f"Result count: {entry['result_count']}")
-                if entry.get('metadata'):
-                    print(f"Metadata: {json.dumps(entry['metadata'], indent=2)}")
-                print("\nTop results:")
-                for i, result in enumerate(entry.get('results', [])[:5], 1):
-                    text = result.get('text', 'N/A')[:80]
-                    score = result.get('score', 0)
-                    print(f"  {i}. {text}... (score: {score:.3f})")
-                return
-
-            # Export
-            if args.export:
-                # Get entries for export
-                if args.search or args.start_date or args.end_date or args.type or args.min_results or args.max_results or args.min_score:
-                    entries = history.search(
-                        query_text=args.search,
-                        start_date=args.start_date,
-                        end_date=args.end_date,
-                        query_type=args.type,
-                        min_results=args.min_results,
-                        max_results=args.max_results,
-                        min_score=args.min_score,
-                        limit=args.limit
-                    )
-                else:
-                    # Export recent entries if no filters
-                    entries = history.get_recent(limit=args.limit)
-
-                if not entries:
-                    print("No entries to export")
+                if not queries:
+                    print("No frequent queries found.")
                     return
 
-                content = history.export(entries, format=args.export)
-                if args.output:
-                    with open(args.output, 'w', encoding='utf8') as f:
-                        f.write(content)
-                    print(f"Exported {len(entries)} entries to {args.output}")
-                else:
-                    print(content)
+                print(f"Most frequent queries (top {len(queries)}):")
+                for index, query in enumerate(queries, 1):
+                    print(f"{index:<4} {query}")
                 return
 
-            # Search (default)
-            entries = history.search(
-                query_text=args.search,
-                start_date=args.start_date,
-                end_date=args.end_date,
-                query_type=args.type,
-                min_results=args.min_results,
-                max_results=args.max_results,
-                min_score=args.min_score,
-                limit=args.limit
-            )
-
-            if not entries:
-                print("No entries found")
-                return
-
-            print(f"Found {len(entries)} entries")
-            if args.search:
-                print(f"Search: '{args.search}'")
-            print()
+            entries = history.get_recent(args.limit)
             print_query_history(entries, limit=args.limit)
+
 
         # ---- auto-store (NEW) ----
         elif args.command == "auto-store":

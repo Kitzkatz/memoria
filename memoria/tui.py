@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Memory Daemon TUI – interactive text interface with persistent chat mode.
+Memoria TUI – interactive text interface with persistent chat mode.
 """
 import cmd
 import json
@@ -21,7 +21,7 @@ except ImportError:
 
 # Query history
 try:
-    from memory.query_history import get_query_history
+    from memory.query_history import QueryHistory
     HAS_QUERY_HISTORY = True
 except ImportError:
     HAS_QUERY_HISTORY = False
@@ -86,24 +86,38 @@ def format_signals(signals, memory_type="general"):
 
 
 def format_query_history(entries, limit=20):
-    """Format query history as a table string."""
+    """Format query history entries from QueryHistory."""
     if not entries:
         return "No history entries found."
 
     lines = []
-    lines.append(f"{'ID':<8} {'Timestamp':<20} {'Type':<12} {'Results':<8} {'Query'}")
+    lines.append(f"{'Timestamp':<20} {'Results':<8} {'Query'}")
     lines.append("-" * 80)
 
     for entry in entries[:limit]:
-        entry_id = entry.get('id', '')[:8]
-        timestamp = entry.get('timestamp', '')[:16]
-        query_type = entry.get('query_type', 'unknown')[:12]
-        result_count = entry.get('result_count', 0)
-        query = entry.get('query', '')[:40]
-        lines.append(f"{entry_id:<8} {timestamp:<20} {query_type:<12} {result_count:<8} {query}")
+        timestamp = entry.get("timestamp", "")
+
+        if isinstance(timestamp, (int, float)):
+            try:
+                timestamp = datetime.fromtimestamp(timestamp).strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+            except (OverflowError, OSError, ValueError):
+                timestamp = str(timestamp)
+        else:
+            timestamp = str(timestamp)[:16]
+
+        results = entry.get("results", [])
+        result_count = len(results) if isinstance(results, list) else 0
+        query = str(entry.get("query", ""))
+
+        lines.append(
+            f"{timestamp:<20} "
+            f"{result_count:<8} "
+            f"{query}"
+        )
 
     return "\n".join(lines)
-
 
 def format_query_diff(diff_result):
     """Format query diff results as a string."""
@@ -142,7 +156,7 @@ def format_auto_store_status():
 
 
 class MemoryShell(cmd.Cmd):
-    intro = f"Memory Daemon TUI v4.5. Type 'help' for commands.\n"
+    intro = f"Memoria TUI v4.5. Type 'help' for commands.\n"
     prompt = "Memory> "
     chat_prompt = "Chat> "
 
@@ -167,7 +181,7 @@ class MemoryShell(cmd.Cmd):
 
         # Query history
         if HAS_QUERY_HISTORY:
-            self.history = get_query_history()
+            self.history = QueryHistory()
         else:
             self.history = None
 
@@ -408,7 +422,7 @@ class MemoryShell(cmd.Cmd):
         try:
             db = self.mem.controller.system.db
             count = db.count()
-            print(f"Memory Daemon v4.5")
+            print(f"Memoria v1.0")
             print(f"Database: {settings.DB_PATH}")
             print(f"Total memories: {count}")
             print(f"Embedding model: {settings.EMBEDDING_MODEL}")
@@ -424,7 +438,12 @@ class MemoryShell(cmd.Cmd):
             print("Usage: graph <entity> [depth]")
             return
         entity_name = parts[0]
-        depth = int(parts[1]) if len(parts) > 1 else 1
+
+        try:
+            depth = int(parts[1]) if len(parts) > 1 else 1
+        except ValueError:
+            print("Error: depth must be a number")
+            return
         try:
             graph_search = self.mem.controller.system.graph_search
             entity = graph_search.find_entity(entity_name)
@@ -473,9 +492,9 @@ class MemoryShell(cmd.Cmd):
                 print("Error: JSON must contain a list of memory objects.")
                 return
             texts = [
-                item.get('text', item.get('normalized_text', ''))
+                item.get("text") or item.get("normalized_text", "")
                 for item in data
-                if item.get('text')
+                if item.get("text") or item.get("normalized_text")
             ]
             ids = self.mem.remember_many(texts)
             print(f"Imported {len(ids)} memories from {arg}")
@@ -564,157 +583,87 @@ class MemoryShell(cmd.Cmd):
 
     # ---- Query History Commands (NEW) ----
     def do_history(self, arg):
-        """Query history management. Usage: history [search|show|diff|export|stats|clear]"""
+        """Query history. Usage: history [recent|frequent|context|previous]"""
         if not HAS_QUERY_HISTORY:
             print("Query history not available.")
             return
 
         parts = arg.split()
+
         if not parts:
-            # Show recent history
-            entries = self.history.get_recent(limit=10)
+            entries = self.history.get_recent(n=10)
             print(format_query_history(entries, limit=10))
             return
 
         subcmd = parts[0].lower()
 
-        if subcmd == "search":
-            # Parse search args
-            query_text = None
-            start_date = None
-            end_date = None
-            query_type = None
-            min_results = None
-            max_results = None
-            min_score = None
-            limit = 20
+        if subcmd == "recent":
+            limit = 10
 
-            i = 1
-            while i < len(parts):
-                if parts[i] == "--query" and i + 1 < len(parts):
-                    query_text = parts[i + 1]
-                    i += 2
-                elif parts[i] == "--start" and i + 1 < len(parts):
-                    start_date = parts[i + 1]
-                    i += 2
-                elif parts[i] == "--end" and i + 1 < len(parts):
-                    end_date = parts[i + 1]
-                    i += 2
-                elif parts[i] == "--type" and i + 1 < len(parts):
-                    query_type = parts[i + 1]
-                    i += 2
-                elif parts[i] == "--min-results" and i + 1 < len(parts):
-                    min_results = int(parts[i + 1])
-                    i += 2
-                elif parts[i] == "--max-results" and i + 1 < len(parts):
-                    max_results = int(parts[i + 1])
-                    i += 2
-                elif parts[i] == "--min-score" and i + 1 < len(parts):
-                    min_score = float(parts[i + 1])
-                    i += 2
-                elif parts[i] == "--limit" and i + 1 < len(parts):
-                    limit = int(parts[i + 1])
-                    i += 2
-                else:
-                    i += 1
+            if len(parts) > 1:
+                try:
+                    limit = int(parts[1])
+                except ValueError:
+                    print("Error: limit must be a number")
+                    return
 
-            entries = self.history.search(
-                query_text=query_text,
-                start_date=start_date,
-                end_date=end_date,
-                query_type=query_type,
-                min_results=min_results,
-                max_results=max_results,
-                min_score=min_score,
-                limit=limit
-            )
-            print(f"Found {len(entries)} entries")
-            print(format_query_history(entries, limit))
+                if limit <= 0:
+                    print("Error: limit must be greater than 0")
+                    return
 
-        elif subcmd == "show":
-            if len(parts) < 2:
-                print("Usage: history show <entry_id>")
-                return
-            entry_id = parts[1]
-            entry = self.history.get_by_id(entry_id)
-            if not entry:
-                print(f"Entry {entry_id} not found")
-                return
-            print(f"ID: {entry['id']}")
-            print(f"Timestamp: {entry['timestamp']}")
-            print(f"Query: {entry['query']}")
-            print(f"Type: {entry['query_type']}")
-            print(f"Result count: {entry['result_count']}")
-            if entry.get('metadata'):
-                print(f"Metadata: {json.dumps(entry['metadata'], indent=2)}")
-            print("\nTop results:")
-            for i, result in enumerate(entry.get('results', [])[:5], 1):
-                text = result.get('text', 'N/A')[:80]
-                score = result.get('score', 0)
-                print(f"  {i}. {text}... (score: {score:.3f})")
+            entries = self.history.get_recent(n=limit)
+            print(format_query_history(entries, limit=limit))
+            return
 
-        elif subcmd == "diff":
-            if len(parts) < 3:
-                print("Usage: history diff <id1> <id2>")
-                return
-            diff_result = self.history.diff(parts[1], parts[2])
-            print(format_query_diff(diff_result))
+        if subcmd == "frequent":
+            limit = 10
 
-        elif subcmd == "export":
-            if len(parts) < 2:
-                print("Usage: history export <json|csv|markdown> [--output <file>] [--limit <n>]")
-                return
-            format_type = parts[1]
-            output_file = None
-            limit = 100
-            i = 2
-            while i < len(parts):
-                if parts[i] == "--output" and i + 1 < len(parts):
-                    output_file = parts[i + 1]
-                    i += 2
-                elif parts[i] == "--limit" and i + 1 < len(parts):
-                    limit = int(parts[i + 1])
-                    i += 2
-                else:
-                    i += 1
+            if len(parts) > 1:
+                try:
+                    limit = int(parts[1])
+                except ValueError:
+                    print("Error: limit must be a number")
+                    return
 
-            entries = self.history.get_recent(limit=limit)
-            if not entries:
-                print("No entries to export")
+                if limit <= 0:
+                    print("Error: limit must be greater than 0")
+                    return
+
+            queries = self.history.get_frequent(n=limit)
+
+            if not queries:
+                print("No frequent queries found.")
                 return
 
-            content = self.history.export(entries, format=format_type)
-            if output_file:
-                with open(output_file, 'w', encoding='utf8') as f:
-                    f.write(content)
-                print(f"Exported {len(entries)} entries to {output_file}")
-            else:
-                print(content)
+            print("Frequent queries:")
+            for index, query in enumerate(queries, 1):
+                print(f"  {index}. {query}")
+            return
 
-        elif subcmd == "stats":
-            stats = self.history.get_stats()
-            print("Query History Statistics:")
-            print(f"  Total queries: {stats['total_queries']}")
-            print(f"  Types: {json.dumps(stats['type_counts'], indent=2)}")
-            if stats['oldest']:
-                print(f"  Oldest: {stats['oldest']}")
-            if stats['newest']:
-                print(f"  Newest: {stats['newest']}")
-            print(f"  Avg results: {stats['avg_results']}")
+        if subcmd == "context":
+            queries = self.history.get_context()
 
-        elif subcmd == "clear":
-            if len(parts) > 1 and parts[1].isdigit():
-                days = int(parts[1])
-                count = self.history.clear(older_than_days=days)
-                print(f"Cleared {count} entries older than {days} days")
-            else:
-                count = self.history.clear()
-                print(f"Cleared {count} entries")
+            if not queries:
+                print("No query context available.")
+                return
 
-        else:
-            print(f"Unknown history subcommand: {subcmd}")
-            print("Available: search, show, diff, export, stats, clear")
+            print("Recent query context:")
+            for index, query in enumerate(queries, 1):
+                print(f"  {index}. {query}")
+            return
 
+        if subcmd == "previous":
+            query = self.history.get_previous_query()
+
+            if query is None:
+                print("No previous query available.")
+                return
+
+            print(f"Previous query: {query}")
+            return
+
+        print(f"Unknown history subcommand: {subcmd}")
+        print("Available: recent, frequent, context, previous")
     # ---- Auto-Store Commands (NEW) ----
     def do_autostore(self, arg):
         """Manage auto-store settings. Usage: autostore [on|off|threshold <value>|max <value>|types <list>|status]"""
@@ -784,6 +733,9 @@ def main():
     except KeyboardInterrupt:
         print("\nGoodbye.")
         sys.exit(0)
+    except Exception as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from core.logger import info, debug
 from cache.config import settings
 
 # Module-level info (runs on import)
-info("Bootstrapping memory system...")
+debug("Bootstrapping memory system...", category="core")
 
 
 def bootstrap():

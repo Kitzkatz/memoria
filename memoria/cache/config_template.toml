@@ -1,0 +1,290 @@
+# Memoria user configuration
+#
+# Configuration precedence:
+#
+#   built-in defaults
+#       ↓
+#   this file
+#       ↓
+#   MEMORY_* environment variables
+#
+# Edit this file to permanently configure Memoria.
+#
+# Generated automatically on first run.
+# Location is platform-specific:
+#
+#   Linux:   ~/.config/memoria/config.toml
+#   macOS:   ~/Library/Application Support/memoria/config.toml
+#   Windows: %LOCALAPPDATA%\memoria\config.toml
+
+
+# -------------------------
+# Paths
+# -------------------------
+
+DB_PATH = "memory.db"
+VECTOR_INDEX_PATH = "memory.index"
+CACHE_PATH = "cache/embedding_cache.pkl"
+
+
+# -------------------------
+# Models
+# -------------------------
+
+EMBEDDING_MODEL = "memory/models/all-MiniLM-L6-v2"
+CHAT_TEMPLATE_DIR = "chat_templates"
+CHAT_TEMPLATE_FILE = "llama3.txt"
+VECTOR_DIM = 384
+
+CHAT_MODEL = "mistral"
+LLM_URL = "http://localhost:8080"
+LLM_ENDPOINT = "/v1/completions"
+LLM_MAX_TOKENS = 256
+LLM_TEMPERATURE = 0.7
+LLM_TIMEOUT = 600
+LLM_STOP_TOKENS = ["<|eot_id|>"]
+
+
+# -------------------------
+# Retrieval
+# -------------------------
+
+TOP_K = 5000
+TOP_N = 550
+
+GRAPH_TOP_K = 50
+GRAPH_SEARCH_LIMIT = 200
+GRAPH_DEPTH = 3
+GRAPH_SEARCH_DEPTH = 1
+
+USE_QUERY_EXPANSION = false
+SYNONYM_PATH = "retrieval/synonyms.json"
+
+
+# -------------------------
+# Indexing
+# -------------------------
+
+USE_INVERTED_INDEX = true
+USE_PHRASE_SEARCH = true
+USE_BM25 = true
+USE_FUSION = true
+USE_TEMPORAL_WORKER = false
+
+FUSION_SEMANTIC_WEIGHT = 0.5
+RRF_K = 10
+
+MMR_ENABLED = false
+USE_BLACKBOARD = true
+USE_CASE_FOLDING = true
+
+
+# -------------------------
+# Retrieval Workers
+# -------------------------
+
+WORKERS_TO_USE = ["fusion"]
+
+
+# -------------------------
+# Cross-Encoder
+# -------------------------
+
+USE_CROSS_ENCODER = false
+CROSS_ENCODER_MODEL_PATH = "memory/models/cross-encoder"
+CROSS_ENCODER_TOP_K = 10
+
+
+# -------------------------
+# Routing
+# -------------------------
+
+USE_ROUTING = true
+ROUTING_MATRIX_OVERRIDE = true
+ROUTING_FALLBACK_ENABLED = true
+
+RETRIEVAL_MIN_CANDIDATES = 550
+MIN_RETRIEVAL_SOURCES = 2
+RETRIEVAL_DEADLINE = 0.050
+
+
+# -------------------------
+# Ranking
+# -------------------------
+
+RANKING_ENABLED = false
+CONTEXT_MAX_MEMORIES = 50
+CONTEXT_MIN_SCORE = 0.15
+CONTEXT_TOKEN_BUDGET = 10000
+
+
+# -------------------------
+# Memory
+# -------------------------
+
+MEMORY_DECAY_DAYS = 30
+MEMORY_DECAY_RATE = 0.001
+IMPORTANCE_DELTA = 0.01
+
+
+# -------------------------
+# Sharding
+# -------------------------
+
+NUM_SHARDS = 5
+USE_SHARDING = false
+TOP_K_PER_SHARD = 200
+
+
+# -------------------------
+# Finalizer
+# -------------------------
+
+FINALIZER_USE_SIGMOID = false
+FINALIZER_SIGMOID_SCALE = 0.5
+
+
+# -------------------------
+# Embedding Cache
+# -------------------------
+
+SKIP_EMBEDDING = false
+EMBEDDING_CACHE_MAX_SIZE = 100000
+
+
+# -------------------------
+# Debug
+# -------------------------
+
+DEBUG = false
+RANKER_DIAGNOSTICS = false
+
+
+# -------------------------
+# Boosting
+# -------------------------
+
+ENTITY_BOOST = 0.50
+
+
+# -------------------------
+# Adaptive Weighter
+# -------------------------
+
+AUTO_STORE_MEMORIES = false
+AUTO_STORE_THRESHOLD = 0.7
+AUTO_STORE_MAX_PER_SESSION = 10
+AUTO_STORE_TYPES = ["general", "chat"]
+
+USE_ADAPTIVE_WEIGHTS = true
+ADAPTIVE_WEIGHT_STEP = 0.02
+ADAPTIVE_WEIGHT_MAX = 0.40
+ADAPTIVE_WEIGHT_MIN = 0.01
+
+
+# -------------------------
+# Ranking Signal Registry
+# -------------------------
+
+SIGNAL_REGISTRY_PATH = "ranking/signal_registry.json"
+ENABLE_SIGNAL_REGISTRY = true
+
+
+# -------------------------
+# Ranking Weights
+# -------------------------
+
+RANKING_SEMANTIC = 0.40
+RANKING_IMPORTANCE = 0.01
+RANKING_RECENCY = 0.01
+RANKING_TOKEN = 0.15
+RANKING_FEEDBACK = 0.01
+RANKING_ENTITY = 0.01
+RANKING_SUBJECT = 0.10
+RANKING_ATTRIBUTE = 0.01
+RANKING_TFIDF = 0.15
+RANKING_BM25 = 0.15
+
+
+# -------------------------
+# Score Normalizer
+# -------------------------
+
+SCORE_NORMALIZER_METHOD = "zscore"
+
+
+# -------------------------
+# Finalizer Weights
+# -------------------------
+
+FINALIZER_RELEVANCE = 1.0
+FINALIZER_IMPORTANCE = 0.0
+FINALIZER_RECENCY = 0.0
+FINALIZER_DIVERSITY = 0.0
+FINALIZER_ATTRIBUTE = 0.0
+FINALIZER_BM25 = 0.0
+
+
+# -------------------------
+# Consolidator
+# -------------------------
+
+CONSOLIDATE_THRESHOLD = 0.85
+CONSOLIDATE_BATCH_SIZE = 500
+CONSOLIDATE_AUTO = false
+CONSOLIDATE_INTERVAL = 3600
+
+
+# -------------------------
+# Feedback Loop
+# -------------------------
+
+FEEDBACK_WEIGHT = 0.08
+FEEDBACK_PERSIST_PATH = "feedback_data.json"
+QUERY_HISTORY_PERSIST_PATH = "query_history.json"
+QUERY_HISTORY_MAX = 1000
+
+
+# -------------------------
+# Memory Pruner
+# -------------------------
+
+PRUNE_THRESHOLD = 0.1
+PRUNE_MAX_AGE_DAYS = 365
+PRUNE_BATCH_SIZE = 100
+PRUNE_INTERVAL_SECONDS = 3600
+PRUNE_AUTO_START = false
+
+
+# -------------------------
+# Chat Template
+# -------------------------
+
+CHAT_TEMPLATE = "llama3"
+
+
+# -------------------------
+# CLI
+# -------------------------
+
+CLI_DEFAULT_LIMIT = 3
+CLI_OUTPUT_FORMAT = "table"
+CLI_HISTORY_FILE = ".memory_history"
+CLI_SHOW_SCORES = true
+CLI_TABLE_WIDTH = 80
+
+
+# -------------------------
+# Plugin System
+# -------------------------
+
+PLUGIN_ENABLED = true
+PLUGIN_DIR = "plugins"
+PLUGIN_AUTO_LOAD = true
+
+
+# Optional allowlist. When populated, only these plugins are enabled.
+PLUGIN_ENABLED_PLUGINS = []
+
+# Optional denylist. Denylist takes precedence over the allowlist.
+PLUGIN_DISABLED_PLUGINS = []

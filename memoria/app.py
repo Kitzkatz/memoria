@@ -1,5 +1,5 @@
 """
-Memory Daemon — FastAPI application.
+Memoria — FastAPI application.
 
 Routes:
 - /memory: Store and retrieve memories
@@ -66,8 +66,8 @@ fastapi.encoders.jsonable_encoder = jsonable_encoder_numpy
 # ─────────────────────────────────────────────
 
 app = FastAPI(
-    title="Memory Daemon",
-    version="4.0",
+    title="Memoria",
+    version="1.0",
     description="Local-first, LLM-agnostic memory system with feedback learning",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -133,7 +133,7 @@ async def gui(request: Request):
         return HTMLResponse(html)
     except FileNotFoundError:
         return HTMLResponse(
-            "<html><body><h1>Memory Daemon V4</h1>"
+            "<html><body><h1>Memoria V1.0</h1>"
             "<p>Running. No GUI found. Use /docs for API.</p>"
             f"<p>Version: 4.0</p></body></html>"
         )
@@ -148,8 +148,8 @@ async def health():
     """Simple health check endpoint."""
     return {
         "status": "ok",
-        "version": "4.0",
-        "service": "Memory Daemon"
+        "version": "1.0",
+        "service": "Memoria"
     }
 
 
@@ -158,7 +158,7 @@ async def health():
 # ─────────────────────────────────────────────
 
 info("========================================", category="app")
-info("      Memory Daemon V4", category="app")
+info("      Memoria V1.0", category="app")
 info("========================================", category="app")
 info(f"   Docs: http://localhost:8000/docs", category="app")
 info(f"   GUI:  http://localhost:8000/", category="app")

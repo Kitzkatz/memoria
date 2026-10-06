@@ -1,6 +1,6 @@
 ---
 title: Adapters
-description: How Memoria adapters wrap external datasets for retrieval evaluation, and how to write your own.
+description: How Memoria adapters wrap external datasets and source repositories, and how to write your own.
 ---
 
 # Adapters
@@ -390,3 +390,680 @@ If the cache manifest validates only the dataset hash but not the embedding iden
 - **Exclude abstentions explicitly.** Record them with `metrics: null` and count them separately. Do not silently drop them — the evaluable denominator needs to be derivable from the output.
 - **Report retrieval metrics as retrieval metrics.** Session-level and turn-level recall are not answer-generation accuracy.
 - **Write the manifest alongside the results.** The results file is for analysis; the manifest is for reproduction. They serve different readers.
+
+
+
+---
+
+## Source Ingestion Adapters
+
+Memoria also supports source-specific ingestion adapters for external
+repositories and knowledge sources.
+
+These adapters are separate from the benchmark/evaluation adapters described
+above. A benchmark adapter controls an evaluation methodology, dataset
+isolation, gold labels, metrics, and reproducibility. A source ingestion
+adapter instead converts an external source into records that Memoria can
+ingest.
+
+Examples include:
+
+* `benchmark/obsidian/` — Obsidian vault ingestion
+* `benchmark/github/` — local Git repository ingestion
+
+The source adapter owns knowledge about the external format. Memoria owns
+storage, indexing, retrieval, ranking, and memory processing.
+
+### Source adapter architecture
+
+The intended flow is:
+
+```text
+External source
+      ↓
+Source-specific parser / models
+      ↓
+Source ingestion adapter
+      ↓
+Normalized Memoria records
+      ↓
+Caller-supplied insertion
+      ↓
+Memoria
+```
+
+The adapter should remain a translation boundary. It should understand the
+source it is ingesting without taking ownership of the memory engine itself.
+
+---
+
+## Normalized Record Contract
+
+Source ingestion adapters expose normalized records using a simple structure:
+
+```python
+{
+    "text": "...",
+    "metadata": {
+        "source": "...",
+        # source-specific metadata
+    },
+}
+```
+
+Two fields are required:
+
+* `text` — the textual content that will become the memory record.
+* `metadata` — a dictionary containing source information and useful
+  source-specific annotations.
+
+The adapter may add any metadata appropriate to its source.
+
+For example:
+
+```python
+{
+    "text": "Example document content.",
+    "metadata": {
+        "source": "example",
+        "path": "documents/example.md",
+        "record_type": "document",
+    },
+}
+```
+
+There is deliberately no universal metadata schema beyond the normalized
+`text` and `metadata` fields.
+
+The purpose of normalization is to give Memoria a stable ingestion shape while
+allowing each source to preserve the information that makes that source useful.
+
+---
+
+## Core Adapter Interface
+
+The existing source adapters follow a small, informal interface rather than a
+shared base class.
+
+A typical adapter provides:
+
+* an iterator over normalized records
+* materialized records when useful
+* a caller-supplied loading method
+* lightweight diagnostics
+
+The exact method names may vary when the source benefits from more specific
+terminology. For example, the Obsidian adapter uses `iter_notes()` because its
+native unit is a note, while the GitHub adapter uses `iter_records()` because
+it produces multiple record types.
+
+### `iter_records()` / source-specific iterator
+
+The primary ingestion interface should be an iterator.
+
+For a generic source:
+
+```python
+def iter_records(self):
+    for record in self.parser.parse():
+        yield self._normalize(record)
+```
+
+For a source with a more specific concept, a descriptive name is fine:
+
+```python
+def iter_notes(self):
+    ...
+```
+
+The iterator should yield normalized records rather than source-specific model
+objects.
+
+Using an iterator keeps discovery and ingestion incremental and avoids forcing
+the entire source to be materialized before processing begins.
+
+### `records()`
+
+Adapters may provide a convenience method returning all normalized records:
+
+```python
+def records(self):
+    return list(self.iter_records())
+```
+
+This is useful for:
+
+* tests
+* diagnostics
+* statistics
+* callers that explicitly need materialized records
+
+It should not replace the streaming iterator as the primary interface for
+large sources.
+
+### `load(insert)`
+
+A source adapter can provide a generic loading interface that accepts a
+caller-supplied insertion function:
+
+```python
+def load(self, insert):
+    if not callable(insert):
+        raise TypeError("insert must be callable")
+
+    count = 0
+
+    for record in self.iter_records():
+        insert(
+            record["text"],
+            record["metadata"],
+        )
+        count += 1
+
+    return count
+```
+
+The callable receives:
+
+```python
+insert(text, metadata)
+```
+
+and the adapter returns the number of records passed to it.
+
+This keeps the adapter independent from any particular Memoria storage
+implementation.
+
+The adapter should not need to construct a database, vector store, ranking
+pipeline, or retrieval engine merely to ingest its source.
+
+### `stats()`
+
+Adapters should provide lightweight source-specific statistics when those
+statistics are useful.
+
+For example:
+
+```python
+def stats(self):
+    records = self.records()
+
+    return {
+        "source": self.source_name,
+        "records": len(records),
+    }
+```
+
+The contents of `stats()` are source-dependent.
+
+Obsidian can report information such as templates, linked notes, and tasks.
+GitHub can report repository, directory, file, and symbol counts.
+
+---
+
+## Adapter Boundaries
+
+A clean adapter has a narrow responsibility.
+
+### The adapter should own
+
+* Source discovery
+* Source-specific parsing
+* Source-specific models
+* Source normalization
+* Source metadata
+* Source-specific validation
+* Lightweight source diagnostics
+* Conversion into normalized Memoria records
+
+### The adapter should not own
+
+* Embedding generation
+* FAISS
+* BM25
+* Retrieval
+* Ranking
+* Reciprocal Rank Fusion
+* MMR
+* Scheduler behavior
+* Memory database management
+* Vector-store management
+* Core memory routing
+* Reimplementation of the Memoria ingestion pipeline
+
+The adapter boundary exists specifically to prevent source-specific ingestion
+logic from leaking into the memory engine.
+
+---
+
+## Keep Parsing Separate From the Adapter
+
+For non-trivial sources, keep source parsing and source models in separate
+modules.
+
+A typical source adapter can be organized as:
+
+```text
+benchmark/
+└── example/
+    ├── __init__.py
+    ├── adapter.py
+    ├── models.py
+    ├── parser.py
+    └── tests/
+        ├── __init__.py
+        └── test_example_adapter.py
+```
+
+The exact structure is not mandatory. It is simply the pattern demonstrated by
+the existing adapters.
+
+### `models.py`
+
+Define source-specific structures here.
+
+For example:
+
+```python
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ExampleRecord:
+    name: str
+    path: str
+    text: str
+    metadata: dict = field(default_factory=dict)
+```
+
+The model represents the source's native concept. It does not need to be the
+same as the final Memoria record.
+
+### `parser.py`
+
+Keep source parsing here:
+
+```python
+class ExampleParser:
+    def __init__(self, source_path: str):
+        self.source_path = source_path
+
+    def parse(self):
+        # Implement source-specific parsing here.
+        raise NotImplementedError
+```
+
+The adapter then converts those source-specific records into:
+
+```python
+{
+    "text": record.text,
+    "metadata": dict(record.metadata),
+}
+```
+
+This separation makes the parser responsible for understanding the source and
+the adapter responsible for presenting that source to Memoria.
+
+---
+
+## Minimal Source Adapter
+
+A minimal source adapter can look like this:
+
+```python
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+
+
+class ExampleAdapter:
+    """Convert an external source into normalized Memoria records."""
+
+    def __init__(self, source_path: str):
+        self.source_path = source_path
+        self.parser = ExampleParser(source_path)
+
+    def iter_records(self) -> Iterator[dict]:
+        """Yield normalized Memoria records."""
+
+        for record in self.parser.parse():
+            yield {
+                "text": record.text,
+                "metadata": dict(record.metadata),
+            }
+
+    def records(self) -> list[dict]:
+        """Return all normalized records."""
+
+        return list(self.iter_records())
+
+    def load(self, insert: Callable[[str, dict], object]) -> int:
+        """Insert normalized records using a supplied callable."""
+
+        if not callable(insert):
+            raise TypeError("insert must be callable")
+
+        count = 0
+
+        for record in self.iter_records():
+            insert(
+                record["text"],
+                record["metadata"],
+            )
+            count += 1
+
+        return count
+
+    def stats(self) -> dict:
+        """Return source-specific statistics."""
+
+        records = self.records()
+
+        return {
+            "source": self.source_path,
+            "records": len(records),
+        }
+```
+
+The exact implementation will vary considerably by source. The important part
+is the boundary:
+
+```text
+source-specific representation
+        ↓
+normalized {text, metadata}
+        ↓
+Memoria
+```
+
+---
+
+## Metadata
+
+Metadata should preserve the information needed to identify and understand the
+source record.
+
+At minimum, include a source identifier when practical:
+
+```python
+{
+    "source": "example",
+}
+```
+
+Useful additional fields may include:
+
+* relative path
+* filename
+* directory
+* repository
+* record type
+* source identifier
+* timestamps
+* tags
+* categories
+* links
+* source-specific IDs
+* symbol information
+
+Metadata should remain JSON-compatible whenever practical.
+
+Do not discard source identifiers merely because they are not required by the
+current retrieval implementation. Metadata is often what makes an ingested
+record traceable back to its original source.
+
+---
+
+## Validation
+
+Validate records at the adapter boundary.
+
+The minimum normalized contract is:
+
+```python
+if not isinstance(record, dict):
+    raise TypeError("Adapter record must be a dict")
+
+if "text" not in record:
+    raise ValueError("Adapter record is missing 'text'")
+
+if "metadata" not in record:
+    raise ValueError("Adapter record is missing 'metadata'")
+
+if not isinstance(record["text"], str):
+    raise TypeError("Adapter record 'text' must be a string")
+
+if not isinstance(record["metadata"], dict):
+    raise TypeError("Adapter record 'metadata' must be a dict")
+```
+
+Source-specific validation belongs in the adapter or parser.
+
+For example, a GitHub adapter may validate repository-specific records, while
+an Obsidian adapter may validate frontmatter, note paths, or parsed task
+structures.
+
+The core ingestion system should not need to know the rules of every external
+source.
+
+---
+
+## Existing Source Adapters
+
+The existing adapters are the authoritative examples of the source ingestion
+pattern.
+
+### Obsidian
+
+`benchmark/obsidian/` converts an Obsidian vault into normalized Memoria
+records while preserving source information such as:
+
+* vault-relative paths
+* filenames
+* folders
+* frontmatter
+* headings
+* wiki-links
+* tasks
+* tags
+* template status
+
+The adapter provides:
+
+```python
+iter_notes()
+records()
+load()
+load_into_memory()
+stats()
+```
+
+`iter_notes()` is the primary iterator because the native source unit is an
+Obsidian note.
+
+`load()` accepts a caller-supplied insertion function, keeping the adapter
+independent of Memoria's storage implementation.
+
+`load_into_memory()` is provided as a convenience integration with the existing
+Memoria `BatchLoader`.
+
+### GitHub
+
+`benchmark/github/` converts a local Git repository into normalized Memoria
+records.
+
+It preserves repository and path information and produces several source-level
+record types:
+
+* repository
+* directory
+* file
+* symbol
+
+The adapter provides:
+
+```python
+iter_records()
+records()
+repository()
+directories()
+files()
+symbols()
+load()
+stats()
+```
+
+The parser and models remain GitHub-specific while the adapter converts their
+records into the common:
+
+```python
+{
+    "text": record.text,
+    "metadata": dict(record.metadata),
+}
+```
+
+shape.
+
+The symbol records also preserve source-specific information such as symbol
+type, qualified name, line ranges, class bases, and parent relationships where
+available.
+
+These two adapters demonstrate an important point: **the normalized ingestion
+contract is small even when the source-specific implementation is complex.**
+
+---
+
+## Testing a Source Adapter
+
+At minimum, test:
+
+1. Source discovery.
+2. Source parsing.
+3. Normalization.
+4. Required `text` and `metadata` fields.
+5. Metadata preservation.
+6. Empty sources.
+7. Invalid source paths or inputs.
+8. `load()` with a supplied insertion function.
+9. `load()` rejecting a non-callable insertion function.
+10. Source-specific behavior.
+
+A basic loading test can use a simple collector:
+
+```python
+inserted = []
+
+
+def insert(text, metadata):
+    inserted.append((text, metadata))
+
+
+count = adapter.load(insert)
+
+if count != len(inserted):
+    raise RuntimeError(
+        "Adapter load count does not match inserted records"
+    )
+```
+
+For adapters with real source fixtures, exercise the adapter against realistic
+source data rather than testing only isolated helper functions.
+
+The Obsidian adapter tests are an example: the test suite can be pointed at an
+actual vault and exercise discovery, parsing, normalization, filtering, and
+loading together.
+
+The GitHub adapter tests similarly exercise the repository parser and the
+normalized repository/directory/file/symbol records.
+
+---
+
+## Source Adapter Checklist
+
+Before considering a source adapter complete:
+
+* [ ] Source discovery works.
+* [ ] Source parsing works.
+* [ ] Records normalize to `{"text": str, "metadata": dict}`.
+* [ ] Useful source metadata is preserved.
+* [ ] Invalid records are rejected.
+* [ ] An iterator over normalized records exists.
+* [ ] `records()` is provided when materialization is useful.
+* [ ] `load()` accepts a caller-supplied insertion function.
+* [ ] `load()` does not own Memoria storage.
+* [ ] `stats()` provides useful diagnostics.
+* [ ] Tests cover normal and invalid input.
+* [ ] Realistic source fixtures are tested when practical.
+* [ ] Source-specific parsing remains isolated from Memoria retrieval.
+* [ ] The adapter does not duplicate retrieval, ranking, fusion, or storage
+  logic.
+
+The goal is a clean boundary:
+
+> **Source knowledge belongs in the adapter. Memory-system behavior belongs in
+> Memoria.**
+
+---
+
+## Benchmark Adapters vs. Source Adapters
+
+Memoria uses the word "adapter" for two related but distinct purposes.
+
+### Benchmark/evaluation adapters
+
+These operate an evaluation methodology.
+
+They are responsible for things such as:
+
+* Dataset loading
+* Question/conversation isolation
+* Gold identifiers
+* Retrieval configuration
+* Evaluation metrics
+* Result formatting
+* Cache management
+* Reproducibility manifests
+
+Examples:
+
+```text
+benchmark/longmemeval_adapter.py
+benchmark/locomoeval_adapter.py
+```
+
+### Source ingestion adapters
+
+These translate an external source into Memoria records.
+
+They are responsible for:
+
+* Source discovery
+* Source parsing
+* Source-specific models
+* Normalization
+* Metadata preservation
+* Source validation
+* Ingestion-facing iteration/loading
+
+Examples:
+
+```text
+benchmark/obsidian/
+benchmark/github/
+```
+
+They are not interchangeable.
+
+A benchmark adapter answers:
+
+> **"How do I evaluate Memoria against this dataset?"**
+
+A source ingestion adapter answers:
+
+> **"How do I turn this external source into Memoria memories?"**
+
+Keeping those responsibilities separate prevents benchmark methodology and
+source ingestion concerns from becoming coupled to the core retrieval engine.
+-----------------------------------------------------------------------------

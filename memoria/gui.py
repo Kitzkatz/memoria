@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Memory Daemon GUI — web-based interface with FastAPI.
+Memoria GUI — web-based interface with FastAPI.
 Runs on port 5000 by default.
 """
 
@@ -25,7 +25,7 @@ except ImportError:
 
 # Query history (optional)
 try:
-    from memory.query_history import get_query_history
+    from memory.query_history import QueryHistory
     HAS_QUERY_HISTORY = True
 except ImportError:
     HAS_QUERY_HISTORY = False
@@ -35,21 +35,25 @@ BASE_DIR = Path(__file__).parent.absolute()
 TEMPLATES_DIR = BASE_DIR / "templates"
 
 app = FastAPI(
-    title="Memory Daemon GUI",
-    version="4.5",
-    description="Web interface for Memory Daemon"
+    title="Memoria GUI",
+    version="1.0",
+    description="Web interface for Memoria"
 )
 
 # Direct interface
 memory = None
+query_history = None
 
 @app.on_event("startup")
 async def startup():
-    global memory
+    global memory, query_history
+
     memory = MemoryInterface()
+
+    if HAS_QUERY_HISTORY:
+        query_history = QueryHistory()
+
     info("[GUI] Memory interface initialized", category="gui")
-
-
 # --------------------------------------------------
 # Root / GUI
 # --------------------------------------------------
@@ -68,7 +72,7 @@ async def gui(request: Request):
             f"""
             <html>
             <body>
-                <h1>Memory Daemon GUI</h1>
+                <h1>Memoria GUI</h1>
                 <p>GUI template not found. Please ensure templates/index.html exists.</p>
                 <p>Looking in: {TEMPLATES_DIR}</p>
                 <p>Status: Running</p>
@@ -314,7 +318,7 @@ async def toggle_signal(request: Request):
                 status = "enabled"
 
         # Clear router cache
-        from ranking.signal_router import SignalRouter
+        
         router = SignalRouter(registry)
         router.clear_cache()
 
@@ -330,159 +334,69 @@ async def toggle_signal(request: Request):
 
 
 # --------------------------------------------------
-# Query History Endpoints (NEW)
+# Query History Endpoints
 # --------------------------------------------------
 
 @app.get("/history")
 async def get_history(
-    query_text: str = Query(None, description="Search by query text"),
-    start_date: str = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: str = Query(None, description="End date (YYYY-MM-DD)"),
-    query_type: str = Query(None, description="Filter by query type"),
-    min_results: int = Query(None, description="Minimum number of results"),
-    max_results: int = Query(None, description="Maximum number of results"),
-    min_score: float = Query(None, description="Minimum score threshold"),
-    limit: int = Query(20, description="Maximum entries to return")
+    mode: str = Query("recent", description="History view: recent, frequent, context, previous"),
+    limit: int = Query(10, description="Maximum entries to return")
 ):
-    """Search query history."""
-    if not HAS_QUERY_HISTORY:
+    """Access query history using the current QueryHistory interface."""
+    if not HAS_QUERY_HISTORY or query_history is None:
         return JSONResponse({"error": "Query history not available"}, status_code=501)
 
     try:
-        history = get_query_history()
-        entries = history.search(
-            query_text=query_text,
-            start_date=start_date,
-            end_date=end_date,
-            query_type=query_type,
-            min_results=min_results,
-            max_results=max_results,
-            min_score=min_score,
-            limit=limit
+        if limit <= 0:
+            return JSONResponse(
+                {"error": "Limit must be greater than 0"},
+                status_code=400
+            )
+
+        mode = mode.lower()
+
+        if mode == "recent":
+            entries = query_history.get_recent(n=limit)
+            return {
+                "mode": "recent",
+                "count": len(entries),
+                "entries": entries,
+            }
+
+        if mode == "frequent":
+            queries = query_history.get_frequent(n=limit)
+            return {
+                "mode": "frequent",
+                "count": len(queries),
+                "queries": queries,
+            }
+
+        if mode == "context":
+            queries = query_history.get_context()
+            return {
+                "mode": "context",
+                "count": len(queries),
+                "queries": queries,
+            }
+
+        if mode == "previous":
+            previous = query_history.get_previous_query()
+            return {
+                "mode": "previous",
+                "query": previous,
+            }
+
+        return JSONResponse(
+            {
+                "error": f"Unknown history mode: {mode}",
+                "available": ["recent", "frequent", "context", "previous"],
+            },
+            status_code=400
         )
-        return {
-            "count": len(entries),
-            "entries": entries
-        }
+
     except Exception as e:
-        error(f"[GUI] History search error: {e}", category="gui")
+        error(f"[GUI] History error: {e}", category="gui")
         return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.get("/history/{entry_id}")
-async def get_history_entry(entry_id: str):
-    """Get a specific history entry by ID."""
-    if not HAS_QUERY_HISTORY:
-        return JSONResponse({"error": "Query history not available"}, status_code=501)
-
-    try:
-        history = get_query_history()
-        entry = history.get_by_id(entry_id)
-        if not entry:
-            return JSONResponse({"error": "Entry not found"}, status_code=404)
-        return entry
-    except Exception as e:
-        error(f"[GUI] History entry error: {e}", category="gui")
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.get("/history/diff")
-async def history_diff(id1: str = Query(..., description="First entry ID"), 
-                       id2: str = Query(..., description="Second entry ID")):
-    """Get diff between two history entries."""
-    if not HAS_QUERY_HISTORY:
-        return JSONResponse({"error": "Query history not available"}, status_code=501)
-
-    try:
-        history = get_query_history()
-        diff_result = history.diff(id1, id2)
-        if "error" in diff_result:
-            return JSONResponse(diff_result, status_code=404)
-        return diff_result
-    except Exception as e:
-        error(f"[GUI] History diff error: {e}", category="gui")
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.get("/history/export")
-async def history_export(
-    format: str = Query("json", description="Export format (json, csv, markdown)"),
-    limit: int = Query(100, description="Number of entries to export"),
-    output: str = Query(None, description="Output filename (optional)")
-):
-    """Export history entries."""
-    if not HAS_QUERY_HISTORY:
-        return JSONResponse({"error": "Query history not available"}, status_code=501)
-
-    try:
-        history = get_query_history()
-        entries = history.get_recent(limit=limit)
-        
-        if not entries:
-            return JSONResponse({"error": "No entries to export"}, status_code=404)
-        
-        content = history.export(entries, format=format)
-        
-        # Set appropriate content type
-        content_types = {
-            "json": "application/json",
-            "csv": "text/csv",
-            "markdown": "text/markdown"
-        }
-        
-        response = JSONResponse({
-            "format": format,
-            "count": len(entries),
-            "content": content
-        })
-        
-        # If output filename provided, return as attachment
-        if output:
-            response.headers["Content-Disposition"] = f"attachment; filename={output}"
-            response.headers["Content-Type"] = content_types.get(format, "text/plain")
-        
-        return response
-        
-    except Exception as e:
-        error(f"[GUI] History export error: {e}", category="gui")
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.get("/history/stats")
-async def history_stats():
-    """Get query history statistics."""
-    if not HAS_QUERY_HISTORY:
-        return JSONResponse({"error": "Query history not available"}, status_code=501)
-
-    try:
-        history = get_query_history()
-        stats = history.get_stats()
-        return stats
-    except Exception as e:
-        error(f"[GUI] History stats error: {e}", category="gui")
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
-@app.delete("/history")
-async def history_clear(older_than_days: int = Query(None, description="Clear entries older than N days")):
-    """Clear query history."""
-    if not HAS_QUERY_HISTORY:
-        return JSONResponse({"error": "Query history not available"}, status_code=501)
-
-    try:
-        history = get_query_history()
-        if older_than_days:
-            count = history.clear(older_than_days=older_than_days)
-            message = f"Cleared {count} entries older than {older_than_days} days"
-        else:
-            count = history.clear()
-            message = f"Cleared {count} entries"
-        return {"cleared": count, "message": message}
-    except Exception as e:
-        error(f"[GUI] History clear error: {e}", category="gui")
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
 # --------------------------------------------------
 # Auto-Store Endpoints (NEW)
 # --------------------------------------------------
@@ -589,13 +503,13 @@ async def health():
         if memory is None:
             return {
                 "status": "initializing",
-                "version": "4.5",
-                "service": "Memory Daemon GUI",
+                "version": "1.0",
+                "service": "Memoria GUI",
             }
         return {
             "status": "ok",
-            "version": "4.5",
-            "service": "Memory Daemon GUI",
+            "version": "1.0",
+            "service": "Memoria GUI",
             "memory_count": memory.controller.system.db.count(),
             "signals_available": HAS_SIGNAL_REGISTRY,
             "query_history_available": HAS_QUERY_HISTORY,
@@ -603,7 +517,7 @@ async def health():
     except Exception as e:
         return {
             "status": "degraded",
-            "version": "4.5",
+            "version": "1.0",
             "error": str(e),
         }
 
@@ -614,16 +528,13 @@ async def stats():
     try:
         stats_data = {
             "memory_count": memory.controller.system.db.count(),
-            "version": "4.5",
+            "version": "1.0",
             "goals": len(memory.list_goals()),
             "signals_available": HAS_SIGNAL_REGISTRY,
             "query_history_available": HAS_QUERY_HISTORY,
         }
         
-        # Add query history stats if available
-        if HAS_QUERY_HISTORY:
-            history = get_query_history()
-            stats_data["history"] = history.get_stats()
+        
         
         # Add auto-store status
         from cache.config import settings
@@ -645,7 +556,7 @@ async def stats():
 def main():
     """Start the GUI server."""
     info("========================================", category="gui")
-    info("      Memory Daemon GUI v4.5", category="gui")
+    info("      Memoria GUI v1.0", category="gui")
     info("========================================", category="gui")
     info(f"   GUI:  http://localhost:5000", category="gui")
     info(f"   API:  http://localhost:5000/docs", category="gui")

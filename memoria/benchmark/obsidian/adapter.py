@@ -66,13 +66,14 @@ class ObsidianAdapter:
             records = self.parser.parse(path)
 
             for record in records:
+                self._validate_record(record)
+
                 if (
                     record["metadata"].get("is_template", False)
                     and not self.include_templates
                 ):
                     continue
 
-                self._validate_record(record)
                 yield record
 
     # --------------------------------------------------

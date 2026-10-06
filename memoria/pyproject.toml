@@ -3,13 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "memoria"
+name = "kitzkatz-memoria"
 version = "1.0.0"
 description = "Local-first cognitive memory engine for LLMs"
 readme = "README.md"
 authors = [{name = "Kitzkatz", email = "Kitzkatz-memoria@proton.me"}]
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.12"
+
 dependencies = [
     "faiss-cpu>=1.7.4",
     "sentence-transformers==5.6.0",
@@ -33,8 +34,10 @@ dependencies = [
     "watchdog>=3.0.0",
     "scipy>=1.10.0",
     "jinja2>=3.1.0",
+    "platformdirs>=4.0.0",
     "pytest>=8.0.0",
 ]
+
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -47,4 +50,19 @@ memoria-mcp = "memoria_mcp.server:main"
 
 [tool.setuptools]
 package-dir = {"" = "."}
-packages = {find = {where = ["."], include = ["*"]}}
+packages = {find = {where = ["."], include = ["*"], exclude = ["tests*", "*.tests*"]}}
+py-modules = ["cli", "tui"]
+
+[tool.setuptools.package-data]
+cache = ["config_template.toml"]
+retrieval = ["synonyms.json"]
+ranking = ["signal_registry.json"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+    "benchmark/obsidian/tests",
+    "core/tests",
+    "benchmark/github/tests",
+    
+]

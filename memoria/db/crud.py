@@ -324,8 +324,13 @@ def update(conn, mem_id, **kwargs):
     for key, value in kwargs.items():
         if key in allowed:
             fields.append(f"{key}=?")
+
+            if key in {"tokens", "metadata", "entities", "relationships"} and value is not None:
+                value = json.dumps(value)
+
             values.append(value)
 
+            
     if not fields:
         return
 

@@ -1,19 +1,156 @@
 """
-Configuration for the Memory Daemon system.
+Configuration for the Memoria system.
 
-All settings are defined in the Settings class, which uses Pydantic for validation.
-Environment variables can override settings by prefixing with "MEMORY_".
+Configuration precedence:
+
+    Built-in defaults
+        ↓
+    User TOML configuration
+        ↓
+    MEMORY_* environment variables
+
+The user configuration is stored in the platform-appropriate application
+configuration directory and is created from the packaged template on first
+run.
+
+Environment variables use the existing MEMORY_<SETTING_NAME> convention.
 """
 
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional, List
+from __future__ import annotations
+
+import json
 import os
+import shutil
+import tomllib
+from importlib.resources import files
+from pathlib import Path
+from typing import Any, List
+
+from platformdirs import user_config_path
+from pydantic import BaseModel, Field, field_validator
+
+
+APP_NAME = "memoria"
+CONFIG_FILENAME = "config.toml"
+TEMPLATE_FILENAME = "config_template.toml"
+
+
+def _user_config_path() -> Path:
+    """Return the persistent user configuration file path."""
+    return user_config_path(APP_NAME) / CONFIG_FILENAME
+
+
+def _ensure_user_config() -> Path:
+    """
+    Ensure a user configuration exists.
+
+    On first run, copy the packaged configuration template into the user's
+    configuration directory. Existing user configuration is never overwritten.
+    """
+    config_path = _user_config_path()
+
+    if config_path.exists():
+        return config_path
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    template = files("cache").joinpath(TEMPLATE_FILENAME)
+
+    if not template.is_file():
+        raise FileNotFoundError(
+            f"Packaged configuration template not found: {TEMPLATE_FILENAME}"
+        )
+
+    with template.open("rb") as source, config_path.open("wb") as destination:
+        shutil.copyfileobj(source, destination)
+
+    return config_path
+
+
+def _load_user_config() -> dict[str, Any]:
+    """Load the persistent user TOML configuration."""
+    config_path = _ensure_user_config()
+
+    with config_path.open("rb") as handle:
+        data = tomllib.load(handle)
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Configuration file must contain a TOML table: {config_path}"
+        )
+
+    return data
+
+
+def _environment_overrides() -> dict[str, Any]:
+    """
+    Read MEMORY_* environment variables.
+
+    Values are converted using the type of the corresponding Settings field.
+    JSON is accepted for list values, while comma-separated values are also
+    supported for convenience.
+    """
+    overrides: dict[str, Any] = {}
+
+    for key, value in os.environ.items():
+        if not key.startswith("MEMORY_"):
+            continue
+
+        setting_name = key[7:]
+        field = Settings.model_fields.get(setting_name)
+
+        if field is None:
+            continue
+
+        annotation = field.annotation
+
+        try:
+            if annotation is bool:
+                overrides[setting_name] = value.lower() in (
+                    "true",
+                    "1",
+                    "yes",
+                    "on",
+                )
+
+            elif annotation is int:
+                overrides[setting_name] = int(value)
+
+            elif annotation is float:
+                overrides[setting_name] = float(value)
+
+            elif annotation == list[str] or annotation == List[str]:
+                try:
+                    parsed = json.loads(value)
+
+                    if not isinstance(parsed, list):
+                        raise ValueError(
+                            f"Expected a JSON list for {key}, got {type(parsed).__name__}"
+                        )
+
+                    overrides[setting_name] = parsed
+
+                except json.JSONDecodeError:
+                    overrides[setting_name] = [
+                        item.strip()
+                        for item in value.split(",")
+                        if item.strip()
+                    ]
+
+            else:
+                overrides[setting_name] = value
+
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid environment value for {key}: {value!r}"
+            ) from exc
+
+    return overrides
 
 
 class Settings(BaseModel):
-    """Main configuration class for the Memory Daemon."""
+    """Main configuration class for Memoria."""
 
-    
     # -------------------------
     # Paths
     # -------------------------
@@ -36,7 +173,9 @@ class Settings(BaseModel):
     LLM_MAX_TOKENS: int = 256
     LLM_TEMPERATURE: float = 0.7
     LLM_TIMEOUT: int = 600
-    LLM_STOP_TOKENS: List[str] = Field(default_factory=lambda: ["<|eot_id|>"])
+    LLM_STOP_TOKENS: List[str] = Field(
+        default_factory=lambda: ["<|eot_id|>"]
+    )
 
     # -------------------------
     # Retrieval
@@ -60,24 +199,20 @@ class Settings(BaseModel):
     USE_PHRASE_SEARCH: bool = True
     USE_BM25: bool = True
     USE_FUSION: bool = True
-    USE_FUSION: bool = True
     USE_TEMPORAL_WORKER: bool = False
-    # FIX (2026-08-24): Rolled back to neutral 0.5. Your upstream retriever was starving.
+
     FUSION_SEMANTIC_WEIGHT: float = 0.5
-    # CRITICAL FIX: The benchmark IGNORED this flag last time and forced MMR ON.
-    # To guarantee it's off, you MUST pass MEMORY_MMR_ENABLED=False as an ENV var.
     RRF_K: int = 10
 
     MMR_ENABLED: bool = False
     USE_BLACKBOARD: bool = True
     USE_CASE_FOLDING: bool = True
-    
 
     # -------------------------
     # Retrieval Workers
     # -------------------------
 
-    WORKERS_TO_USE: List[str] = ["fusion"]  # exclude "graph", "attribute"
+    WORKERS_TO_USE: List[str] = ["fusion"]
 
     # -------------------------
     # Cross-Encoder
@@ -102,9 +237,8 @@ class Settings(BaseModel):
     # -------------------------
     # Ranking
     # -------------------------
-    
 
-    RANKING_ENABLED: bool = False   # Set to False to skip ranking and use raw retrieval scores
+    RANKING_ENABLED: bool = False
     CONTEXT_MAX_MEMORIES: int = 50
     CONTEXT_MIN_SCORE: float = 0.15
     CONTEXT_TOKEN_BUDGET: int = 10000
@@ -130,9 +264,6 @@ class Settings(BaseModel):
     # -------------------------
 
     FINALIZER_USE_SIGMOID: bool = False
-    # FIX (2026-08-24): Scale was 0.015 (brick wall). Changed to 3.0.
-    # Since your scores average ~4.7, sigmoid(4.7/3.0) = sigmoid(1.57) = 0.82.
-    # This gives a healthy spread between #1 and #5 without collapsing to 1.0.
     FINALIZER_SIGMOID_SCALE: float = 0.5
 
     # -------------------------
@@ -170,8 +301,9 @@ class Settings(BaseModel):
     ADAPTIVE_WEIGHT_MIN: float = 0.01
 
     # -------------------------
-    # Ranking Weights (from backup)
+    # Ranking Weights
     # -------------------------
+
     SIGNAL_REGISTRY_PATH: str = "ranking/signal_registry.json"
     ENABLE_SIGNAL_REGISTRY: bool = True
 
@@ -186,19 +318,16 @@ class Settings(BaseModel):
     RANKING_TFIDF: float = 0.15
     RANKING_BM25: float = 0.15
 
-
     # -------------------------
     # Score Normalizer
     # -------------------------
 
-    SCORE_NORMALIZER_METHOD: str = "zscore"  # Options: "zscore" or "minmax"
+    SCORE_NORMALIZER_METHOD: str = "zscore"
 
     # -------------------------
-    # Finalizer Weights (REBALANCED)
+    # Finalizer Weights
     # -------------------------
 
-    # FIX (2026-08-24): Restored Attribute to 0.40 and BM25 to 0.10.
-    # Your Attribute booster was holding the ranking together.
     FINALIZER_RELEVANCE: float = 1.0
     FINALIZER_IMPORTANCE: float = 0.0
     FINALIZER_RECENCY: float = 0.0
@@ -246,18 +375,31 @@ class Settings(BaseModel):
     CLI_SHOW_SCORES: bool = True
     CLI_TABLE_WIDTH: int = 80
 
-    # ---- Plugin System ----
+    # -------------------------
+    # Plugin System
+    # -------------------------
+
     PLUGIN_ENABLED: bool = True
     PLUGIN_DIR: str = "plugins"
     PLUGIN_AUTO_LOAD: bool = True
+    PLUGIN_ENABLED_PLUGINS: List[str] = Field(default_factory=list)
+    PLUGIN_DISABLED_PLUGINS: List[str] = Field(default_factory=list)
 
     # -------------------------
     # Validation
     # -------------------------
 
-    @field_validator("RANKING_SEMANTIC", "RANKING_IMPORTANCE", "RANKING_RECENCY",
-                     "RANKING_TOKEN", "RANKING_FEEDBACK", "RANKING_ENTITY",
-                     "RANKING_SUBJECT", "RANKING_ATTRIBUTE", "RANKING_TFIDF")
+    @field_validator(
+        "RANKING_SEMANTIC",
+        "RANKING_IMPORTANCE",
+        "RANKING_RECENCY",
+        "RANKING_TOKEN",
+        "RANKING_FEEDBACK",
+        "RANKING_ENTITY",
+        "RANKING_SUBJECT",
+        "RANKING_ATTRIBUTE",
+        "RANKING_TFIDF",
+    )
     @classmethod
     def validate_positive_weights(cls, v: float) -> float:
         if v < 0:
@@ -277,20 +419,45 @@ class Settings(BaseModel):
             self.RANKING_TFIDF,
             self.RANKING_BM25,
         ]
+
         total = sum(weights)
+
         if not 0.99 <= total <= 1.01:
-            raise ValueError(f"Ranking weights sum to {total}, expected ~1.0")
+            raise ValueError(
+                f"Ranking weights sum to {total}, expected ~1.0"
+            )
+
         return True
 
     def model_post_init(self, __context):
         self.validate_ranking_weights()
 
 
+def _build_settings() -> Settings:
+    """
+    Build settings using the complete precedence chain:
+
+        defaults < user TOML < MEMORY_* environment
+    """
+    config = _load_user_config()
+    environment = _environment_overrides()
+
+    values = {}
+
+    for name in Settings.model_fields:
+        if name in config:
+            values[name] = config[name]
+
+    values.update(environment)
+
+    return Settings(**values)
+
+
 # -------------------------
 # Settings Instance
 # -------------------------
 
-settings = Settings()
+settings = _build_settings()
 
 
 # -------------------------
@@ -320,26 +487,3 @@ class Safety:
     @staticmethod
     def is_production() -> bool:
         return os.getenv("ENV") == "production"
-
-
-# -------------------------
-# Environment Variable Support
-# -------------------------
-
-def load_from_env():
-    for key, value in os.environ.items():
-        if key.startswith("MEMORY_"):
-            setting_name = key[7:]
-            if hasattr(settings, setting_name):
-                current = getattr(settings, setting_name)
-                if isinstance(current, bool):
-                    setattr(settings, setting_name, value.lower() in ("true", "1", "yes"))
-                elif isinstance(current, int):
-                    setattr(settings, setting_name, int(value))
-                elif isinstance(current, float):
-                    setattr(settings, setting_name, float(value))
-                else:
-                    setattr(settings, setting_name, value)
-
-
-load_from_env()
