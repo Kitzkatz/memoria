@@ -425,6 +425,39 @@ def test_load_empty_vault(tmp_path: Path):
     )
 
 
+def test_text_before_first_heading_is_kept(tmp_path: Path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    (vault / "plain.md").write_text(
+        "No heading here.\n- [ ] loose task\n",
+        encoding="utf-8",
+    )
+    (vault / "intro.md").write_text(
+        "---\ntags: [a]\n---\nIntro text.\n\n# Title\n\nBody.\n- [ ] late task\n",
+        encoding="utf-8",
+    )
+
+    records = {
+        (record["metadata"]["filename"], record["metadata"]["heading"]): record
+        for record in ObsidianAdapter(vault).records()
+    }
+
+    require(
+        set(records) == {("plain", ""), ("intro", ""), ("intro", "Title")},
+        f"Unexpected records: {sorted(records)}",
+    )
+    require(
+        records[("plain", "")]["metadata"]["tasks"][0]["text"] == "loose task",
+        "A headingless note lost its task.",
+    )
+    require(
+        records[("intro", "")]["text"] == "Intro text."
+        and records[("intro", "")]["metadata"]["tasks"] == [],
+        "The text before the first heading was not kept on its own.",
+    )
+
+
 def test_stats_reports_vault_counts(vault_path: Path):
     adapter = ObsidianAdapter(vault_path)
 
