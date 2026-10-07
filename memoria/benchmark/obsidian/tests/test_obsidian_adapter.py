@@ -78,13 +78,14 @@ def _source_path(record: dict) -> str:
     return path
 
 
-def _section_key(record: dict) -> tuple[str, int | None]:
+def _section_key(record: dict) -> tuple[str, int | None, int]:
     """Return a stable identity for one section-level memory."""
     metadata = record["metadata"]
 
     return (
         _source_path(record),
         metadata.get("line_number"),
+        metadata.get("chunk_index", 0),
     )
 
 
@@ -626,6 +627,69 @@ def test_wikilinks_ignore_fenced_code():
     require(
         links[0]["target"] == "Example Project",
         f"Unexpected wikilink target: {links[0]['target']}",
+    )
+
+
+def _write_long_section(tmp_path: Path) -> Path:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    lines = [f"Line {i} about soil moisture and watering." for i in range(30)]
+    lines.append("x" * 700)
+    lines.append("The backup pump is in the blue shed.")
+
+    (vault / "garden.md").write_text(
+        "# Garden\n\n## Irrigation\n\n" + "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+
+    return vault
+
+
+def test_long_sections_are_split_to_max_chars(tmp_path: Path):
+    vault = _write_long_section(tmp_path)
+
+    records = ObsidianAdapter(vault).records()
+
+    require(
+        len(records) > 1,
+        f"Expected the long section to be split, got {len(records)} record.",
+    )
+    require(
+        all(len(record["text"]) <= 512 for record in records),
+        "A chunk is longer than max_chars.",
+    )
+    require(
+        "blue shed" in records[-1]["text"],
+        "The end of the section is missing from the last chunk.",
+    )
+    require(
+        [record["metadata"]["chunk_index"] for record in records]
+        == list(range(len(records))),
+        "Chunks are not numbered in order.",
+    )
+    require(
+        all(
+            record["metadata"]["heading"] == "Irrigation"
+            and record["metadata"]["chunk_count"] == len(records)
+            for record in records
+        ),
+        "Chunks lost their section metadata.",
+    )
+
+
+def test_max_chars_none_keeps_one_record_per_section(tmp_path: Path):
+    vault = _write_long_section(tmp_path)
+
+    records = ObsidianAdapter(vault, max_chars=None).records()
+
+    require(
+        len(records) == 1,
+        f"Expected one unsplit record, got {len(records)}.",
+    )
+    require(
+        "chunk_index" not in records[0]["metadata"],
+        "An unsplit record has chunk metadata.",
     )
 
 

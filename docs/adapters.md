@@ -888,6 +888,12 @@ independent of Memoria's storage implementation.
 `load_into_memory()` is provided as a convenience integration with the existing
 Memoria `BatchLoader`.
 
+The Embedder encodes only the first 512 characters of each record, so the
+adapter splits longer sections into several records by default. Each piece
+keeps the section metadata and adds `chunk_index` and `chunk_count`. Lines stay
+together where they fit. Pass `max_chars` to `ObsidianAdapter` to change the
+limit, or `max_chars=None` to keep one record per section.
+
 ### GitHub
 
 `benchmark/github/` converts a local Git repository into normalized Memoria
