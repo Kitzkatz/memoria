@@ -3,6 +3,7 @@ import json
 import re
 
 from retrieval.case_folding import fold_case
+from retrieval.tokenizer import tokenize
 
 from ingestion.attribute_extractor import AttributeExtractor
 from memory.models import MemoryRecord
@@ -56,20 +57,8 @@ class MemoryExtractor:
         return text.strip()
 
     def tokenize(self, normalized_text: str) -> list:
-        """
-        Simple tokenizer.
-
-        Later this becomes:
-            entity extraction
-            stemming
-            buckets
-            etc.
-
-        Keeping it intentionally simple for V1.
-        """
-        if not normalized_text:
-            return []
-        return normalized_text.split()
+        """Split into the same tokens QueryProcessor uses for queries."""
+        return tokenize(normalized_text)
 
     # ---------------------------------
     # Base Extract

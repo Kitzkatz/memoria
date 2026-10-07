@@ -5,6 +5,7 @@ from typing import List, Optional, Set, Dict, Any
 from functools import lru_cache
 
 from retrieval.case_folding import fold_case
+from retrieval.tokenizer import tokenize
 from ranking.attribute_map import ATTRIBUTE_MAP
 from retrieval.query_models import QueryRecord
 from cache.config import settings   # <-- ADD THIS IMPORT
@@ -74,10 +75,8 @@ class QueryProcessor:
     # -------------------------
 
     def tokenize(self, text: str) -> List[str]:
-        """Split into alphanumeric tokens."""
-        if not text:
-            return []
-        return re.findall(r"\w+", text)
+        """Split into the same tokens MemoryExtractor stores for memories."""
+        return tokenize(text)
 
     # -------------------------
     # Keyword Extraction
