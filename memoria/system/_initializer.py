@@ -299,19 +299,11 @@ def _init_blackboard(system, db, vector_store):
     if getattr(settings, "USE_BM25", False):
         bm25_ranker = BM25()
 
-        memories = db.fetch_all()
-
-        corpus = [
-            m["tokens"]
-            for m in memories
-            if m.get("tokens")
-        ]
-
-        bm25_ranker.build(corpus)
+        indexed = bm25_ranker.build_from_memories(db.fetch_all())
 
         debug(
             f"BM25 built on "
-            f"{len(corpus)} memories"
+            f"{indexed} memories"
         )
 
     # ---- Build inverted index ----

@@ -210,7 +210,7 @@ The query's token representation is submitted to BM25 together with the per-shar
 
 BM25 can operate alongside FAISS rather than replacing it.
 
-The batch storage path can rebuild BM25 from the current token corpus when BM25 is enabled.
+BM25 is built from every stored memory and keyed by memory ID, both at startup and after each batch store.
 
 ---
 
