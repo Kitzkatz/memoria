@@ -112,6 +112,25 @@ class BM25:
 
         self._built = True
 
+    def build_from_memories(self, memories: List[Dict[str, Any]]) -> int:
+        """
+        Build the index from stored memory rows, keyed by their real IDs.
+
+        Rows without tokens are skipped. Returns the number of indexed rows.
+        """
+        memories = [
+            memory
+            for memory in memories
+            if memory.get("tokens")
+        ]
+
+        self.build(
+            [memory["tokens"] for memory in memories],
+            doc_ids=[memory["id"] for memory in memories],
+        )
+
+        return len(memories)
+
     def score(self, query_tokens: List[str], doc_id: Any) -> float:
         """
         Compute BM25 score for a real memory/document ID.

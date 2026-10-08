@@ -226,8 +226,7 @@ def handle_store_many(system, texts, metadatas=None, skip_embedding_build=False)
 
     if hasattr(system, "bm25_ranker") and system.bm25_ranker:
         t0 = time.perf_counter()
-        corpus_tokens = [r.tokens for r in records]
-        system.bm25_ranker.build(corpus_tokens)
+        system.bm25_ranker.build_from_memories(system.db.fetch_all())
         bm25_time = time.perf_counter() - t0
         debug(
             f"[BM25] rebuilt in {bm25_time:.4f}s",
