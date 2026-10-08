@@ -5,29 +5,18 @@ from typing import List, Dict, Set, Optional, Union
 import time
 
 from core.logger import debug
+from retrieval.tokenizer import tokenize
 
 
 class InvertedIndex:
     def __init__(self, db, tokenizer=None):
         self.db = db
-        self.tokenizer = tokenizer or self._default_tokenizer
+        self.tokenizer = tokenizer or tokenize
         self.index: Dict[str, List[int]] = {}
         self.positional_index: Dict[str, Dict[int, List[int]]] = {}
         self.document_frequency: Dict[str, int] = {}
         self.skip_lists: Dict[str, List[tuple]] = {}
         self._built = False
-
-    @staticmethod
-    def _default_tokenizer(text: str) -> List[str]:
-        """Default tokenizer: lowercase, split on whitespace, strip punctuation."""
-        if not text:
-            return []
-        # Lowercase and split
-        text_lower = text.lower()
-        # Simple punctuation stripping
-        for char in ".,!?;:()\"'":
-            text_lower = text_lower.replace(char, " ")
-        return text_lower.split()
 
     def build(self, memory_ids: Optional[List[int]] = None):
         """

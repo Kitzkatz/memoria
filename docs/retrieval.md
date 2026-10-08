@@ -206,6 +206,8 @@ Lower vector distance therefore corresponds to a higher retrieval score.
 
 BM25 provides lexical retrieval over tokenized memories.
 
+Memories and queries are tokenized by `retrieval/tokenizer.py`, which BM25, the inverted index and phrase search share. Tokens are runs of letters and digits, so punctuation never sticks to a word. Hangul, kana and Han text is indexed as overlapping character bigrams, because those scripts attach particles and compounds without spaces.
+
 The query's token representation is submitted to BM25 together with the per-shard candidate limit.
 
 BM25 can operate alongside FAISS rather than replacing it.
