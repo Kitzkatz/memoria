@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterator
 
 from obsidian_parser import Vault
+from obsidian_parser.note import Section
 
 
 class ObsidianParser:
@@ -81,6 +82,24 @@ class ObsidianParser:
 
         records: list[dict] = []
 
+        preamble, first_heading = self._preamble(note)
+
+        if preamble is not None:
+            record = self._section_record(
+                note=note,
+                section=preamble,
+                relative_path=relative_path,
+                is_template=is_template,
+            )
+            record["metadata"]["tasks"] = self._tasks(
+                [
+                    task
+                    for task in note.tasks
+                    if task.line_number < first_heading
+                ]
+            )
+            records.append(record)
+
         for section in self._root_sections(note):
             self._collect_section_records(
                 note=note,
@@ -95,6 +114,40 @@ class ObsidianParser:
     # --------------------------------------------------
     # SECTION WALKING
     # --------------------------------------------------
+
+    @staticmethod
+    def _preamble(note) -> tuple[Section | None, int]:
+        """
+        Return the text before the first heading as a headingless section.
+
+        obsidianmd-parser only creates sections under headings, so a note
+        without headings, or the text above its first heading, would
+        otherwise be dropped. Line numbers count from the end of the
+        frontmatter, as they do for the parser's own sections and tasks.
+        """
+
+        content = note.content
+
+        if content.startswith("---\n"):
+            parts = content.split("---\n", 2)
+
+            if len(parts) == 3:
+                content = parts[2]
+
+        lines = content.splitlines()
+        first_heading = min(
+            (section.line_number for section in note.sections),
+            default=len(lines),
+        )
+        text = "\n".join(lines[:first_heading]).strip()
+
+        if not text:
+            return None, first_heading
+
+        return (
+            Section(heading="", level=0, content=text, line_number=0),
+            first_heading,
+        )
 
     @staticmethod
     def _root_sections(note) -> Iterator:

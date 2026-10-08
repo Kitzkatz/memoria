@@ -882,6 +882,10 @@ stats()
 `iter_notes()` is the primary iterator because the native source unit is an
 Obsidian note.
 
+Each section under a heading becomes one record. Text above the first heading,
+including notes that have no headings at all, becomes a record with an empty
+`heading`.
+
 `load()` accepts a caller-supplied insertion function, keeping the adapter
 independent of Memoria's storage implementation.
 
