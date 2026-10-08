@@ -214,7 +214,7 @@ Memory Daemon has two primary data pipelines:
 - Can be question, command, or prompt
 
 #### 2. Normalize (`QueryProcessor`)
-- Case folding (NFKD)
+- Case folding (NFKC)
 - Tokenization
 - Entity extraction
 - Phrase extraction (quoted text)
