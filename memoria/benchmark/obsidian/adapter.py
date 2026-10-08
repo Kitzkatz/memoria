@@ -22,6 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Iterator
 
+from .chunking import split_text
 from .parser import ObsidianParser
 
 
@@ -33,9 +34,20 @@ class ObsidianAdapter:
         vault_path: str | Path,
         *,
         include_templates: bool = True,
+        max_chars: int | None = 512,
     ):
+        """
+        ``max_chars`` splits sections longer than the Embedder's default
+        512-character limit into several records. Pass ``None`` to keep
+        one record per section.
+        """
         self.vault_path = Path(vault_path).expanduser().resolve()
         self.include_templates = include_templates
+
+        if max_chars is not None and max_chars < 1:
+            raise ValueError("max_chars must be a positive integer or None")
+
+        self.max_chars = max_chars
 
         if not self.vault_path.exists():
             raise FileNotFoundError(
@@ -57,7 +69,8 @@ class ObsidianAdapter:
         """
         Iterate over normalized Memoria records.
 
-        Each non-empty Obsidian section becomes one record.
+        Each non-empty Obsidian section becomes one record, or several
+        when it is longer than ``max_chars``.
         """
 
         paths = self.parser.discover_notes()
@@ -74,7 +87,30 @@ class ObsidianAdapter:
                 ):
                     continue
 
-                yield record
+                yield from self._split_record(record)
+
+    def _split_record(self, record: dict) -> Iterator[dict]:
+        """Yield the record, split into chunks if it is too long."""
+
+        if self.max_chars is None or len(record["text"]) <= self.max_chars:
+            yield record
+            return
+
+        chunks = split_text(record["text"], self.max_chars)
+        tasks = record["metadata"].get("tasks", [])
+
+        for index, chunk in enumerate(chunks):
+            yield {
+                "text": chunk,
+                "metadata": {
+                    **record["metadata"],
+                    "tasks": [
+                        task for task in tasks if task["text"] in chunk
+                    ],
+                    "chunk_index": index,
+                    "chunk_count": len(chunks),
+                },
+            }
 
     # --------------------------------------------------
     # INSERTION
